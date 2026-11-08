@@ -99,6 +99,19 @@ pub fn from_caldav(caldav: &dyn CalDav, at: UnixSeconds) -> Result<Vec<Item>, Co
     Ok(caldav_items(&caldav.open_tasks()?, at))
 }
 
+/// WAIT-2: mark the CalDAV task behind `item` done; Err(CoreError::Parse(..)) for an item that is not a CalDAV task.
+pub fn tick_caldav(caldav: &dyn CalDav, item: &Item) -> Result<Source, CoreError> {
+    match &item.source {
+        Source::CalDavTask { uid } => {
+            caldav.mark_done(uid)?;
+            Ok(item.source.clone())
+        }
+        other => Err(CoreError::Parse(format!(
+            "only a CalDAV task can be ticked done, not {other:?}"
+        ))),
+    }
+}
+
 /// WAIT-1, WAIT-2: my CalDAV tasks (U7: waits for the address and my yes for a credential).
 pub trait CalDav: Send + Sync {
     fn open_tasks(&self) -> Result<Vec<(String, String)>, CoreError>;
