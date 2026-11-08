@@ -68,7 +68,9 @@ pub fn merge(caller: &Caller, job: &MergeJob<'_>, poller: &Poller<'_>) -> Result
     match eligibility(job.pr, job.carried_over) {
         MergeEligibility::Eligible => {}
         MergeEligibility::NoPass => {
-            return Err(CoreError::Refused("no VERDICT: PASS on this PR".to_string()))
+            return Err(CoreError::Refused(
+                "no VERDICT: PASS on this PR".to_string(),
+            ))
         }
         MergeEligibility::PassNotOnHead => {
             return Err(CoreError::Refused(
