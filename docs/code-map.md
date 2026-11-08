@@ -62,7 +62,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 ## Modules
 
 ### core-settings
-`crates/core/src/settings.rs` · CORE-5 · planned. The one settings file: pipeline repo clone, NextCloud backups folder, vault agents folder. `Settings::missing()` names what is not set; `load` gives defaults for a missing file. Read by every module that needs a path. Face: a Settings view (`app/src/views/Settings.tsx`, planned).
+`crates/core/src/settings.rs` · CORE-5 · present. The one settings file: pipeline repo clone, NextCloud backups folder, vault agents folder. `Settings::missing()` names what is not set; `load` gives defaults for a missing file. Read by every module that needs a path. Face: a Settings view (`app/src/views/Settings.tsx`, present).
 
 ### core-fleet
 `crates/core/src/fleet.rs` · CORE-1, CORE-2, AUTO-1 · present. `FleetBridge` runs `<python> <root>/tools/fleet/fleet.py <cmd> --json` (root from settings, `FLEET_ROOT` overrides) and parses it; a non-zero exit or bad JSON is a `FleetError` (command, exit code, stderr), recorded in `FleetErrorLog`, never a guessed value. Tests use `tests/fixtures/fleet-stub/` (`FLEET_STUB_EXIT`, `FLEET_STUB_BADJSON`, answers in `answers/<cmd>.json`). Used by abilities, joblog, budget, github::queue, autopilot, it.
