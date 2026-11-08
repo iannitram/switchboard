@@ -3,5 +3,6 @@
 Newest first. One line per change of stage, release or decision that the next session needs.
 
 
+- 2026-11-08 Roadmap done, stage set to Dev Loop (R26): ROADMAP.md with `Updated:` and the `features:` block (13 features for 1.0, 8 after), docs/code-map.md, the skeleton (Rust workspace: core, CLI, Tauri app; React face; fleet stub fixture) and CI on Linux, Mac and Windows; milestones `1.0` / `After 1.0` and one `feature:<id>` label per feature (R03, R04).
 - 2026-11-08 SPEC.md written as a wayfinder map: 1.0 regions with Musts, routes, waypoints, unknowns, Won'ts, a disposition for every 2026-11-07 review finding and idea, and a proposed Prior art list awaiting my approval (R41).
 - 2026-11-08 Created at Proposal by Kaylee from the pipeline template; glossary and the first decision (0001) seeded.

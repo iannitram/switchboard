@@ -1,0 +1,53 @@
+{
+  "claude": {
+    "verdict": "on-pace",
+    "delta": -1.0,
+    "pct": 2.0,
+    "pct_5h": null,
+    "pace_5h": null,
+    "over_5h_pace": false,
+    "reading_age_min": 65,
+    "room_points": 1.0,
+    "back_under": null,
+    "why": "claude 2.0% vs pace 3.0% (delta -1.0) via csv; window ends Sun Nov 15 4:59am (from the reading)",
+    "stale": false,
+    "source": "csv",
+    "expected": 3.0,
+    "window_end": "2026-11-15T04:59:00-07:00",
+    "pace_from": "reading"
+  },
+  "chatgpt": {
+    "verdict": "brake",
+    "delta": 17.2,
+    "pct": 98.6,
+    "pct_5h": null,
+    "pace_5h": null,
+    "over_5h_pace": false,
+    "reading_age_min": 138,
+    "room_points": 0.0,
+    "back_under": "2026-11-09T14:33:00-07:00",
+    "why": "chatgpt 98.6% vs pace 81.4% (delta +17.2) via csv; STALE: reading is 138 min old (limit 120): re-read before relying on push; window ends Mon Nov 9 3:15pm (from the reading)",
+    "stale": true,
+    "source": "csv",
+    "expected": 81.4,
+    "window_end": "2026-11-09T15:15:00-07:00",
+    "pace_from": "reading"
+  },
+  "claudeapi": {
+    "verdict": "push",
+    "delta": -2.26,
+    "pct": 71.78,
+    "pct_5h": null,
+    "pace_5h": null,
+    "over_5h_pace": false,
+    "reading_age_min": 138,
+    "room_points": 20.0,
+    "back_under": null,
+    "why": "claudeapi 71.8% vs pace 74.0% (delta -2.3) via calibration+ledger; calibration 71.78% at 2026-11-08 09:55 + $0.00 ledger spend since; BURN-DOWN until 2026-11-09T12:00: pace brake ignored, spend to 91.78% (burn cap)",
+    "stale": false,
+    "source": "calibration+ledger",
+    "expected": 74.04,
+    "window_end": "2026-11-15T00:00:00-07:00",
+    "pace_from": "config"
+  }
+}

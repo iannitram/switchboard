@@ -1,0 +1,160 @@
+{
+  "small-code-change-exact-brief": {
+    "label": "Small code change from an exact brief",
+    "writes": true,
+    "needs": [
+      "code",
+      "repo-write",
+      "tools"
+    ],
+    "needs_card": true,
+    "read_only_review": false,
+    "ok": {
+      "claude": "haiku",
+      "chatgpt": {
+        "model": "gpt-6-luna",
+        "effort": "low"
+      },
+      "deepseek": {
+        "model": "deepseek/deepseek-flash",
+        "effort": "-"
+      },
+      "gemini": {
+        "model": "gemini-3.8-flash-medium",
+        "effort": "-"
+      },
+      "qwen": true
+    },
+    "claudeapi": true,
+    "verify": [
+      "tests"
+    ],
+    "notes": ""
+  },
+  "quick-lookup": {
+    "label": "Quick lookup (a fact, a definition, a one-line answer)",
+    "writes": false,
+    "needs": [],
+    "request": true,
+    "first": [
+      "qwen",
+      "gemini"
+    ],
+    "read_only_review": false,
+    "ok": {
+      "claude": null,
+      "chatgpt": null,
+      "deepseek": null,
+      "gemini": {
+        "model": "gemini-3.8-flash-medium",
+        "effort": "-"
+      },
+      "qwen": true
+    },
+    "claudeapi": false,
+    "verify": [],
+    "notes": ""
+  },
+  "general-question": {
+    "label": "General question (no tools, no web)",
+    "writes": false,
+    "needs": [],
+    "request": true,
+    "first": [
+      "gemini",
+      "deepseek"
+    ],
+    "read_only_review": false,
+    "ok": {
+      "claude": null,
+      "chatgpt": null,
+      "deepseek": {
+        "model": "deepseek/deepseek-flash",
+        "effort": "-"
+      },
+      "gemini": {
+        "model": "gemini-3.8-flash-medium",
+        "effort": "-"
+      },
+      "qwen": false
+    },
+    "claudeapi": false,
+    "verify": [],
+    "notes": ""
+  },
+  "web-research": {
+    "label": "Web research (search, sources)",
+    "writes": false,
+    "needs": [
+      "web"
+    ],
+    "request": true,
+    "first": [
+      "chatgpt",
+      "gemini"
+    ],
+    "read_only_review": false,
+    "ok": {
+      "claude": null,
+      "chatgpt": {
+        "model": "gpt-6-luna",
+        "effort": "low"
+      },
+      "deepseek": null,
+      "gemini": {
+        "model": "gemini-3.8-flash-medium",
+        "effort": "-"
+      },
+      "qwen": false
+    },
+    "claudeapi": false,
+    "verify": [],
+    "notes": ""
+  },
+  "writing-editing": {
+    "label": "Writing and editing",
+    "writes": false,
+    "needs": [],
+    "request": true,
+    "first": [
+      "gemini",
+      "claudeapi"
+    ],
+    "read_only_review": false,
+    "ok": {
+      "claude": "sonnet",
+      "chatgpt": null,
+      "deepseek": null,
+      "gemini": {
+        "model": "gemini-3.8-flash-medium",
+        "effort": "-"
+      },
+      "qwen": false
+    },
+    "claudeapi": true,
+    "verify": [],
+    "notes": ""
+  },
+  "judgement-planning": {
+    "label": "Judgement and planning",
+    "writes": false,
+    "needs": [
+      "judgement"
+    ],
+    "request": true,
+    "first": [
+      "claudeapi"
+    ],
+    "read_only_review": false,
+    "ok": {
+      "claude": "sonnet",
+      "chatgpt": null,
+      "deepseek": null,
+      "gemini": null,
+      "qwen": false
+    },
+    "claudeapi": true,
+    "verify": [],
+    "notes": ""
+  }
+}

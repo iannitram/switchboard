@@ -1,0 +1,18 @@
+# One Rust workspace (SPEC.md, Implementation decisions): the core library, the `switchboard`
+# binary (CLI and `switchboard mcp`), and the Tauri app. The Tauri app is a member but not a
+# default member, so `cargo test` runs the core and the CLI without WebKit; build the app with
+# `cargo build -p switchboard-app` inside the build container.
+[workspace]
+resolver = "2"
+members = ["crates/core", "crates/cli", "app/src-tauri"]
+default-members = ["crates/core", "crates/cli"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.80"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+switchboard-core = { path = "crates/core" }

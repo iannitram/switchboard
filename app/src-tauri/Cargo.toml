@@ -1,0 +1,16 @@
+[package]
+name = "switchboard-app"
+description = "Switchboard: the Tauri shell. Its commands are thin calls into switchboard-core."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde.workspace = true
+serde_json.workspace = true
+switchboard-core.workspace = true

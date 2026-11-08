@@ -1,0 +1,14 @@
+[package]
+name = "switchboard-core"
+description = "Switchboard core: every rule, read and write the three faces go through"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+name = "switchboard_core"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
