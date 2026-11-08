@@ -114,7 +114,8 @@ impl SnapshotStore {
     pub fn load_all(&self) -> Result<Vec<RepoSnapshot>, CoreError> {
         let entries = match std::fs::read_dir(&self.dir) {
             Ok(entries) => entries,
-            Err(_) => return Ok(Vec::new()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(CoreError::Io(format!("{}: {e}", self.dir.display()))),
         };
         let mut snaps = Vec::new();
         for entry in entries {
