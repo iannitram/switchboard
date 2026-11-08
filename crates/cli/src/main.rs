@@ -23,8 +23,29 @@ pub struct Args {
 }
 
 /// Parse `std::env::args` (without the program name). Flags may come anywhere.
+/// `--json` sets `json`, `--role <role>` sets `role`, any other word goes to `command` in
+/// order; any other word starting with `--` is an unknown flag.
 pub fn parse_args(argv: &[String]) -> Result<Args, String> {
-    todo!("CLI-1")
+    let mut args = Args {
+        role: None,
+        json: false,
+        command: Vec::new(),
+    };
+    let mut words = argv.iter();
+    while let Some(word) = words.next() {
+        match word.as_str() {
+            "--json" => args.json = true,
+            "--role" => {
+                let role = words
+                    .next()
+                    .ok_or_else(|| "--role needs a value".to_string())?;
+                args.role = Some(role.clone());
+            }
+            flag if flag.starts_with("--") => return Err(format!("unknown flag: {flag}")),
+            _ => args.command.push(word.clone()),
+        }
+    }
+    Ok(args)
 }
 
 /// The real core behind `switchboard mcp`: each read tool calls the same core call the CLI uses
@@ -106,5 +127,61 @@ fn main() -> ExitCode {
             }
         }
         _ => cli::run(&argv),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn words(line: &str) -> Vec<String> {
+        line.split_whitespace().map(String::from).collect()
+    }
+
+    #[test]
+    fn flags_before_and_after_the_command() {
+        let want = Args {
+            role: Some("pm".into()),
+            json: true,
+            command: words("star switchboard#12"),
+        };
+        assert_eq!(
+            parse_args(&words("--json --role pm star switchboard#12")),
+            Ok(want.clone())
+        );
+        assert_eq!(
+            parse_args(&words("star switchboard#12 --role pm --json")),
+            Ok(want.clone())
+        );
+        assert_eq!(
+            parse_args(&words("star --json switchboard#12 --role pm")),
+            Ok(want)
+        );
+    }
+
+    #[test]
+    fn no_flags() {
+        let got = parse_args(&words("budget")).unwrap();
+        assert_eq!(
+            (got.role, got.json, got.command),
+            (None, false, words("budget"))
+        );
+        assert_eq!(parse_args(&[]).unwrap().command, Vec::<String>::new());
+    }
+
+    #[test]
+    fn role_without_a_value() {
+        assert_eq!(
+            parse_args(&words("budget --role")),
+            Err("--role needs a value".to_string())
+        );
+    }
+
+    #[test]
+    fn unknown_flag() {
+        assert_eq!(
+            parse_args(&words("budget --yaml")),
+            Err("unknown flag: --yaml".to_string())
+        );
     }
 }
