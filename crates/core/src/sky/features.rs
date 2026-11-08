@@ -42,6 +42,7 @@ pub fn parse(roadmap_md: &str) -> Result<FeatureBlock, CoreError> {
     let mut updated: Option<String> = None;
     let mut features: Vec<Feature> = Vec::new();
     let mut in_block = false;
+    let mut block_done = false;
 
     for (index, line) in roadmap_md.lines().enumerate() {
         let line_no = index + 1;
@@ -50,12 +51,16 @@ pub fn parse(roadmap_md: &str) -> Result<FeatureBlock, CoreError> {
             updated = Some(line["Updated:".len()..].trim().to_string());
         }
 
+        if block_done {
+            continue;
+        }
         if !in_block {
             in_block = line.trim_end() == "features:";
             continue;
         }
         if !line.starts_with("- ") {
-            break;
+            block_done = true;
+            continue;
         }
 
         let rest = line["- ".len()..]
