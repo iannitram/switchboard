@@ -110,7 +110,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 `crates/core/src/sky/chain.rs` · SKY-3, SKY-7 · present. `Blocked by #N` edges and the longest open chain.
 
 ### sky-codemap
-`crates/core/src/sky/codemap.rs` · SKY-6 · planned. This file's `reuses:` block; a reuse of a Parked or archived repo is a warning.
+`crates/core/src/sky/codemap.rs` · SKY-6 · present. This file's `reuses:` block; a reuse of a Parked or archived repo is a warning.
 
 ### sky-priority
 `crates/core/src/sky/priority.rs` · SKY-9 · present. The priority copy in fleet-state (U4's default), its age, stale after 7 days.
@@ -133,6 +133,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 `crates/core/src/reports.rs`, `app/src/views/Reports.tsx` · REP-1, REP-2, REP-3 · planned. The five-part fixed report from a done card or a thread, its work tree of moves, filters. The report entry is ported from BroCrew.
 
 - REP-1 reports (`from_card`, `from_thread`, `newest_first`, `parse_time`, `project_of`): present.
+- REP-2 moves (`moves`): present.
 - REP-1 view (`ReportEntry`, `ReportList`, `Reports`): present.
 
 ### budget
@@ -151,6 +152,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 
 ### autopilot
 `crates/core/src/autopilot/` · AUTO-1 to AUTO-9 · planned. `may_spend` (budget allow), `review` (R25's ladder as a state machine), `driver` (script loops, Qwen plus one), `instructions` (untracked instruction files; drift of copies), `classify` (by the card, through `fleet errors classify`), `weekly` (Sunday 6am, ROADMAP changes).
+- AUTO-9 classify (`classify`, `from_json`): present.
 
 ### it
 `crates/core/src/it.rs` · IT-1 to IT-4, FD-12 · planned. The loadout from the platform's probe list, unmet `needs`, IT tickets through `fleet errors file`, `it-triage` jobs with `never_on` (waits for U9), ladder-out bugs with the star's `feature:` label.
