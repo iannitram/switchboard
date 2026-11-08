@@ -156,6 +156,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 
 ### mcp
 `crates/cli/src/mcp.rs` · MCP-1 and MCP-2 present; MCP-3 planned. JSON-RPC over stdio; six read tools; role write tools; none inside a job worktree.
+- MCP-3 no write tools in a job worktree: present.
 
 ### shell
 `app/src-tauri/`, `app/src/App.tsx`, `app/src/core.ts` · SHELL-1, SHELL-2, SHELL-3 · present (empty window, wired to the core: `views`, `settings_missing`, `fleet_errors`), the AppImage and the error banner planned. `tools/check-notices.py` (present) lists every file under `app/src/brocrew/` and fails on one without its Apache-2.0 notice. `app/src/brocrew/` holds BroCrew's lifted chat helpers (present): `composer-notice.ts`, `message-links.ts`, `message-paths.ts` and `ipc-types.ts`, all listed in `NOTICE`.
