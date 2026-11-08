@@ -1,0 +1,11 @@
+Switchboard
+
+This product includes software from BroCrew (https://github.com/brocrew/brocrew),
+copyright the BroCrew authors, licensed under the Apache License, Version 2.0.
+A copy of that license is in app/src/brocrew/LICENSE.
+
+Files lifted from BroCrew, each with its notice and a line saying what was changed:
+- app/src/brocrew/composer-notice.ts
+- app/src/brocrew/ipc-types.ts
+- app/src/brocrew/message-links.ts
+- app/src/brocrew/message-paths.ts
