@@ -62,10 +62,88 @@ pub struct Item {
     pub since: UnixSeconds,
 }
 
+/// The label that marks an issue or PR as needing me.
+pub const NEEDS_ME_LABEL: &str = "needs-ian";
+/// The label AUTO-3 puts on a PR when the review ladder reaches Fable.
+pub const AT_FABLE_LABEL: &str = "review:fable";
+
+fn has_label(labels: &[String], label: &str) -> bool {
+    labels.iter().any(|l| l == label)
+}
+
 /// WAIT-1: the items GitHub's snapshot gives (needing-me labels, review FAILs without a fix,
 /// ladders at Fable), for every repo.
 pub fn from_snapshots(snaps: &[RepoSnapshot]) -> Vec<Item> {
-    todo!("WAIT-1")
+    let mut items = Vec::new();
+    for snap in snaps.iter().filter(|s| !s.archived) {
+        let repo = &snap.repo;
+        for issue in snap
+            .issues
+            .iter()
+            .filter(|i| i.state == "open" && has_label(&i.labels, NEEDS_ME_LABEL))
+        {
+            items.push(Item {
+                what: format!("{repo}#{}: {}", issue.number, issue.title),
+                why: format!("Labelled {NEEDS_ME_LABEL}."),
+                source: Source::NeedsMe {
+                    repo: repo.clone(),
+                    number: issue.number,
+                },
+                link: format!("https://github.com/{repo}/issues/{}", issue.number),
+                action: "Open issue".to_string(),
+                since: snap.read_at,
+            });
+        }
+        for pr in snap.pulls.iter().filter(|p| p.state == "open") {
+            let what = format!("{repo}#{}: {}", pr.number, pr.title);
+            let link = format!("https://github.com/{repo}/pull/{}", pr.number);
+            if has_label(&pr.labels, NEEDS_ME_LABEL) {
+                items.push(Item {
+                    what: what.clone(),
+                    why: format!("Labelled {NEEDS_ME_LABEL}."),
+                    source: Source::NeedsMe {
+                        repo: repo.clone(),
+                        number: pr.number,
+                    },
+                    link: link.clone(),
+                    action: "Open PR".to_string(),
+                    since: snap.read_at,
+                });
+            }
+            if pr
+                .verdicts
+                .last()
+                .is_some_and(|v| v.verdict == "FAIL" && v.needs_me)
+            {
+                items.push(Item {
+                    what: what.clone(),
+                    why: "The review posted a FAIL without a fix: a design question or a decision of mine."
+                        .to_string(),
+                    source: Source::ReviewFail {
+                        repo: repo.clone(),
+                        pr: pr.number,
+                    },
+                    link: link.clone(),
+                    action: "Open PR".to_string(),
+                    since: snap.read_at,
+                });
+            }
+            if has_label(&pr.labels, AT_FABLE_LABEL) {
+                items.push(Item {
+                    what,
+                    why: "The review ladder reached Fable.".to_string(),
+                    source: Source::LadderAtFable {
+                        repo: repo.clone(),
+                        pr: pr.number,
+                    },
+                    link,
+                    action: "Open PR".to_string(),
+                    since: snap.read_at,
+                });
+            }
+        }
+    }
+    items
 }
 
 /// WAIT-1: merge every source's items into one list, newest first; ties by `what`.
