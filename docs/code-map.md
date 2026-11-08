@@ -86,7 +86,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 `crates/core/src/github/snapshot.rs` · GH-1 · planned. `RepoSnapshot` (issues, PRs with verdicts and CI on head, milestones, labels, ROADMAP.md, the code map) and `SnapshotStore`: one JSON file per repo under the app's data folder, with its age.
 
 ### github-transport
-`crates/core/src/github/transport.rs` · planned. `GitHubTransport`: GraphQL and REST GET with `If-None-Match`; `Recorded` replays answers in tests. Token from `platform::TokenStore`.
+`crates/core/src/github/transport.rs` · present. `GitHubTransport`: GraphQL and REST GET with `If-None-Match`; `Recorded` replays answers in tests. Token from `platform::TokenStore`.
 
 ### github-poll
 `crates/core/src/github/poll.rs` · GH-1, GH-2, GH-3 · planned. The 10-minute poll (`Poller::tick`), the Refresh button (`refresh_all`), the ETag skip (`unchanged`), refresh-on-action (`after_write`).
