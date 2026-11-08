@@ -4,11 +4,22 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use tauri::Manager;
+
 mod commands;
 
 fn main() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![commands::views])
+        .setup(|app| {
+            let dir = app.path().app_config_dir()?;
+            app.manage(commands::AppState::new(dir.join("settings.json")));
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            commands::views,
+            commands::settings_missing,
+            commands::fleet_errors,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running Switchboard");
 }
