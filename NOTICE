@@ -1,0 +1,7 @@
+Switchboard
+
+This product includes software from BroCrew (https://github.com/brocrew/brocrew),
+copyright the BroCrew authors, licensed under the Apache License, Version 2.0.
+
+Files lifted from BroCrew, each with its notice and a line saying what was changed:
+- app/src/brocrew/WaitingItem.tsx
