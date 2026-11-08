@@ -71,7 +71,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 `crates/core/src/abilities.rs` · the abilities index · planned. Reads `fleet actions --json`: every action and request kind (`"request": true`) with `needs` and `first`. Read by the router (FD-1, FD-3) and FD-12.
 
 ### core-joblog
-`crates/core/src/joblog.rs` · CORE-4 · planned. One `JobRow` shape for ledger attempts and local chat rows; a missing field is `None` and shows as "not recorded". U9's asked fields (`checks`, `escalation_step`, `review_fix_loc`) are in the shape and read as "not recorded" until the pipeline batch writes them. Read by reports, the router (FD-4) and budget.
+`crates/core/src/joblog.rs` · CORE-4 · present. One `JobRow` shape for ledger attempts and local chat rows; a missing field is `None` and shows as "not recorded". U9's asked fields (`checks`, `escalation_step`, `review_fix_loc`) are in the shape and read as "not recorded" until the pipeline batch writes them. Read by reports, the router (FD-4) and budget.
 
 ### core-rules
 `crates/core/src/rules.rs` · CORE-3 (and the worktree test for CLI-3, MCP-3) · planned. `guard(caller, action)` for merge, repo delete and restore over a live repo; the same `Verdict` and text whichever face asks. Called by github::merge, backup restore, cli, mcp and the Tauri commands.
