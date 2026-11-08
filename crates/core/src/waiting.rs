@@ -84,3 +84,16 @@ pub trait CalDav: Send + Sync {
     fn open_tasks(&self) -> Result<Vec<(String, String)>, CoreError>;
     fn mark_done(&self, uid: &str) -> Result<(), CoreError>;
 }
+
+/// WAIT-2: mark the CalDAV task behind `item` done. An item that is not a CalDAV task is
+/// `Err(CoreError::Parse(..))` and `mark_done` is not called. A `mark_done` error comes back
+/// unchanged. On success returns the item's source, for `LocalItems::remove` (#50).
+pub fn tick_caldav(caldav: &dyn CalDav, item: &Item) -> Result<Source, CoreError> {
+    match &item.source {
+        Source::CalDavTask { uid } => {
+            caldav.mark_done(uid)?;
+            Ok(item.source.clone())
+        }
+        _ => Err(CoreError::Parse(format!("not a CalDAV task: {}", item.what))),
+    }
+}
