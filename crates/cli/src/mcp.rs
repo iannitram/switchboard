@@ -54,6 +54,9 @@ const INVALID_PARAMS: i64 = -32602;
 /// Read one JSON-RPC message per line from `reader` and write each reply as one line to
 /// `writer`. Notifications (no `id`) get no reply. A malformed line gets -32700 and the loop
 /// carries on. Returns when the reader ends or fails.
+///
+/// MCP-3: the job-worktree check runs once here, on the current directory. Inside one the role
+/// is dropped, so the list and the calls hold the read tools only.
 pub fn serve<R: BufRead, W: Write>(
     reader: R,
     mut writer: W,
@@ -61,12 +64,25 @@ pub fn serve<R: BufRead, W: Write>(
     role: Option<Role>,
     write: &dyn WriteCore,
 ) -> std::io::Result<()> {
+    let in_job_worktree = match std::env::current_dir() {
+        Ok(dir) => rules::is_job_worktree(&dir),
+        // Cannot tell where we are: fail closed, no write tools.
+        Err(_) => true,
+    };
+    let role = if in_job_worktree {
+        if role.is_some() {
+            eprintln!("switchboard mcp: inside a job worktree; no write tools");
+        }
+        None
+    } else {
+        role
+    };
     for line in reader.lines() {
         let line = line?;
         if line.trim().is_empty() {
             continue;
         }
-        if let Some(reply) = handle(&line, core, role.as_ref(), write) {
+        if let Some(reply) = handle(&line, core, role.as_ref(), write, in_job_worktree) {
             writeln!(writer, "{reply}")?;
             writer.flush()?;
         }
@@ -80,6 +96,7 @@ fn handle(
     core: &dyn ReadCore,
     role: Option<&Role>,
     write: &dyn WriteCore,
+    in_job_worktree: bool,
 ) -> Option<Value> {
     let msg: Value = match serde_json::from_str(line) {
         Ok(msg) => msg,
@@ -109,7 +126,7 @@ fn handle(
         ),
         "ping" => ok(&id, json!({})),
         "tools/list" => ok(&id, json!({ "tools": tools(role) })),
-        "tools/call" => call_tool(&id, &params, core, role, write),
+        "tools/call" => call_tool(&id, &params, core, role, write, in_job_worktree),
         _ => error(
             &id,
             METHOD_NOT_FOUND,
@@ -126,6 +143,7 @@ fn call_tool(
     core: &dyn ReadCore,
     role: Option<&Role>,
     write: &dyn WriteCore,
+    in_job_worktree: bool,
 ) -> Value {
     let name = params
         .get("name")
@@ -139,7 +157,9 @@ fn call_tool(
         return read_call(id, name, &args, core);
     }
     match role {
-        Some(role) if write_tools(role).contains(&name) => write_call(id, name, &args, role, write),
+        Some(role) if write_tools(role).contains(&name) => {
+            write_call(id, name, &args, role, write, in_job_worktree)
+        }
         _ => error(id, INVALID_PARAMS, &format!("unknown tool: {name}")),
     }
 }
@@ -161,10 +181,17 @@ fn read_call(id: &Value, name: &str, args: &Value, core: &dyn ReadCore) -> Value
 
 /// MCP-2: a write tool. `merge` is guarded by CORE-3 here; the rule has no action for a pool
 /// cap, so `set_pool_cap` is gated by its role alone (see `write_tools`).
-fn write_call(id: &Value, name: &str, args: &Value, role: &Role, write: &dyn WriteCore) -> Value {
+fn write_call(
+    id: &Value,
+    name: &str,
+    args: &Value,
+    role: &Role,
+    write: &dyn WriteCore,
+    in_job_worktree: bool,
+) -> Value {
     let outcome = match name {
         "merge" => match (args["repo"].as_str(), args["pr"].as_u64()) {
-            (Some(repo), Some(pr)) => guarded_merge(role, repo, pr, write),
+            (Some(repo), Some(pr)) => guarded_merge(role, repo, pr, write, in_job_worktree),
             _ => {
                 return error(
                     id,
@@ -198,11 +225,17 @@ fn write_call(id: &Value, name: &str, args: &Value, role: &Role, write: &dyn Wri
 
 /// CORE-3 first: `Allow` hands the merge to `WriteCore`, which applies GH-5's rule. A refusal
 /// is the guard's text, the same one the CLI gives; `ToWaiting` also adds a Waiting item.
-fn guarded_merge(role: &Role, repo: &str, pr: u64, write: &dyn WriteCore) -> Result<(), String> {
+fn guarded_merge(
+    role: &Role,
+    repo: &str,
+    pr: u64,
+    write: &dyn WriteCore,
+    in_job_worktree: bool,
+) -> Result<(), String> {
     let caller = Caller {
         face: Face::Mcp,
         role: Some(role.clone()),
-        in_job_worktree: false,
+        in_job_worktree,
         confirmed_in_app: false,
     };
     let action = GuardedAction::Merge {
