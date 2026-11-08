@@ -113,7 +113,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 `crates/core/src/sky/codemap.rs` · SKY-6 · planned. This file's `reuses:` block; a reuse of a Parked or archived repo is a warning.
 
 ### sky-priority
-`crates/core/src/sky/priority.rs` · SKY-9 · planned. The priority copy in fleet-state (U4's default), its age, stale after 7 days.
+`crates/core/src/sky/priority.rs` · SKY-9 · present. The priority copy in fleet-state (U4's default), its age, stale after 7 days.
 
 ### sky-labels
 `crates/core/src/sky/labels.rs` · SKY-10 · present. The `feature:` label for a design-pass issue and an automatic bug.
