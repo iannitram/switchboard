@@ -4,9 +4,12 @@
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use switchboard_core::budget::{self, PoolRow};
+use switchboard_core::budget::{self, PoolEdit, PoolRow};
+use switchboard_core::clock::SystemClock;
 use switchboard_core::fleet::{FleetBridge, FleetError, FleetErrorLog};
+use switchboard_core::waiting::LocalItems;
 use switchboard_core::{settings, CoreError};
+use tauri::Manager;
 
 /// What the shell holds between commands: the settings file's path and this session's fleet
 /// error log.
@@ -118,5 +121,30 @@ pub fn budget_refresh(state: tauri::State<'_, AppState>) -> Result<Vec<PoolRow>,
         .map_err(|e| {
             record_fleet_error(&state, &e);
             FaceError::new("budget_refresh", &e)
+        })
+}
+
+/// BUD-2: save a pool edit to the pipeline clone's config.json, log it in
+/// `<app data dir>/pool-edits.jsonl`, put its Waiting on you item with the local items, and
+/// return the rows read again.
+#[tauri::command]
+pub fn budget_save_edit(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    edit: PoolEdit,
+) -> Result<Vec<PoolRow>, FaceError> {
+    app.path()
+        .app_data_dir()
+        .map_err(|e| CoreError::Io(format!("app data dir: {e}")))
+        .and_then(|data| {
+            let fleet = bridge(&state.settings_path)?;
+            let saved =
+                budget::save_edit(&fleet, &edit, &data.join("pool-edits.jsonl"), &SystemClock)?;
+            LocalItems::new(&data).add(saved.waiting)?;
+            Ok(saved.rows)
+        })
+        .map_err(|e| {
+            record_fleet_error(&state, &e);
+            FaceError::new("budget_save_edit", &e)
         })
 }
