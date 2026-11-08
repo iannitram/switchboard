@@ -191,6 +191,9 @@ impl FleetBridge {
     }
 }
 
+/// CORE-2: how many fleet errors `FleetErrorLog` keeps.
+pub const FLEET_ERROR_LOG_CAP: usize = 50;
+
 /// CORE-2: every fleet error the core has recorded this session, newest last, for the view
 /// and the IT region (IT-2).
 #[derive(Debug, Default)]
@@ -199,7 +202,18 @@ pub struct FleetErrorLog {
 }
 
 impl FleetErrorLog {
+    /// Record `err` as it came (all of stderr, no dedupe), at the end. Once the log is
+    /// over `FLEET_ERROR_LOG_CAP`, drop from the front until it is 50.
     pub fn record(&mut self, err: FleetError) {
-        todo!("CORE-2")
+        self.errors.push(err);
+        if self.errors.len() > FLEET_ERROR_LOG_CAP {
+            let excess = self.errors.len() - FLEET_ERROR_LOG_CAP;
+            self.errors.drain(..excess);
+        }
+    }
+
+    /// The last error recorded, if any.
+    pub fn latest(&self) -> Option<&FleetError> {
+        self.errors.last()
     }
 }
