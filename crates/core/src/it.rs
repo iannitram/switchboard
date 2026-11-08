@@ -2,6 +2,7 @@
 //! another machine (IT-3), and ladder-out coding errors as bugs in the project (IT-4).
 
 use crate::clock::UnixSeconds;
+use crate::fleet::{FleetBridge, FleetError, FleetErrorLog};
 use crate::platform::Probe;
 
 /// IT-1: what this machine can do right now.
@@ -42,6 +43,18 @@ pub fn unmet(needs: &[String], loadout: &Loadout) -> Vec<String> {
 /// IT-2: one ticket per error signature; the repeat comments on it (`fleet errors file`).
 pub fn ticket_title(signature: &str) -> String {
     format!("IT: {signature}")
+}
+
+/// IT-2: hand each recorded fleet error to `fleet errors file`; returns how many it handed over.
+/// `fleet errors file` owns the signature, the `IT: <signature>` title and the repeat comment,
+/// so the core runs it once and passes nothing the log does not hold. An empty log runs
+/// nothing. A failing run is its `FleetError`; the log is only read, never changed.
+pub fn file_error_tickets(bridge: &FleetBridge, log: &FleetErrorLog) -> Result<usize, FleetError> {
+    if log.errors.is_empty() {
+        return Ok(0);
+    }
+    bridge.run_status(&["errors", "file"])?;
+    Ok(log.errors.len())
 }
 
 /// IT-3: the `it-triage` job for `ticket`, or None while the pipeline lacks `never_on` (U9).
