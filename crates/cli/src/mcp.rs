@@ -7,11 +7,21 @@
 use std::io::{BufRead, Write};
 
 use serde_json::{json, Value};
+use switchboard_core::rules::{self, Caller, Face, GuardedAction, Role, Verdict};
 
 /// The core behind the tools. `serve` passes a read tool's name and arguments here and returns
 /// the answer as text. The real core is a thin struct in main.rs.
 pub trait ReadCore {
     fn call(&self, tool: &str, args: &Value) -> Result<Value, String>;
+}
+
+/// The core behind the write tools (MCP-2). The real one is a thin struct in main.rs.
+pub trait WriteCore {
+    /// GH-5's eligibility (PASS on head, CI green) and the merge itself.
+    fn merge(&self, repo: &str, pr: u64) -> Result<(), String>;
+    fn set_pool_cap(&self, pool: &str, cap: f64) -> Result<(), String>;
+    /// A guarded request the CLI or MCP may not run becomes a Waiting on you item.
+    fn waiting(&self, text: &str) -> Result<(), String>;
 }
 
 /// MCP-1: the read tools, in this order.
@@ -23,6 +33,15 @@ pub const READ_TOOLS: [&str; 6] = [
     "reports",
     "budget",
 ];
+
+/// MCP-2: the write tools a role holds, in this order. No role, or a role with none, holds none.
+pub fn write_tools(role: &Role) -> Vec<&'static str> {
+    match role {
+        Role::ProjectManager => vec!["merge"],
+        Role::BudgetManager => vec!["set_pool_cap"],
+        Role::Satellite => vec![],
+    }
+}
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
 const SERVER_NAME: &str = "switchboard";
@@ -39,13 +58,15 @@ pub fn serve<R: BufRead, W: Write>(
     reader: R,
     mut writer: W,
     core: &dyn ReadCore,
+    role: Option<Role>,
+    write: &dyn WriteCore,
 ) -> std::io::Result<()> {
     for line in reader.lines() {
         let line = line?;
         if line.trim().is_empty() {
             continue;
         }
-        if let Some(reply) = handle(&line, core) {
+        if let Some(reply) = handle(&line, core, role.as_ref(), write) {
             writeln!(writer, "{reply}")?;
             writer.flush()?;
         }
@@ -54,7 +75,12 @@ pub fn serve<R: BufRead, W: Write>(
 }
 
 /// The reply to one line, or `None` for a notification.
-fn handle(line: &str, core: &dyn ReadCore) -> Option<Value> {
+fn handle(
+    line: &str,
+    core: &dyn ReadCore,
+    role: Option<&Role>,
+    write: &dyn WriteCore,
+) -> Option<Value> {
     let msg: Value = match serde_json::from_str(line) {
         Ok(msg) => msg,
         Err(e) => {
@@ -82,8 +108,8 @@ fn handle(line: &str, core: &dyn ReadCore) -> Option<Value> {
             }),
         ),
         "ping" => ok(&id, json!({})),
-        "tools/list" => ok(&id, json!({ "tools": tools() })),
-        "tools/call" => call_tool(&id, &params, core),
+        "tools/list" => ok(&id, json!({ "tools": tools(role) })),
+        "tools/call" => call_tool(&id, &params, core, role, write),
         _ => error(
             &id,
             METHOD_NOT_FOUND,
@@ -92,21 +118,36 @@ fn handle(line: &str, core: &dyn ReadCore) -> Option<Value> {
     })
 }
 
-/// `tools/call`: the core's answer as one JSON text content block; a core error as text with
-/// `isError: true`.
-fn call_tool(id: &Value, params: &Value, core: &dyn ReadCore) -> Value {
+/// `tools/call`: a read tool goes to the read core; a write tool the role holds goes through
+/// CORE-3 (MCP-2). Anything else is unknown.
+fn call_tool(
+    id: &Value,
+    params: &Value,
+    core: &dyn ReadCore,
+    role: Option<&Role>,
+    write: &dyn WriteCore,
+) -> Value {
     let name = params
         .get("name")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if !READ_TOOLS.contains(&name) {
-        return error(id, INVALID_PARAMS, &format!("unknown tool: {name}"));
-    }
     let args = params
         .get("arguments")
         .cloned()
         .unwrap_or_else(|| json!({}));
-    match core.call(name, &args) {
+    if READ_TOOLS.contains(&name) {
+        return read_call(id, name, &args, core);
+    }
+    match role {
+        Some(role) if write_tools(role).contains(&name) => write_call(id, name, &args, role, write),
+        _ => error(id, INVALID_PARAMS, &format!("unknown tool: {name}")),
+    }
+}
+
+/// A read tool: the core's answer as one JSON text content block; a core error as text with
+/// `isError: true`.
+fn read_call(id: &Value, name: &str, args: &Value, core: &dyn ReadCore) -> Value {
+    match core.call(name, args) {
         Ok(answer) => ok(
             id,
             json!({ "content": [{ "type": "text", "text": answer.to_string() }], "isError": false }),
@@ -118,8 +159,114 @@ fn call_tool(id: &Value, params: &Value, core: &dyn ReadCore) -> Value {
     }
 }
 
+/// MCP-2: a write tool. `merge` is guarded by CORE-3 here; the rule has no action for a pool
+/// cap, so `set_pool_cap` is gated by its role alone (see `write_tools`).
+fn write_call(id: &Value, name: &str, args: &Value, role: &Role, write: &dyn WriteCore) -> Value {
+    let outcome = match name {
+        "merge" => match (args["repo"].as_str(), args["pr"].as_u64()) {
+            (Some(repo), Some(pr)) => guarded_merge(role, repo, pr, write),
+            _ => {
+                return error(
+                    id,
+                    INVALID_PARAMS,
+                    "merge needs repo (string) and pr (integer)",
+                )
+            }
+        },
+        _ => match (args["pool"].as_str(), args["cap"].as_f64()) {
+            (Some(pool), Some(cap)) => write.set_pool_cap(pool, cap),
+            _ => {
+                return error(
+                    id,
+                    INVALID_PARAMS,
+                    "set_pool_cap needs pool (string) and cap (number)",
+                )
+            }
+        },
+    };
+    match outcome {
+        Ok(()) => ok(
+            id,
+            json!({ "content": [{ "type": "text", "text": format!("{name}: done") }], "isError": false }),
+        ),
+        Err(message) => ok(
+            id,
+            json!({ "content": [{ "type": "text", "text": message }], "isError": true }),
+        ),
+    }
+}
+
+/// CORE-3 first: `Allow` hands the merge to `WriteCore`, which applies GH-5's rule. A refusal
+/// is the guard's text, the same one the CLI gives; `ToWaiting` also adds a Waiting item.
+fn guarded_merge(role: &Role, repo: &str, pr: u64, write: &dyn WriteCore) -> Result<(), String> {
+    let caller = Caller {
+        face: Face::Mcp,
+        role: Some(role.clone()),
+        in_job_worktree: false,
+        confirmed_in_app: false,
+    };
+    let action = GuardedAction::Merge {
+        repo: repo.to_string(),
+        pr,
+    };
+    let verdict = rules::guard(&caller, &action);
+    if let Verdict::ToWaiting(text) = &verdict {
+        write.waiting(text)?;
+    }
+    match verdict.into_result() {
+        Ok(()) => write.merge(repo, pr),
+        Err(refusal) => Err(refusal.to_string()),
+    }
+}
+
+/// MCP-1 and MCP-2: the six read tools, then the role's write tools.
+fn tools(role: Option<&Role>) -> Value {
+    let mut list = read_tools().as_array().cloned().unwrap_or_default();
+    if let Some(role) = role {
+        let held = write_tools(role);
+        let all: [(&str, Value); 2] = [
+            (
+                "merge",
+                json!({
+                    "name": "merge",
+                    "description": "Merge a PR once its latest PASS is on its head and CI is green on that head.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "repo": { "type": "string", "description": "The repo's name, e.g. switchboard" },
+                            "pr": { "type": "integer", "minimum": 1 }
+                        },
+                        "required": ["repo", "pr"]
+                    }
+                }),
+            ),
+            (
+                "set_pool_cap",
+                json!({
+                    "name": "set_pool_cap",
+                    "description": "Set one budget pool's cap.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "pool": { "type": "string", "description": "The pool's name" },
+                            "cap": { "type": "number", "minimum": 0 }
+                        },
+                        "required": ["pool", "cap"]
+                    }
+                }),
+            ),
+        ];
+        list.extend(
+            all.into_iter()
+                .filter(|(name, _)| held.iter().any(|h| h == name))
+                .map(|(_, schema)| schema),
+        );
+    }
+    Value::Array(list)
+}
+
 /// MCP-1: the six read tools with one-sentence descriptions and small input schemas.
-fn tools() -> Value {
+fn read_tools() -> Value {
     let limit = json!({ "type": "integer", "minimum": 1 });
     let repo = json!({ "type": "string", "description": "The repo's name, e.g. switchboard" });
     json!([

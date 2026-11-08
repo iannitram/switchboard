@@ -9,6 +9,8 @@ mod mcp;
 
 use std::process::ExitCode;
 
+use switchboard_core::rules;
+
 /// The parsed command line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Args {
@@ -44,12 +46,58 @@ impl mcp::ReadCore for Core {
     }
 }
 
+/// The real core behind the write tools (MCP-2). Each write answers with the issue that builds
+/// it until then; the guard runs before any of them is called.
+struct Writes;
+
+impl mcp::WriteCore for Writes {
+    fn merge(&self, repo: &str, pr: u64) -> Result<(), String> {
+        Err(format!("merge {repo}#{pr}: not built yet (GH-5)"))
+    }
+
+    fn set_pool_cap(&self, pool: &str, cap: f64) -> Result<(), String> {
+        Err(format!("set_pool_cap {pool}: not built yet (BUD-2)"))
+    }
+
+    fn waiting(&self, text: &str) -> Result<(), String> {
+        Err(format!("waiting: not built yet (WAIT-1, #50): {text}"))
+    }
+}
+
+/// MCP-2: the `--role <role>` flag of `switchboard mcp`; `None` without one. Any other value
+/// is an error, so `serve` never starts.
+fn mcp_role(words: &[String]) -> Result<Option<rules::Role>, String> {
+    let mut words = words.iter();
+    let mut role = None;
+    while let Some(word) = words.next() {
+        let value = match word.as_str() {
+            "--role" => words
+                .next()
+                .map(String::as_str)
+                .ok_or_else(|| "--role needs a value".to_string())?,
+            other => match other.strip_prefix("--role=") {
+                Some(value) => value,
+                None => continue,
+            },
+        };
+        role = Some(rules::Role::parse(value).ok_or_else(|| format!("unknown role: {value}"))?);
+    }
+    Ok(role)
+}
+
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     match argv.first().map(String::as_str) {
         Some("mcp") => {
+            let role = match mcp_role(&argv[1..]) {
+                Ok(role) => role,
+                Err(e) => {
+                    eprintln!("switchboard mcp: {e}");
+                    return ExitCode::from(2);
+                }
+            };
             let stdin = std::io::stdin();
-            match mcp::serve(stdin.lock(), std::io::stdout().lock(), &Core) {
+            match mcp::serve(stdin.lock(), std::io::stdout().lock(), &Core, role, &Writes) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("switchboard mcp: {e}");

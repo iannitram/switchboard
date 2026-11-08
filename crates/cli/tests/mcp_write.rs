@@ -1,0 +1,241 @@
+//! MCP-2: `switchboard mcp --role <role>` adds that role's write tools, each through CORE-3.
+//! The protocol runs over an in-memory pipe against fake cores; the bad-flag case runs the
+//! binary.
+
+// The binary crate has no library target, so the module is compiled in directly.
+#[path = "../src/mcp.rs"]
+#[allow(dead_code)]
+mod mcp;
+
+use std::cell::RefCell;
+use std::io::Write;
+use std::process::{Command, Stdio};
+
+use mcp::{serve, ReadCore, WriteCore};
+use serde_json::{json, Value};
+use switchboard_core::rules::Role;
+
+const READ: [&str; 6] = [
+    "sky",
+    "constellation",
+    "star",
+    "waiting",
+    "reports",
+    "budget",
+];
+
+/// Answers every read with its name and arguments.
+struct FakeRead;
+
+impl ReadCore for FakeRead {
+    fn call(&self, tool: &str, args: &Value) -> Result<Value, String> {
+        Ok(json!({ "tool": tool, "args": args }))
+    }
+}
+
+/// Records what reached it. `no_pass` makes `merge` refuse as GH-5 would: no PASS on head.
+#[derive(Default)]
+struct FakeWrite {
+    no_pass: bool,
+    merged: RefCell<Vec<(String, u64)>>,
+    caps: RefCell<Vec<(String, f64)>>,
+    waiting: RefCell<Vec<String>>,
+}
+
+impl WriteCore for FakeWrite {
+    fn merge(&self, repo: &str, pr: u64) -> Result<(), String> {
+        if self.no_pass {
+            return Err(format!("{repo}#{pr}: no PASS on head"));
+        }
+        self.merged.borrow_mut().push((repo.to_string(), pr));
+        Ok(())
+    }
+
+    fn set_pool_cap(&self, pool: &str, cap: f64) -> Result<(), String> {
+        self.caps.borrow_mut().push((pool.to_string(), cap));
+        Ok(())
+    }
+
+    fn waiting(&self, text: &str) -> Result<(), String> {
+        self.waiting.borrow_mut().push(text.to_string());
+        Ok(())
+    }
+}
+
+/// Send each line to the server and parse every reply line.
+fn run(role: Option<Role>, write: &FakeWrite, lines: &[String]) -> Vec<Value> {
+    let input: String = lines.iter().map(|l| format!("{l}\n")).collect();
+    let mut out: Vec<u8> = Vec::new();
+    serve(input.as_bytes(), &mut out, &FakeRead, role, write).expect("serve");
+    String::from_utf8(out)
+        .expect("utf-8 output")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("each reply is one JSON line"))
+        .collect()
+}
+
+fn request(id: u64, method: &str, params: Value) -> String {
+    json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }).to_string()
+}
+
+fn call(id: u64, name: &str, arguments: Value) -> String {
+    request(
+        id,
+        "tools/call",
+        json!({ "name": name, "arguments": arguments }),
+    )
+}
+
+fn tool_names(role: Option<Role>) -> Vec<String> {
+    let replies = run(
+        role,
+        &FakeWrite::default(),
+        &[request(1, "tools/list", json!({}))],
+    );
+    replies[0]["result"]["tools"]
+        .as_array()
+        .expect("tools array")
+        .iter()
+        .map(|t| t["name"].as_str().unwrap().to_string())
+        .collect()
+}
+
+fn with_extra(extra: &[&str]) -> Vec<String> {
+    READ.iter()
+        .chain(extra.iter())
+        .map(|s| s.to_string())
+        .collect()
+}
+
+#[test]
+fn no_role_lists_only_the_six_read_tools() {
+    assert_eq!(tool_names(None), with_extra(&[]));
+}
+
+#[test]
+fn no_role_merge_is_an_unknown_tool() {
+    let write = FakeWrite::default();
+    let replies = run(
+        None,
+        &write,
+        &[call(4, "merge", json!({ "repo": "switchboard", "pr": 12 }))],
+    );
+    assert_eq!(replies[0]["error"]["code"], -32602);
+    assert_eq!(replies[0]["error"]["message"], "unknown tool: merge");
+    assert!(write.merged.borrow().is_empty());
+}
+
+#[test]
+fn project_manager_lists_merge_after_the_read_tools() {
+    assert_eq!(
+        tool_names(Some(Role::ProjectManager)),
+        with_extra(&["merge"])
+    );
+}
+
+#[test]
+fn project_manager_merge_without_a_pass_on_head_is_refused_and_merges_nothing() {
+    let write = FakeWrite {
+        no_pass: true,
+        ..Default::default()
+    };
+    let replies = run(
+        Some(Role::ProjectManager),
+        &write,
+        &[call(5, "merge", json!({ "repo": "switchboard", "pr": 12 }))],
+    );
+    let result = &replies[0]["result"];
+    assert_eq!(result["isError"], true);
+    assert_eq!(
+        result["content"][0]["text"],
+        "switchboard#12: no PASS on head"
+    );
+    assert!(write.merged.borrow().is_empty());
+}
+
+#[test]
+fn project_manager_merge_with_a_pass_merges_once() {
+    let write = FakeWrite::default();
+    let replies = run(
+        Some(Role::ProjectManager),
+        &write,
+        &[call(6, "merge", json!({ "repo": "switchboard", "pr": 12 }))],
+    );
+    assert_eq!(replies[0]["result"]["isError"], false);
+    assert_eq!(
+        *write.merged.borrow(),
+        vec![("switchboard".to_string(), 12)]
+    );
+}
+
+#[test]
+fn budget_manager_lists_set_pool_cap_and_no_merge() {
+    assert_eq!(
+        tool_names(Some(Role::BudgetManager)),
+        with_extra(&["set_pool_cap"])
+    );
+    let write = FakeWrite::default();
+    let replies = run(
+        Some(Role::BudgetManager),
+        &write,
+        &[call(7, "merge", json!({ "repo": "switchboard", "pr": 12 }))],
+    );
+    assert_eq!(replies[0]["error"]["code"], -32602);
+    assert_eq!(replies[0]["error"]["message"], "unknown tool: merge");
+    assert!(write.merged.borrow().is_empty());
+}
+
+#[test]
+fn budget_manager_set_pool_cap_reaches_the_core_once() {
+    let write = FakeWrite::default();
+    let replies = run(
+        Some(Role::BudgetManager),
+        &write,
+        &[call(
+            8,
+            "set_pool_cap",
+            json!({ "pool": "claude", "cap": 40.0 }),
+        )],
+    );
+    assert_eq!(replies[0]["result"]["isError"], false);
+    assert_eq!(*write.caps.borrow(), vec![("claude".to_string(), 40.0)]);
+}
+
+#[test]
+fn satellite_lists_no_write_tool() {
+    assert_eq!(tool_names(Some(Role::Satellite)), with_extra(&[]));
+    let write = FakeWrite::default();
+    let replies = run(
+        Some(Role::Satellite),
+        &write,
+        &[
+            call(9, "merge", json!({ "repo": "switchboard", "pr": 12 })),
+            call(10, "set_pool_cap", json!({ "pool": "claude", "cap": 40.0 })),
+        ],
+    );
+    for reply in &replies {
+        assert_eq!(reply["error"]["code"], -32602);
+    }
+    assert_eq!(replies[0]["error"]["message"], "unknown tool: merge");
+    assert_eq!(replies[1]["error"]["message"], "unknown tool: set_pool_cap");
+    assert!(write.merged.borrow().is_empty());
+    assert!(write.caps.borrow().is_empty());
+}
+
+#[test]
+fn a_bad_role_exits_before_any_reply() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_switchboard"))
+        .args(["mcp", "--role", "boss"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn switchboard");
+    let mut stdin = child.stdin.take().expect("child stdin");
+    // The server may already have exited; a broken pipe here is the point of the test.
+    let _ = stdin.write_all(format!("{}\n", request(1, "ping", json!({}))).as_bytes());
+    drop(stdin);
+    let output = child.wait_with_output().expect("wait for switchboard");
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty(), "no reply before the error");
+}

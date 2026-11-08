@@ -8,8 +8,25 @@ mod mcp;
 
 use std::cell::RefCell;
 
-use mcp::{serve, ReadCore};
+use mcp::{serve, ReadCore, WriteCore};
 use serde_json::{json, Value};
+
+/// MCP-1 has no write tools: no role is passed, so no write core is ever called.
+struct NoWrites;
+
+impl WriteCore for NoWrites {
+    fn merge(&self, _: &str, _: u64) -> Result<(), String> {
+        unreachable!("no role, no write tools")
+    }
+
+    fn set_pool_cap(&self, _: &str, _: f64) -> Result<(), String> {
+        unreachable!("no role, no write tools")
+    }
+
+    fn waiting(&self, _: &str) -> Result<(), String> {
+        unreachable!("no role, no write tools")
+    }
+}
 
 /// A core that records each call and answers with the tool name and arguments, or `fail`.
 #[derive(Default)]
@@ -34,7 +51,7 @@ impl ReadCore for FakeCore {
 fn run(core: &FakeCore, lines: &[String]) -> Vec<Value> {
     let input: String = lines.iter().map(|l| format!("{l}\n")).collect();
     let mut out: Vec<u8> = Vec::new();
-    serve(input.as_bytes(), &mut out, core).expect("serve");
+    serve(input.as_bytes(), &mut out, core, None, &NoWrites).expect("serve");
     String::from_utf8(out)
         .expect("utf-8 output")
         .lines()
