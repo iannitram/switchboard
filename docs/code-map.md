@@ -148,7 +148,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 `crates/cli/src/main.rs`, `cli.rs` · CLI-1, CLI-2, CLI-3 · planned. Text or `--json`; the same numbers as the GUI; role-flagged writes through `rules::guard`.
 
 ### mcp
-`crates/cli/src/mcp.rs` · MCP-1, MCP-2, MCP-3 · planned. JSON-RPC over stdio; six read tools; role write tools; none inside a job worktree.
+`crates/cli/src/mcp.rs` · MCP-1 present; MCP-2, MCP-3 planned. JSON-RPC over stdio; six read tools; role write tools; none inside a job worktree.
 
 ### shell
 `app/src-tauri/`, `app/src/App.tsx`, `app/src/core.ts` · SHELL-1, SHELL-2, SHELL-3 · present (empty window), the AppImage and the error banner planned. `tools/check-notices.py` (present) lists every file under `app/src/brocrew/` and fails on one without its Apache-2.0 notice. `app/src/brocrew/` holds BroCrew's lifted chat helpers (present): `composer-notice.ts`, `message-links.ts`, `message-paths.ts` and `ipc-types.ts`, all listed in `NOTICE`.
