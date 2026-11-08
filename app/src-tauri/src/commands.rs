@@ -5,7 +5,8 @@ use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use switchboard_core::fleet::{FleetError, FleetErrorLog};
-use switchboard_core::{settings, CoreError};
+use switchboard_core::settings::{self, Settings};
+use switchboard_core::CoreError;
 
 /// What the shell holds between commands: the settings file's path and this session's fleet
 /// error log.
@@ -65,7 +66,14 @@ impl From<&FleetError> for FleetErrorRow {
 /// SHELL-1: the views the window shows, in tab order.
 #[tauri::command]
 pub fn views() -> Vec<&'static str> {
-    vec!["Sky", "Waiting on you", "Reports", "Budget", "Chat"]
+    vec![
+        "Sky",
+        "Waiting on you",
+        "Reports",
+        "Budget",
+        "Chat",
+        "Settings",
+    ]
 }
 
 /// CORE-5: the names of the settings not set, in the core's order.
@@ -74,6 +82,40 @@ pub fn settings_missing(state: tauri::State<'_, AppState>) -> Result<Vec<&'stati
     settings::load(&state.settings_path)
         .map(|s| s.missing())
         .map_err(|e| FaceError::new("settings_missing", &e))
+}
+
+/// CORE-5 as the face reads the settings: the three paths (`null` when not set) and the names
+/// `missing` reports.
+#[derive(Debug, Serialize)]
+pub struct SettingsView {
+    pub settings: Settings,
+    pub missing: Vec<&'static str>,
+}
+
+impl SettingsView {
+    fn of(settings: Settings) -> Self {
+        let missing = settings.missing();
+        Self { settings, missing }
+    }
+}
+
+/// CORE-5: the settings as the file holds them.
+#[tauri::command]
+pub fn settings_get(state: tauri::State<'_, AppState>) -> Result<SettingsView, FaceError> {
+    settings::load(&state.settings_path)
+        .map(SettingsView::of)
+        .map_err(|e| FaceError::new("settings_get", &e))
+}
+
+/// CORE-5: save the settings, then answer as `settings_get` does.
+#[tauri::command]
+pub fn settings_save(
+    state: tauri::State<'_, AppState>,
+    settings: Settings,
+) -> Result<SettingsView, FaceError> {
+    settings::save(&state.settings_path, &settings)
+        .map(|()| SettingsView::of(settings))
+        .map_err(|e| FaceError::new("settings_save", &e))
 }
 
 /// CORE-2: the fleet errors this session recorded, newest first.

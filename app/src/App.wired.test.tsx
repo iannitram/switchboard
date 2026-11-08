@@ -31,12 +31,12 @@ beforeEach(() => {
   mockInvoke.mockReset();
 });
 
-test("the tabs are the five views in order", () => {
+test("the tabs are the six views in order", () => {
   answer({ settings_missing: [] });
   render(<App />);
   const nav = screen.getByRole("navigation", { name: "Views" });
   const names = within(nav).getAllByRole("button").map((b) => b.textContent);
-  expect(names).toEqual(["Sky", "Waiting on you", "Reports", "Budget", "Chat"]);
+  expect(names).toEqual(["Sky", "Waiting on you", "Reports", "Budget", "Chat", "Settings"]);
 });
 
 test("Sky is the view shown first", () => {
