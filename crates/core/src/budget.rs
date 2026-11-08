@@ -3,11 +3,12 @@
 //! All numbers come from `fleet budget --json`; the core never works pace out itself.
 
 use crate::fleet::FleetBridge;
+use crate::joblog::NOT_RECORDED;
 use crate::CoreError;
 use serde_json::Value;
 
 /// BUD-1: one row of the panel, from one pool's entry in `fleet budget --json`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct PoolRow {
     pub pool: String,
     /// Used, percent of the window (`pct`).
@@ -27,7 +28,47 @@ pub struct PoolRow {
 
 /// BUD-1: parse `fleet budget --json` (an object keyed by pool) into rows sorted by pool name.
 pub fn rows_from_json(value: &Value) -> Result<Vec<PoolRow>, CoreError> {
-    todo!("BUD-1")
+    let pools = value
+        .as_object()
+        .ok_or_else(|| CoreError::Parse("budget: expected an object keyed by pool".into()))?;
+    let mut rows = Vec::with_capacity(pools.len());
+    for (pool, entry) in pools {
+        let entry = entry
+            .as_object()
+            .ok_or_else(|| CoreError::Parse(format!("budget: pool {pool} is not an object")))?;
+        rows.push(PoolRow {
+            pool: pool.clone(),
+            pct: entry.get("pct").and_then(|v| v.as_f64()),
+            pace: entry.get("expected").and_then(|v| v.as_f64()),
+            delta: entry.get("delta").and_then(|v| v.as_f64()),
+            verdict: entry
+                .get("verdict")
+                .and_then(|v| v.as_str())
+                .unwrap_or(NOT_RECORDED)
+                .to_string(),
+            reading_age_min: entry
+                .get("reading_age_min")
+                .and_then(|v| v.as_f64())
+                .map(|a| a.floor() as i64),
+            stale: entry
+                .get("stale")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            why: entry
+                .get("why")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+        });
+    }
+    rows.sort_by(|a, b| a.pool.cmp(&b.pool));
+    Ok(rows)
+}
+
+/// BUD-1: run `fleet budget --json` and parse it.
+pub fn read(fleet: &FleetBridge) -> Result<Vec<PoolRow>, CoreError> {
+    let value = fleet.run_json(&["budget"]).map_err(CoreError::Fleet)?;
+    rows_from_json(&value)
 }
 
 /// BUD-2: the fields I can edit in place.
