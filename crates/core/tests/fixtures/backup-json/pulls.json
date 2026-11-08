@@ -1,0 +1,6 @@
+[
+  {"number": 10, "title": "Merged, closes 3", "state": "closed", "merged_at": "2026-11-01T10:00:00Z", "body": "Closes #3"},
+  {"number": 11, "title": "Open, fixes 5", "state": "open", "merged_at": null, "body": "Fixes #5"},
+  {"number": 12, "title": "Closed unmerged, closes 4", "state": "closed", "merged_at": null, "body": "Closes #4"},
+  {"number": 13, "title": "Merged, refs 1 only", "state": "closed", "merged_at": "2026-11-02T09:30:00Z", "body": "Refs #1"}
+]
