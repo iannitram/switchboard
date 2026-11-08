@@ -92,7 +92,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 `crates/core/src/github/poll.rs` · GH-1, GH-2, GH-3 · planned. The 10-minute poll (`Poller::tick`), the Refresh button (`refresh_all`), the ETag skip (`unchanged`), refresh-on-action (`after_write`).
 
 ### github-queue
-`crates/core/src/github/queue.rs` · GH-4 · planned. `send(fleet, creates)`: one `fleet ghq add-batch` then `fleet ghq run`; a stop on a rate limit leaves items queued, never a failure.
+`crates/core/src/github/queue.rs` · GH-4 · present. `send(fleet, creates)`: one `fleet ghq add-batch` then `fleet ghq run`; a stop on a rate limit leaves items queued, never a failure.
 
 ### github-merge
 `crates/core/src/github/merge.rs` · GH-5 · planned. `eligibility(pr, carried_over)` (PASS on head or carried by patch-id, CI green on head) and `merge` through `merge_pr.py` (dry run, then push) after `rules::guard`. Never `gh pr merge` or the merge API.
