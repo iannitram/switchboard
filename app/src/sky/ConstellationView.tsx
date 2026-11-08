@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import type { Constellation, Star } from "./model";
 import { layoutConstellation, RINGS, VIEW } from "./geometry";
+import { starLook } from "./stars";
 
 // SKY-3: one constellation zoomed in. A cluster per feature on its milestone's ring, a star per
 // issue, a dim dark star for a feature with no issue, a line per `Blocked by #N`. The face holds
@@ -70,15 +71,37 @@ export function ConstellationView({
               ) : (
                 f.stars.map((s) => {
                   const q = at.stars.get(s.number)!;
-                  return (
+                  const look = starLook(s);
+                  return look.pulse ? (
                     <circle
                       key={s.number}
                       data-testid="star"
                       data-number={s.number}
+                      data-state={s.state}
+                      data-pulse="true"
                       cx={q.x}
                       cy={q.y}
                       r={10}
                       fill="currentColor"
+                      fillOpacity={look.opacity}
+                      role="button"
+                      aria-label={`#${s.number} ${s.title}`}
+                      onClick={() => onStar?.(s)}
+                    >
+                      <animate data-testid="pulse" attributeName="r" values="10;14;10" dur="1.5s" repeatCount="indefinite" />
+                    </circle>
+                  ) : (
+                    <circle
+                      key={s.number}
+                      data-testid="star"
+                      data-number={s.number}
+                      data-state={s.state}
+                      data-pulse={undefined}
+                      cx={q.x}
+                      cy={q.y}
+                      r={10}
+                      fill="currentColor"
+                      fillOpacity={look.opacity}
                       role="button"
                       aria-label={`#${s.number} ${s.title}`}
                       onClick={() => onStar?.(s)}
