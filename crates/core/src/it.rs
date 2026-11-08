@@ -43,3 +43,21 @@ pub fn unmet(needs: &[String], loadout: &Loadout) -> Vec<String> {
 pub fn ticket_title(signature: &str) -> String {
     format!("IT: {signature}")
 }
+
+/// IT-3: the `it-triage` job for `ticket`, or None while the pipeline lacks `never_on` (U9).
+/// The job carries `never_on: [this_machine]` so `fleet run --next` never gives it back to this
+/// machine, at any hour. It never uses `not_on`, which only applies during quiet hours.
+pub fn triage_job(
+    ticket: u64,
+    this_machine: &str,
+    pipeline_has_never_on: bool,
+) -> Option<serde_json::Value> {
+    if !pipeline_has_never_on {
+        return None;
+    }
+    Some(serde_json::json!({
+        "kind": "it-triage",
+        "ticket": ticket,
+        "never_on": [this_machine],
+    }))
+}
