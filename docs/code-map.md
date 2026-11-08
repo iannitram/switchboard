@@ -133,6 +133,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 `crates/core/src/reports.rs`, `app/src/views/Reports.tsx` · REP-1, REP-2, REP-3 · planned. The five-part fixed report from a done card or a thread, its work tree of moves, filters. The report entry is ported from BroCrew.
 
 - REP-1 reports (`from_card`, `from_thread`, `newest_first`, `parse_time`, `project_of`): present.
+- REP-2 moves (`moves`): present.
 - REP-1 view (`ReportEntry`, `ReportList`, `Reports`): present.
 
 ### budget
