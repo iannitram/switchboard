@@ -77,7 +77,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 `crates/core/src/rules.rs` · CORE-3 (and the worktree test for CLI-3, MCP-3) · planned. `guard(caller, action)` for merge, repo delete and restore over a live repo; the same `Verdict` and text whichever face asks. Called by github::merge, backup restore, cli, mcp and the Tauri commands.
 
 ### core-platform
-`crates/core/src/platform.rs` · the R04 seams · planned. See Platforms above.
+`crates/core/src/platform.rs` · the R04 seams · present. See Platforms above.
 
 ### core-clock, core-error
 `crates/core/src/clock.rs`, `error.rs` · present. The injected clock (`Clock`, `SystemClock`, `FixedClock`) and `CoreError`, the one error faces see.
