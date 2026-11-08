@@ -263,7 +263,13 @@ pub fn unchanged(
     repo: &str,
     etag: Option<&str>,
 ) -> Result<(bool, Option<String>), CoreError> {
-    todo!("GH-2")
+    let path = format!("/repos/{repo}/events");
+    let a = transport.rest_get(&path, etag)?;
+    match a.status {
+        304 => Ok((true, a.etag.or_else(|| etag.map(String::from)))),
+        200 => Ok((false, a.etag)),
+        n => Err(CoreError::GitHub(format!("GET {path} answered {n}"))),
+    }
 }
 
 /// The poller: which repos are due, read them, store them.
@@ -297,12 +303,35 @@ impl Poller<'_> {
             if !due {
                 continue;
             }
-            let etag = stored.as_ref().and_then(|s| s.etag.clone());
-            match self.read_one(repo, etag) {
-                Ok(()) => read.push(repo.clone()),
-                Err(e) => {
-                    first_error.get_or_insert(e);
-                }
+            match &stored {
+                Some(old) => match unchanged(self.transport, repo, old.etag.as_deref()) {
+                    Ok((true, etag)) => {
+                        let mut snap = old.clone();
+                        snap.read_at = now;
+                        snap.etag = etag;
+                        match self.store.save(&snap) {
+                            Ok(()) => read.push(repo.clone()),
+                            Err(e) => {
+                                first_error.get_or_insert(e);
+                            }
+                        }
+                    }
+                    Ok((false, etag)) => match self.read_one(repo, etag) {
+                        Ok(()) => read.push(repo.clone()),
+                        Err(e) => {
+                            first_error.get_or_insert(e);
+                        }
+                    },
+                    Err(e) => {
+                        first_error.get_or_insert(e);
+                    }
+                },
+                None => match self.read_one(repo, None) {
+                    Ok(()) => read.push(repo.clone()),
+                    Err(e) => {
+                        first_error.get_or_insert(e);
+                    }
+                },
             }
         }
         match first_error {
