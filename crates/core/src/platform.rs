@@ -55,11 +55,67 @@ pub struct Probe {
     pub args: &'static [&'static str],
 }
 
+/// The Linux probe list (IT-1). CLIs answer their auth probe (exit 0 means signed in); the
+/// toolchains answer `--version`; llama-swap answers its running list; `fleet` is the fleet CLI
+/// on PATH.
+const LINUX_PROBES: &[Probe] = &[
+    Probe {
+        name: "claude",
+        program: "claude",
+        args: &["auth", "status"],
+    },
+    Probe {
+        name: "codex",
+        program: "codex",
+        args: &["login", "status"],
+    },
+    Probe {
+        name: "gemini",
+        program: "gemini",
+        args: &["--version"],
+    },
+    Probe {
+        name: "gh",
+        program: "gh",
+        args: &["auth", "status"],
+    },
+    Probe {
+        name: "llama-swap",
+        program: "curl",
+        args: &["-fsS", "http://127.0.0.1:8080/running"],
+    },
+    Probe {
+        name: "cargo",
+        program: "cargo",
+        args: &["--version"],
+    },
+    Probe {
+        name: "node",
+        program: "node",
+        args: &["--version"],
+    },
+    Probe {
+        name: "python3",
+        program: "python3",
+        args: &["--version"],
+    },
+    Probe {
+        name: "fleet status",
+        program: "fleet",
+        args: &["status"],
+    },
+    Probe {
+        name: "fleet errors",
+        program: "fleet",
+        args: &["errors"],
+    },
+];
+
 /// The fixed probe list for an OS (IT-1). Linux is filled in 1.0; Mac and Windows return
 /// an empty list until the `platforms` feature.
 pub fn loadout_probes(os: Os) -> &'static [Probe] {
     match os {
-        Os::Linux => todo!("IT-1: probe list"),
+        Os::Linux => LINUX_PROBES,
         Os::Mac => &[],
         Os::Windows => &[],
     }
