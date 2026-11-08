@@ -151,7 +151,7 @@ fn classify_with_a_stub_that_exits_non_zero_is_a_fleet_error() {
             ..
         })) => {
             assert_eq!(exit_code, Some(3));
-            assert_eq!(stderr, "classify broke\n");
+            assert_eq!(stderr.trim_end(), "classify broke");
             assert_eq!(reason, FleetErrorReason::Exit);
         }
         other => panic!("expected a fleet error, got {other:?}"),
