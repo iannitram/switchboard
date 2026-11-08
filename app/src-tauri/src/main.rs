@@ -19,7 +19,8 @@ fn main() {
     tauri::Builder::default()
         .setup(|app| {
             let dir = app.path().app_config_dir()?;
-            app.manage(commands::AppState::new(dir.join("settings.json")));
+            let data = app.path().app_data_dir()?;
+            app.manage(commands::AppState::new(dir.join("settings.json"), data));
             let handle = app.handle().clone();
             std::thread::spawn(move || {
                 let mut timer = RefreshTimer::new(REFRESH_EVERY_SECS);
@@ -50,6 +51,7 @@ fn main() {
             commands::fleet_errors,
             commands::budget_rows,
             commands::budget_refresh,
+            commands::budget_save_edit,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Switchboard");

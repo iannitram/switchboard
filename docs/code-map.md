@@ -139,6 +139,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 `crates/core/src/budget.rs`, `app/src/views/Budget.tsx` · BUD-1 to BUD-4 · planned. Rows from `fleet budget --json`, edits to `config.json` with a ledger row (U5: landed through review), refresh on a timer, Claude's pool as reading plus a labelled estimate from local session logs.
 
 - BUD-1 rows (`rows_from_json`, `read`): present.
+- BUD-2 save (`save_edit`, `parse_reset`, `budget_save_edit`): present.
 - BUD-4 Claude pool (`claude_pool`, `session_log_paths`, `parse_utc`): present.
 - BUD-3 refresh (`refresh`, `RefreshTimer`, `budget_rows`, `budget_refresh`): present.
 - BUD-1 panel (`BudgetPanel`, `Budget`): present.

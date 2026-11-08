@@ -4,21 +4,25 @@
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use switchboard_core::budget::{self, PoolRow};
+use switchboard_core::budget::{self, PoolEdit, PoolRow};
+use switchboard_core::clock::SystemClock;
 use switchboard_core::fleet::{FleetBridge, FleetError, FleetErrorLog};
+use switchboard_core::waiting::LocalItems;
 use switchboard_core::{settings, CoreError};
 
-/// What the shell holds between commands: the settings file's path and this session's fleet
-/// error log.
+/// What the shell holds between commands: the settings file's path, the app data folder and
+/// this session's fleet error log.
 pub struct AppState {
     pub settings_path: PathBuf,
+    pub data_dir: PathBuf,
     pub errors: Mutex<FleetErrorLog>,
 }
 
 impl AppState {
-    pub fn new(settings_path: PathBuf) -> Self {
+    pub fn new(settings_path: PathBuf, data_dir: PathBuf) -> Self {
         Self {
             settings_path,
+            data_dir,
             errors: Mutex::new(FleetErrorLog::default()),
         }
     }
@@ -107,6 +111,30 @@ pub fn budget_rows(state: tauri::State<'_, AppState>) -> Result<Vec<PoolRow>, Fa
         .map_err(|e| {
             record_fleet_error(&state, &e);
             FaceError::new("budget_rows", &e)
+        })
+}
+
+/// BUD-2: save a pool edit to the pipeline clone, append its ledger row, put the Waiting on you
+/// item in the local list, then return the re-read rows.
+#[tauri::command]
+pub fn budget_save_edit(
+    edit: PoolEdit,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<PoolRow>, FaceError> {
+    bridge(&state.settings_path)
+        .and_then(|fleet| {
+            let log = state.data_dir.join("pool-edits.jsonl");
+            budget::save_edit(&fleet, &edit, &log, &SystemClock)
+        })
+        .and_then(|saved| {
+            let rows = saved.rows;
+            LocalItems::new(&state.data_dir)
+                .add(saved.waiting)
+                .map(|()| rows)
+        })
+        .map_err(|e| {
+            record_fleet_error(&state, &e);
+            FaceError::new("budget_save_edit", &e)
         })
 }
 
