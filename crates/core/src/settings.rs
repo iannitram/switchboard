@@ -18,24 +18,58 @@ pub struct Settings {
 pub const SETTING_NAMES: [&str; 3] = ["pipeline_repo", "nextcloud_backups", "vault_agents"];
 
 impl Settings {
-    /// The names of the paths not set, in `SETTING_NAMES` order.
+    /// The names of the paths not set, in `SETTING_NAMES` order. An empty path counts as not set.
     pub fn missing(&self) -> Vec<&'static str> {
-        todo!("CORE-5")
+        let unset = |p: &Option<PathBuf>| p.as_deref().map_or(true, |p| p.as_os_str().is_empty());
+        let values = [
+            unset(&self.pipeline_repo),
+            unset(&self.nextcloud_backups),
+            unset(&self.vault_agents),
+        ];
+        SETTING_NAMES
+            .iter()
+            .zip(values.iter())
+            .filter(|(_, &unset)| unset)
+            .map(|(name, _)| *name)
+            .collect()
     }
 
     /// The pipeline repo, or `CoreError::MissingPath("pipeline_repo")`.
     pub fn pipeline_repo(&self) -> Result<&Path, CoreError> {
-        todo!("CORE-5")
+        match self.pipeline_repo.as_deref() {
+            Some(p) if !p.as_os_str().is_empty() => Ok(p),
+            _ => Err(CoreError::MissingPath("pipeline_repo")),
+        }
     }
 }
 
 /// Read the settings file. A file that does not exist is `Settings::default()`; one that does
-/// not parse is `CoreError::Parse`.
+/// not parse is `CoreError::Parse`, naming the file. Keys that are not known are ignored.
 pub fn load(path: &Path) -> Result<Settings, CoreError> {
-    todo!("CORE-5")
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Settings::default()),
+        Err(e) => return Err(CoreError::Io(format!("{}: {e}", path.display()))),
+    };
+    serde_json::from_str(&text).map_err(|e| CoreError::Parse(format!("{}: {e}", path.display())))
 }
 
-/// Write the settings file as pretty JSON, creating its folder.
+/// Write the settings file as pretty JSON, creating its folder. The write goes to a `.tmp` file
+/// first and is renamed over the settings file, so a failure leaves the old file in place.
 pub fn save(path: &Path, settings: &Settings) -> Result<(), CoreError> {
-    todo!("CORE-5")
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| CoreError::Io(format!("{}: {e}", parent.display())))?;
+    }
+    let text =
+        serde_json::to_string_pretty(settings).map_err(|e| CoreError::Parse(format!("{e}")))?;
+    let mut tmp = path.to_path_buf();
+    if let Some(name) = path.file_name() {
+        let mut file_name = name.to_os_string();
+        file_name.push(".tmp");
+        tmp.set_file_name(file_name);
+    }
+    std::fs::write(&tmp, text).map_err(|e| CoreError::Io(format!("{}: {e}", tmp.display())))?;
+    std::fs::rename(&tmp, path).map_err(|e| CoreError::Io(format!("{}: {e}", path.display())))?;
+    Ok(())
 }
