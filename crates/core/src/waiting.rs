@@ -76,7 +76,14 @@ pub fn merge(lists: Vec<Vec<Item>>) -> Vec<Item> {
 /// WAIT-3: the items of `next` only: an item in `previous` whose source is not in `next` is
 /// dropped; one still there keeps its `since` from `previous`.
 pub fn carry(previous: &[Item], next: Vec<Item>) -> Vec<Item> {
-    todo!("WAIT-3")
+    next.into_iter()
+        .map(|mut item| {
+            if let Some(old) = previous.iter().find(|old| old.source == item.source) {
+                item.since = old.since;
+            }
+            item
+        })
+        .collect()
 }
 
 /// WAIT-1: one item per open CalDAV task, `since` = `at`.
