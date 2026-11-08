@@ -84,3 +84,23 @@ pub trait CalDav: Send + Sync {
     fn open_tasks(&self) -> Result<Vec<(String, String)>, CoreError>;
     fn mark_done(&self, uid: &str) -> Result<(), CoreError>;
 }
+
+/// WAIT-1: one item per open CalDAV task, `since` = `at`.
+pub fn caldav_items(tasks: &[(String, String)], at: UnixSeconds) -> Vec<Item> {
+    tasks
+        .iter()
+        .map(|(uid, summary)| Item {
+            what: summary.clone(),
+            why: "A task of mine in CalDAV (U7).".to_string(),
+            source: Source::CalDavTask { uid: uid.clone() },
+            link: format!("caldav:{uid}"),
+            action: "Mark done".to_string(),
+            since: at,
+        })
+        .collect()
+}
+
+/// WAIT-1: ask `caldav` for its open tasks; its error is returned as it is.
+pub fn from_caldav(caldav: &dyn CalDav, at: UnixSeconds) -> Result<Vec<Item>, CoreError> {
+    Ok(caldav_items(&caldav.open_tasks()?, at))
+}
