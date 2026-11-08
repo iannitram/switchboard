@@ -18,7 +18,27 @@ pub struct Placement {
 
 /// SKY-1: rank to radius and size, top 3 large and in the middle. `repos` is the priority order.
 pub fn place(repos: &[String]) -> Vec<Placement> {
-    todo!("SKY-1")
+    let n = repos.len();
+    let golden = std::f64::consts::PI * (3.0 - 5f64.sqrt());
+    repos
+        .iter()
+        .enumerate()
+        .map(|(rank, repo)| {
+            let (radius, size) = if rank < 3 {
+                (0.1 * rank as f64, 1.0)
+            } else {
+                let f = (rank - 3) as f64 / (n - 3) as f64;
+                (0.35 + 0.65 * f, 0.6 - 0.4 * f)
+            };
+            Placement {
+                repo: repo.clone(),
+                rank,
+                radius,
+                size,
+                angle: (rank as f64 * golden) % std::f64::consts::TAU,
+            }
+        })
+        .collect()
 }
 
 /// SKY-2: progress to 1.0, 0.0 to 1.0: closed stars in the `1.0` milestone over all stars in
