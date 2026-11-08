@@ -107,7 +107,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 `crates/core/src/sky/drift.rs` · SKY-5 · planned. Orphan stars, `release: 1.0` dark stars, a roadmap more than 14 days old.
 
 ### sky-chain
-`crates/core/src/sky/chain.rs` · SKY-3, SKY-7 · planned. `Blocked by #N` edges and the longest open chain.
+`crates/core/src/sky/chain.rs` · SKY-3, SKY-7 · present. `Blocked by #N` edges and the longest open chain.
 
 ### sky-codemap
 `crates/core/src/sky/codemap.rs` · SKY-6 · planned. This file's `reuses:` block; a reuse of a Parked or archived repo is a warning.
