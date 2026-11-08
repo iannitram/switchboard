@@ -2,6 +2,7 @@
 //! (BUD-3), and Claude's pool from its newest recorded reading plus a marked estimate (BUD-4).
 //! All numbers come from `fleet budget --json`; the core never works pace out itself.
 
+use crate::clock::{Clock, UnixSeconds};
 use crate::fleet::FleetBridge;
 use crate::joblog::NOT_RECORDED;
 use crate::CoreError;
@@ -89,9 +90,53 @@ pub fn save_edit(fleet: &FleetBridge, edit: &PoolEdit) -> Result<Vec<PoolRow>, C
     todo!("BUD-2")
 }
 
-/// BUD-3: refresh every pool that has a reader (`fleet budget --refresh`).
+/// BUD-3: refresh every pool that has a reader (`fleet budget --refresh --json`).
 pub fn refresh(fleet: &FleetBridge) -> Result<Vec<PoolRow>, CoreError> {
-    todo!("BUD-3")
+    let value = fleet
+        .run_json(&["budget", "--refresh"])
+        .map_err(CoreError::Fleet)?;
+    rows_from_json(&value)
+}
+
+/// BUD-3: fleet's gate_fresh_minutes (30) in seconds.
+pub const REFRESH_EVERY_SECS: i64 = 30 * 60;
+
+/// BUD-3: when the budget is next refreshed, on the injected clock. The first tick is always
+/// due; after that a refresh waits `every` seconds from the last attempt, failed or not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefreshTimer {
+    every: i64,
+    last: Option<UnixSeconds>,
+}
+
+impl RefreshTimer {
+    pub fn new(every: i64) -> Self {
+        Self { every, last: None }
+    }
+
+    /// Due at once if it never ran; otherwise `every` seconds after the last attempt. A clock
+    /// behind the last attempt is not due.
+    pub fn due(&self, now: UnixSeconds) -> bool {
+        match self.last {
+            None => true,
+            Some(last) => now.saturating_sub(last) >= self.every,
+        }
+    }
+
+    /// Refresh if due at the clock's time, recording that attempt first so a failed refresh
+    /// still waits the full interval. `None` when not due (fleet is not run).
+    pub fn tick(
+        &mut self,
+        fleet: &FleetBridge,
+        clock: &dyn Clock,
+    ) -> Option<Result<Vec<PoolRow>, CoreError>> {
+        let now = clock.now();
+        if !self.due(now) {
+            return None;
+        }
+        self.last = Some(now);
+        Some(refresh(fleet))
+    }
 }
 
 /// BUD-4: Claude's pool: the newest recorded `get_usage` reading with its age, plus an estimate
