@@ -129,6 +129,8 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 ### reports
 `crates/core/src/reports.rs`, `app/src/views/Reports.tsx` · REP-1, REP-2, REP-3 · planned. The five-part fixed report from a done card or a thread, its work tree of moves, filters. The report entry is ported from BroCrew.
 
+- REP-1 reports (`from_card`, `from_thread`, `newest_first`, `parse_time`, `project_of`): present.
+
 ### budget
 `crates/core/src/budget.rs`, `app/src/views/Budget.tsx` · BUD-1 to BUD-4 · planned. Rows from `fleet budget --json`, edits to `config.json` with a ledger row (U5: landed through review), refresh on a timer, Claude's pool as reading plus a labelled estimate from local session logs.
 
