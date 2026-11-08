@@ -32,12 +32,24 @@ fn gemini_running_lets_qwen_start_but_no_other_service_lane() {
 #[test]
 fn qwen_and_gemini_running_lets_no_lane_start() {
     let r = running(&["qwen", "gemini"]);
-    for &lane in ["qwen", "gemini", "chatgpt", "claudeapi", "claude", "deepseek"].iter() {
+    for &lane in [
+        "qwen",
+        "gemini",
+        "chatgpt",
+        "claudeapi",
+        "claude",
+        "deepseek",
+    ]
+    .iter()
+    {
         assert!(!may_start(&r, lane), "{lane} may not start");
     }
 }
 
 #[test]
 fn next_command_is_the_fleet_run_for_the_lane() {
-    assert_eq!(next_command("gemini"), vec!["fleet", "run", "--next", "--lane", "gemini"]);
+    assert_eq!(
+        next_command("gemini"),
+        vec!["fleet", "run", "--next", "--lane", "gemini"]
+    );
 }
