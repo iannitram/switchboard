@@ -21,7 +21,21 @@ pub enum MergeEligibility {
 /// is an update from main with the same patch-id (`carried_over`, worked out by the caller
 /// with `git patch-id`).
 pub fn eligibility(pr: &PullRequest, carried_over: bool) -> MergeEligibility {
-    todo!("GH-5")
+    // The list is oldest first, so the last verdict is the latest one. Only a PASS counts.
+    let latest = match pr.verdicts.last() {
+        Some(v) if v.verdict == "PASS" => v,
+        _ => return MergeEligibility::NoPass,
+    };
+    // An older PASS is good only when every later commit is a carried-over update from main.
+    if latest.sha != pr.head_sha && !carried_over {
+        return MergeEligibility::PassNotOnHead;
+    }
+    // CI is checked last, and `carried_over` never rescues it.
+    if pr.ci_on_head == "success" {
+        MergeEligibility::Eligible
+    } else {
+        MergeEligibility::CiNotGreen(pr.ci_on_head.clone())
+    }
 }
 
 /// GH-5, AUTO-4: merge through `merge_pr.py merge <clone> main origin/<branch> --pr N --repo R`,
