@@ -2,11 +2,15 @@
 //! where it came from, and one action (WAIT-1); ticking a CalDAV task marks it done (WAIT-2);
 //! an item whose source clears drops at the next read (WAIT-3).
 
+use std::path::{Path, PathBuf};
+
 use crate::clock::UnixSeconds;
 use crate::github::RepoSnapshot;
+use crate::rules::GuardedAction;
+use crate::sky::priority::{self, PriorityCopy, STALE_DAYS};
 use crate::CoreError;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Source {
     CalDavTask {
         uid: String,
@@ -50,7 +54,7 @@ pub enum Source {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Item {
     pub what: String,
     pub why: String,
@@ -68,9 +72,144 @@ pub fn from_snapshots(snaps: &[RepoSnapshot]) -> Vec<Item> {
     todo!("WAIT-1")
 }
 
+/// WAIT-1, FD-8: a Claude handoff not yet opened; `summary` is the chat's one-line ask.
+pub fn handoff_item(handoff_id: &str, summary: &str, at: UnixSeconds) -> Item {
+    Item {
+        what: format!("Open the Claude handoff: {summary}"),
+        why: "A chat was handed to Claude and is not opened yet (FD-8).".to_string(),
+        source: Source::Handoff {
+            handoff_id: handoff_id.to_string(),
+        },
+        link: format!("handoff:{handoff_id}"),
+        action: "Open in Claude".to_string(),
+        since: at,
+    }
+}
+
+/// WAIT-1, CORE-3: a guarded action asked for from the CLI or MCP; `text` is the guard's
+/// `Verdict::ToWaiting` text.
+pub fn guarded_item(action: &GuardedAction, text: &str, at: UnixSeconds) -> Item {
+    let link = match action {
+        GuardedAction::Merge { repo, pr } => format!("https://github.com/{repo}/pull/{pr}"),
+        GuardedAction::DeleteRepo { repo } | GuardedAction::RestoreOverLive { repo } => {
+            format!("https://github.com/{repo}")
+        }
+    };
+    Item {
+        what: text.to_string(),
+        why: "Asked for from the CLI or MCP; only the app can do it, after I confirm (CORE-3)."
+            .to_string(),
+        source: Source::GuardedAction {
+            text: text.to_string(),
+        },
+        link,
+        action: "Confirm in the app".to_string(),
+        since: at,
+    }
+}
+
+/// WAIT-1, BAK-2: a refused backup; `reason` is `backup::refuse_reason`'s text, `dir` the
+/// backup folder that kept the old copy.
+pub fn refused_backup_item(repo: &str, reason: &str, dir: &Path, at: UnixSeconds) -> Item {
+    Item {
+        what: format!("Check the {repo} backup"),
+        why: format!("The new backup was refused and the old one kept: {reason}"),
+        source: Source::RefusedBackup {
+            repo: repo.to_string(),
+        },
+        link: dir.display().to_string(),
+        action: "Open the backup folder".to_string(),
+        since: at,
+    }
+}
+
+/// WAIT-1, SKY-9: the item for a stale priority copy, `None` while it is fresh.
+pub fn stale_priority_item(copy: &PriorityCopy, path: &Path, now: UnixSeconds) -> Option<Item> {
+    if !priority::is_stale(copy, now) {
+        return None;
+    }
+    Some(Item {
+        what: "Refresh the priority copy".to_string(),
+        why: format!(
+            "The priority copy is {} days old; the sky does not trust it after {STALE_DAYS} days.",
+            priority::age_days(copy, now)
+        ),
+        source: Source::StalePriority,
+        link: path.display().to_string(),
+        action: "Refresh in Claude".to_string(),
+        since: copy.updated_at + STALE_DAYS * 86_400,
+    })
+}
+
+/// WAIT-1: the items no snapshot holds, kept in `<data>/waiting/local.json`.
+pub struct LocalItems {
+    path: PathBuf,
+}
+
+impl LocalItems {
+    pub fn new(data_dir: &Path) -> Self {
+        Self {
+            path: data_dir.join("waiting").join("local.json"),
+        }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// No file is no items; a file that does not parse is a `CoreError::Parse` naming it.
+    pub fn load(&self) -> Result<Vec<Item>, CoreError> {
+        let text = match std::fs::read_to_string(&self.path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+            Err(e) => return Err(CoreError::Io(format!("{}: {e}", self.path.display()))),
+        };
+        serde_json::from_str(&text)
+            .map_err(|e| CoreError::Parse(format!("{}: {e}", self.path.display())))
+    }
+
+    /// Replace the item with the same `source` in place, or push it at the end.
+    pub fn add(&self, item: Item) -> Result<(), CoreError> {
+        let mut items = self.load()?;
+        match items.iter().position(|old| old.source == item.source) {
+            Some(i) => items[i] = item,
+            None => items.push(item),
+        }
+        self.write(&items)
+    }
+
+    /// True when an item was removed; nothing removed writes nothing.
+    pub fn remove(&self, source: &Source) -> Result<bool, CoreError> {
+        let mut items = self.load()?;
+        let before = items.len();
+        items.retain(|item| item.source != *source);
+        if items.len() == before {
+            return Ok(false);
+        }
+        self.write(&items)?;
+        Ok(true)
+    }
+
+    /// Pretty JSON to `local.json.tmp`, then renamed over `local.json`.
+    fn write(&self, items: &[Item]) -> Result<(), CoreError> {
+        let io = |e: std::io::Error| CoreError::Io(format!("{}: {e}", self.path.display()));
+        if let Some(dir) = self.path.parent() {
+            std::fs::create_dir_all(dir).map_err(io)?;
+        }
+        let mut text = serde_json::to_string_pretty(items)
+            .map_err(|e| CoreError::Parse(format!("{}: {e}", self.path.display())))?;
+        text.push('\n');
+        let tmp = self.path.with_extension("json.tmp");
+        std::fs::write(&tmp, text).map_err(io)?;
+        std::fs::rename(&tmp, &self.path).map_err(io)
+    }
+}
+
 /// WAIT-1: merge every source's items into one list, newest first; ties by `what`.
 pub fn merge(lists: Vec<Vec<Item>>) -> Vec<Item> {
-    todo!("WAIT-1")
+    let mut items: Vec<Item> = lists.into_iter().flatten().collect();
+    items.sort_by(|a, b| b.since.cmp(&a.since).then_with(|| a.what.cmp(&b.what)));
+    items
 }
 
 /// WAIT-3: the items of `next` only: an item in `previous` whose source is not in `next` is
