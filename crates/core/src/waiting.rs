@@ -94,6 +94,9 @@ pub fn tick_caldav(caldav: &dyn CalDav, item: &Item) -> Result<Source, CoreError
             caldav.mark_done(uid)?;
             Ok(item.source.clone())
         }
-        _ => Err(CoreError::Parse(format!("not a CalDAV task: {}", item.what))),
+        _ => Err(CoreError::Parse(format!(
+            "not a CalDAV task: {}",
+            item.what
+        ))),
     }
 }
