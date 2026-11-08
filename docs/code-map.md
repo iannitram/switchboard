@@ -95,7 +95,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 `crates/core/src/github/queue.rs` · GH-4 · present. `send(fleet, creates)`: one `fleet ghq add-batch` then `fleet ghq run`; a stop on a rate limit leaves items queued, never a failure.
 
 ### github-merge
-`crates/core/src/github/merge.rs` · GH-5 · planned. `eligibility(pr, carried_over)` (PASS on head or carried by patch-id, CI green on head) and `merge` through `merge_pr.py` (dry run, then push) after `rules::guard`. Never `gh pr merge` or the merge API.
+`crates/core/src/github/merge.rs` · GH-5 · present. `eligibility(pr, carried_over)` (PASS on head or carried by patch-id, CI green on head) and `merge` through `merge_pr.py` (dry run, then push) after `rules::guard`. Never `gh pr merge` or the merge API.
 
 ### sky-features
 `crates/core/src/sky/features.rs` · SKY-2, SKY-3, SKY-5 · present. Parses ROADMAP.md's `Updated:` and `features:` block (format in `ROADMAP.md`).
