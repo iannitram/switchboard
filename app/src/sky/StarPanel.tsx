@@ -1,0 +1,29 @@
+import type { Star } from "./model";
+
+// SKY-8: one star's panel: its labels, size, PR with state and review verdict, fleet job and a
+// link to the issue. The face holds no rules; it paints the Star as the core sent it.
+export function StarPanel({ star, onClose }: { star: Star; onClose: () => void }) {
+  const { pr } = star;
+  return (
+    <aside aria-label={`Star #${star.number}`}>
+      <h3>{`#${star.number} ${star.title}`}</h3>
+      <ul aria-label="Labels">
+        {star.labels.map((label) => (
+          <li key={label}>{label}</li>
+        ))}
+      </ul>
+      <p>{star.size === null ? "Size: not sized" : `Size: ${star.size}`}</p>
+      {pr ? (
+        <p>
+          <a href={pr.url}>{`PR #${pr.number} (${pr.state})`}</a>
+        </p>
+      ) : (
+        <p>No PR yet</p>
+      )}
+      <p>{`Review: ${pr?.verdict ?? "not reviewed"}`}</p>
+      <p>{`Job: ${star.job ?? "none"}`}</p>
+      <a href={star.url}>Open on GitHub</a>
+      <button onClick={() => onClose()}>Close</button>
+    </aside>
+  );
+}
