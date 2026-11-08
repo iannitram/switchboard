@@ -116,7 +116,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 `crates/core/src/sky/priority.rs` · SKY-9 · planned. The priority copy in fleet-state (U4's default), its age, stale after 7 days.
 
 ### sky-labels
-`crates/core/src/sky/labels.rs` · SKY-10 · planned. The `feature:` label for a design-pass issue and an automatic bug.
+`crates/core/src/sky/labels.rs` · SKY-10 · present. The `feature:` label for a design-pass issue and an automatic bug.
 
 ### sky-face
 `app/src/views/Sky.tsx` (+ `app/src/sky/`) · SKY-1, SKY-3, SKY-4, SKY-5, SKY-6, SKY-7, SKY-8 · planned. SVG: the sky, the zoomed constellation (clusters, stars, blocked-by lines, milestone rings), star states, the drift list, reuse lines, the chain highlight, the star panel. Paints what the core worked out.
