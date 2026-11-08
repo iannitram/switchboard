@@ -1,6 +1,6 @@
 //! SKY-1, SKY-2: where each constellation sits, how big and how bright.
 
-use super::features::FeatureBlock;
+use super::features::{FeatureBlock, Release};
 use crate::github::Issue;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -45,5 +45,24 @@ pub fn place(repos: &[String]) -> Vec<Placement> {
 /// it, each `release: 1.0` feature with no issue counting as one open star; `after-1.0` dark
 /// stars are not counted. No stars and no dark stars is 0.0.
 pub fn brightness(issues: &[Issue], block: &FeatureBlock) -> f64 {
-    todo!("SKY-2")
+    let stars: Vec<&Issue> = issues
+        .iter()
+        .filter(|issue| issue.milestone.as_deref() == Some("1.0"))
+        .collect();
+    let closed = stars.iter().filter(|issue| issue.state == "closed").count();
+    let dark = block
+        .features
+        .iter()
+        .filter(|feature| feature.release == Release::V1)
+        .filter(|feature| {
+            let label = format!("feature:{}", feature.id);
+            !issues.iter().any(|issue| issue.labels.contains(&label))
+        })
+        .count();
+    let total = stars.len() + dark;
+    if total == 0 {
+        0.0
+    } else {
+        closed as f64 / total as f64
+    }
 }
