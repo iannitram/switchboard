@@ -86,7 +86,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 `crates/core/src/github/snapshot.rs` · GH-1 · planned. `RepoSnapshot` (issues, PRs with verdicts and CI on head, milestones, labels, ROADMAP.md, the code map) and `SnapshotStore`: one JSON file per repo under the app's data folder, with its age.
 
 ### github-transport
-`crates/core/src/github/transport.rs` · planned. `GitHubTransport`: GraphQL and REST GET with `If-None-Match`; `Recorded` replays answers in tests. Token from `platform::TokenStore`.
+`crates/core/src/github/transport.rs` · present. `GitHubTransport`: GraphQL and REST GET with `If-None-Match`; `Recorded` replays answers in tests. Token from `platform::TokenStore`.
 
 ### github-poll
 `crates/core/src/github/poll.rs` · GH-1, GH-2, GH-3 · planned. The 10-minute poll (`Poller::tick`), the Refresh button (`refresh_all`), the ETag skip (`unchanged`), refresh-on-action (`after_write`).
@@ -125,6 +125,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 `crates/core/src/waiting.rs`, `app/src/views/Waiting.tsx` · WAIT-1, WAIT-2, WAIT-3 · planned. Items from the snapshot, CalDAV (U7), handoffs, guarded actions, IT tickets, refused backups, the stale priority copy and pool edits (U5); merged newest first; carried between reads. The item view is ported from BroCrew.
 
 - WAIT-2 tick a CalDAV task (`tick_caldav`): present.
+- WAIT-1 CalDAV items (`caldav_items`, `from_caldav`): present.
 
 ### reports
 `crates/core/src/reports.rs`, `app/src/views/Reports.tsx` · REP-1, REP-2, REP-3 · planned. The five-part fixed report from a done card or a thread, its work tree of moves, filters. The report entry is ported from BroCrew.
@@ -151,4 +152,4 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 `crates/cli/src/mcp.rs` · MCP-1, MCP-2, MCP-3 · planned. JSON-RPC over stdio; six read tools; role write tools; none inside a job worktree.
 
 ### shell
-`app/src-tauri/`, `app/src/App.tsx`, `app/src/core.ts` · SHELL-1, SHELL-2, SHELL-3 · present (empty window), the AppImage and the error banner planned. `tools/check-notices.py` (present) lists every file under `app/src/brocrew/` and fails on one without its Apache-2.0 notice.
+`app/src-tauri/`, `app/src/App.tsx`, `app/src/core.ts` · SHELL-1, SHELL-2, SHELL-3 · present (empty window), the AppImage and the error banner planned. `tools/check-notices.py` (present) lists every file under `app/src/brocrew/` and fails on one without its Apache-2.0 notice. `app/src/brocrew/` holds BroCrew's lifted chat helpers (present): `composer-notice.ts`, `message-links.ts`, `message-paths.ts` and `ipc-types.ts`, all listed in `NOTICE`.
