@@ -86,26 +86,64 @@ impl SnapshotStore {
 
     /// The file for `owner/name`: `<dir>/<owner>__<name>.json`.
     pub fn path_for(&self, repo: &str) -> PathBuf {
-        todo!("GH-1: snapshot store")
+        self.dir.join(format!("{}.json", repo.replace('/', "__")))
     }
 
     /// Write one repo's snapshot, replacing the old one (write to a temp file, then rename).
     pub fn save(&self, snap: &RepoSnapshot) -> Result<(), CoreError> {
-        todo!("GH-1: snapshot store")
+        std::fs::create_dir_all(&self.dir)
+            .map_err(|e| CoreError::Io(format!("{}: {e}", self.dir.display())))?;
+        let target = self.path_for(&snap.repo);
+        let text =
+            serde_json::to_string_pretty(snap).map_err(|e| CoreError::Parse(e.to_string()))?;
+        let mut tmp = target.clone().into_os_string();
+        tmp.push(".tmp");
+        let tmp = PathBuf::from(tmp);
+        std::fs::write(&tmp, text).map_err(|e| CoreError::Io(format!("{}: {e}", tmp.display())))?;
+        std::fs::rename(&tmp, &target)
+            .map_err(|e| CoreError::Io(format!("{}: {e}", tmp.display())))?;
+        Ok(())
     }
 
     /// Read one repo's snapshot; `Ok(None)` when there is none yet.
     pub fn load(&self, repo: &str) -> Result<Option<RepoSnapshot>, CoreError> {
-        todo!("GH-1: snapshot store")
+        read_one(&self.path_for(repo))
     }
 
     /// Every stored snapshot, sorted by repo name.
     pub fn load_all(&self) -> Result<Vec<RepoSnapshot>, CoreError> {
-        todo!("GH-1: snapshot store")
+        let entries = match std::fs::read_dir(&self.dir) {
+            Ok(entries) => entries,
+            Err(_) => return Ok(Vec::new()),
+        };
+        let mut snaps = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|e| CoreError::Io(format!("{}: {e}", self.dir.display())))?;
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            if let Some(snap) = read_one(&path)? {
+                snaps.push(snap);
+            }
+        }
+        snaps.sort_by(|a, b| a.repo.cmp(&b.repo));
+        Ok(snaps)
     }
+}
+
+fn read_one(path: &Path) -> Result<Option<RepoSnapshot>, CoreError> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(CoreError::Io(format!("{}: {e}", path.display()))),
+    };
+    serde_json::from_str(&text)
+        .map(Some)
+        .map_err(|e| CoreError::Parse(format!("{}: {e}", path.display())))
 }
 
 /// The snapshot's age in whole minutes at `now` (each view shows it).
 pub fn age_minutes(snap: &RepoSnapshot, now: UnixSeconds) -> i64 {
-    todo!("GH-1: snapshot store")
+    (now - snap.read_at).max(0) / 60
 }
