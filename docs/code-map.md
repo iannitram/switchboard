@@ -98,7 +98,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 `crates/core/src/github/merge.rs` · GH-5 · planned. `eligibility(pr, carried_over)` (PASS on head or carried by patch-id, CI green on head) and `merge` through `merge_pr.py` (dry run, then push) after `rules::guard`. Never `gh pr merge` or the merge API.
 
 ### sky-features
-`crates/core/src/sky/features.rs` · SKY-2, SKY-3, SKY-5 · planned. Parses ROADMAP.md's `Updated:` and `features:` block (format in `ROADMAP.md`).
+`crates/core/src/sky/features.rs` · SKY-2, SKY-3, SKY-5 · present. Parses ROADMAP.md's `Updated:` and `features:` block (format in `ROADMAP.md`).
 
 ### sky-layout
 `crates/core/src/sky/layout.rs` · SKY-1, SKY-2 · planned. Rank to radius, size and angle; brightness from the `1.0` milestone and `release: 1.0` dark stars.
