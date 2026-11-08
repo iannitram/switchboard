@@ -70,3 +70,38 @@ pub fn loadout_probes(os: Os) -> &'static [Probe] {
 pub trait TokenStore: Send + Sync {
     fn get(&self, service: &str) -> Option<String>;
 }
+
+/// The Linux 1.0 token store: GitHub's token from `gh auth token`, so `gh auth login` is the
+/// only sign-in. Other services have no token here.
+pub struct GhAuthToken {
+    pub program: String,
+}
+
+impl Default for GhAuthToken {
+    fn default() -> Self {
+        Self {
+            program: "gh".to_string(),
+        }
+    }
+}
+
+impl TokenStore for GhAuthToken {
+    fn get(&self, service: &str) -> Option<String> {
+        if service != "github" {
+            return None;
+        }
+        let out = std::process::Command::new(&self.program)
+            .args(["auth", "token"])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let token = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if token.is_empty() {
+            None
+        } else {
+            Some(token)
+        }
+    }
+}
