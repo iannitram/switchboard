@@ -110,7 +110,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 `crates/core/src/sky/chain.rs` · SKY-3, SKY-7 · present. `Blocked by #N` edges and the longest open chain.
 
 ### sky-codemap
-`crates/core/src/sky/codemap.rs` · SKY-6 · planned. This file's `reuses:` block; a reuse of a Parked or archived repo is a warning.
+`crates/core/src/sky/codemap.rs` · SKY-6 · present. This file's `reuses:` block; a reuse of a Parked or archived repo is a warning.
 
 ### sky-priority
 `crates/core/src/sky/priority.rs` · SKY-9 · present. The priority copy in fleet-state (U4's default), its age, stale after 7 days.
