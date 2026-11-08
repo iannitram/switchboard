@@ -14,11 +14,34 @@ pub const VIEW_FEATURES: &[(&str, &str)] = &[
 /// SKY-10: a design-pass issue gets the `feature:<id>` of the region whose view it changes;
 /// one that spans views (or names a view not in `VIEW_FEATURES`) gets `feature:shell`.
 pub fn design_pass_label(views: &[&str]) -> String {
-    todo!("SKY-10")
+    let mut features: Vec<&str> = Vec::new();
+    for view in views {
+        let wanted = view.trim();
+        let Some(&(_, feature)) = VIEW_FEATURES
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(wanted))
+        else {
+            return "feature:shell".to_string();
+        };
+        if !features.contains(&feature) {
+            features.push(feature);
+        }
+    }
+    match features.as_slice() {
+        [one] => format!("feature:{one}"),
+        _ => "feature:shell".to_string(),
+    }
 }
 
 /// SKY-10, IT-4: an automatic bug gets the `feature:` label of the star whose job ran out of
 /// ladder: the one `feature:` label in `star_labels`, else `feature:shell`.
 pub fn bug_label(star_labels: &[String]) -> String {
-    todo!("SKY-10")
+    let feature_labels: Vec<&String> = star_labels
+        .iter()
+        .filter(|label| label.starts_with("feature:"))
+        .collect();
+    match feature_labels.as_slice() {
+        [one] => one.to_string(),
+        _ => "feature:shell".to_string(),
+    }
 }
