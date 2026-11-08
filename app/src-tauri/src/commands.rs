@@ -5,7 +5,9 @@ use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use switchboard_core::fleet::{FleetError, FleetErrorLog};
+use switchboard_core::settings::Settings;
 use switchboard_core::{settings, CoreError};
+use tauri::Manager;
 
 /// What the shell holds between commands: the settings file's path and this session's fleet
 /// error log.
@@ -32,14 +34,13 @@ pub struct FaceError {
 
 impl FaceError {
     fn new(command: &str, err: &CoreError) -> Self {
+        Self::from_text(command, &err.to_string())
+    }
+
+    fn from_text(command: &str, text: &str) -> Self {
         Self {
             command: command.to_string(),
-            lines: err
-                .to_string()
-                .lines()
-                .take(5)
-                .map(str::to_string)
-                .collect(),
+            lines: text.lines().take(5).map(str::to_string).collect(),
         }
     }
 }
@@ -65,7 +66,14 @@ impl From<&FleetError> for FleetErrorRow {
 /// SHELL-1: the views the window shows, in tab order.
 #[tauri::command]
 pub fn views() -> Vec<&'static str> {
-    vec!["Sky", "Waiting on you", "Reports", "Budget", "Chat"]
+    vec![
+        "Sky",
+        "Waiting on you",
+        "Reports",
+        "Budget",
+        "Chat",
+        "Settings",
+    ]
 }
 
 /// CORE-5: the names of the settings not set, in the core's order.
@@ -74,6 +82,47 @@ pub fn settings_missing(state: tauri::State<'_, AppState>) -> Result<Vec<&'stati
     settings::load(&state.settings_path)
         .map(|s| s.missing())
         .map_err(|e| FaceError::new("settings_missing", &e))
+}
+
+/// CORE-5 as the Settings view reads it: the settings and the names of those not set.
+#[derive(Debug, Serialize)]
+pub struct SettingsView {
+    pub settings: Settings,
+    pub missing: Vec<&'static str>,
+}
+
+impl From<Settings> for SettingsView {
+    fn from(settings: Settings) -> Self {
+        let missing = settings.missing();
+        Self { settings, missing }
+    }
+}
+
+/// The settings file: `app_config_dir()/settings.json`.
+fn settings_file(app: &tauri::AppHandle, command: &str) -> Result<PathBuf, FaceError> {
+    app.path()
+        .app_config_dir()
+        .map(|dir| dir.join("settings.json"))
+        .map_err(|e| FaceError::from_text(command, &e.to_string()))
+}
+
+/// CORE-5: the settings file's paths and which are not set.
+#[tauri::command]
+pub fn settings_get(app: tauri::AppHandle) -> Result<SettingsView, FaceError> {
+    let path = settings_file(&app, "settings_get")?;
+    settings::load(&path)
+        .map(SettingsView::from)
+        .map_err(|e| FaceError::new("settings_get", &e))
+}
+
+/// CORE-5: save the settings, then answer like `settings_get` from the saved file.
+#[tauri::command]
+pub fn settings_save(app: tauri::AppHandle, settings: Settings) -> Result<SettingsView, FaceError> {
+    let path = settings_file(&app, "settings_save")?;
+    settings::save(&path, &settings)
+        .and_then(|()| settings::load(&path))
+        .map(SettingsView::from)
+        .map_err(|e| FaceError::new("settings_save", &e))
 }
 
 /// CORE-2: the fleet errors this session recorded, newest first.

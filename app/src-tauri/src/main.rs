@@ -1,5 +1,5 @@
 //! The Tauri shell (SHELL-1). One window; the React face (`app/src/`) draws the Sky, Waiting
-//! on you, Reports, Budget and Chat views. Every command here is a thin call into
+//! on you, Reports, Budget, Chat and Settings views. Every command here is a thin call into
 //! `switchboard_core`; no rule lives in this crate (SPEC.md, Implementation decisions).
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
@@ -18,6 +18,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             commands::views,
             commands::settings_missing,
+            commands::settings_get,
+            commands::settings_save,
             commands::fleet_errors,
         ])
         .run(tauri::generate_context!())
