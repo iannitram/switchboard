@@ -226,6 +226,46 @@ fn bundle_new(mirror: &Path, tmp: &Path) -> Result<u64, CoreError> {
     Ok(count as u64)
 }
 
+/// BAK-1: the wiki as a bare mirror in `wiki.git`; sets `manifest.wiki`.
+///
+/// `wiki_mirror` is a bare mirror of `<repo>.wiki.git` the caller already cloned, or `None` for a
+/// repo with no wiki: then `manifest.wiki` is false and nothing is written, not even `out_dir`.
+/// Otherwise `git clone --mirror` copies it into `wiki.git.new`, which is renamed over
+/// `wiki.git`. A failed copy removes the `.new` copy, returns the error and leaves the old
+/// `wiki.git` and `manifest.wiki` as they were. Makes no network calls.
+pub fn copy_wiki(
+    wiki_mirror: Option<&Path>,
+    out_dir: &Path,
+    manifest: &mut Manifest,
+) -> Result<(), CoreError> {
+    let Some(mirror) = wiki_mirror else {
+        manifest.wiki = false;
+        return Ok(());
+    };
+    // git runs with `-C <out_dir>`, so both paths must be absolute.
+    let mirror = std::path::absolute(mirror).map_err(|e| io_error(mirror, e))?;
+    let out_dir = std::path::absolute(out_dir).map_err(|e| io_error(out_dir, e))?;
+    std::fs::create_dir_all(&out_dir).map_err(|e| io_error(&out_dir, e))?;
+    let tmp = out_dir.join("wiki.git.new");
+    let _ = std::fs::remove_dir_all(&tmp);
+    let mirror_arg = mirror.to_string_lossy();
+    let tmp_arg = tmp.to_string_lossy();
+    if let Err(e) = git(
+        &out_dir,
+        &["clone", "-q", "--mirror", &mirror_arg, &tmp_arg],
+    ) {
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err(e);
+    }
+    let copy = out_dir.join("wiki.git");
+    if copy.exists() {
+        std::fs::remove_dir_all(&copy).map_err(|e| io_error(&copy, e))?;
+    }
+    std::fs::rename(&tmp, &copy).map_err(|e| io_error(&tmp, e))?;
+    manifest.wiki = true;
+    Ok(())
+}
+
 /// Runs `git -C <dir> <args>`; its stdout, or the command and its stderr as the error.
 fn git(dir: &Path, args: &[&str]) -> Result<String, CoreError> {
     let out = Command::new("git")
