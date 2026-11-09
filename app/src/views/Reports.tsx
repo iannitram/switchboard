@@ -3,6 +3,7 @@ import { call } from "../core";
 import type { CoreError } from "../core";
 import { ReportEntry, type Report } from "../brocrew/ReportEntry";
 import { Empty } from "./Empty";
+import { WorkTree } from "./WorkTree";
 
 export type { Move, Report } from "../brocrew/ReportEntry";
 
@@ -14,7 +15,7 @@ export function ReportList({ reports }: { reports: Report[] }) {
       <ul>
         {reports.map((r, i) => (
           <li key={`${i}-${r.id}`}>
-            <ReportEntry report={r} />
+            <ReportEntry report={r}><WorkTree moves={r.moves} /></ReportEntry>
           </li>
         ))}
       </ul>

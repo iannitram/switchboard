@@ -134,6 +134,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 
 - REP-1 reports (`from_card`, `from_thread`, `newest_first`, `parse_time`, `project_of`): present.
 - REP-2 moves (`moves`): present.
+- REP-2 work tree (`WorkTree`): present.
 - REP-1 view (`ReportEntry`, `ReportList`, `Reports`): present.
 
 ### budget
@@ -144,6 +145,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - BUD-3 refresh (`refresh`, `RefreshTimer`, `budget_rows`, `budget_refresh`): present.
 - BUD-1 panel (`BudgetPanel`, `Budget`): present.
 - BUD-2 save (`save_edit`, `parse_reset`, `budget_save_edit`): present.
+- BUD-2 editor (`PoolEditor`): present.
 
 ### backup
 `crates/core/src/backup.rs` · BAK-1, BAK-2, BAK-3 · planned. A git bundle of every ref plus JSON of issues, PRs, comments, labels, milestones, releases (under 1 GB) and the wiki, with a manifest, in `<NextCloud backups>/github/<repo>/`; the overwrite guard; restore to a new private repo (issues through the create queue), over a live repo only after `rules::guard`.
@@ -156,6 +158,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - AUTO-9 classify (`classify`, `from_json`): present.
 - AUTO-5 weekly due check (`weekly_due`): present.
 - AUTO-7 place: present.
+- AUTO-3 review (`step`, `first_rung`): present.
 
 ### it
 `crates/core/src/it.rs` · IT-1 to IT-4, FD-12 · planned. The loadout from the platform's probe list, unmet `needs`, IT tickets through `fleet errors file`, `it-triage` jobs with `never_on` (waits for U9), ladder-out bugs with the star's `feature:` label.
