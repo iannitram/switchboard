@@ -87,6 +87,63 @@ pub fn merge(caller: &Caller, job: &MergeJob<'_>, poller: &Poller<'_>) -> Result
     Ok(())
 }
 
+/// AUTO-4: the open PRs `eligibility` calls Eligible, smallest number first. `carried_over` is the caller's patch-id answer per PR.
+pub fn ready_to_merge(
+    prs: &[PullRequest],
+    carried_over: &dyn Fn(&PullRequest) -> bool,
+) -> Vec<u64> {
+    ready_prs(prs, carried_over)
+        .iter()
+        .map(|(pr, _)| pr.number)
+        .collect()
+}
+
+/// The open, Eligible PRs with their patch-id answer, smallest number first. The answer is
+/// asked once per open PR.
+fn ready_prs<'a>(
+    prs: &'a [PullRequest],
+    carried_over: &dyn Fn(&PullRequest) -> bool,
+) -> Vec<(&'a PullRequest, bool)> {
+    let mut ready = Vec::new();
+    for pr in prs.iter().filter(|pr| pr.state == "open") {
+        let carried = carried_over(pr);
+        if eligibility(pr, carried) == MergeEligibility::Eligible {
+            ready.push((pr, carried));
+        }
+    }
+    ready.sort_by_key(|(pr, _)| pr.number);
+    ready
+}
+
+/// AUTO-4: merge each ready PR one at a time through `merge`; stop at the first error. Returns
+/// the PR numbers merged and the issue numbers their `closes` named (GitHub closes them on the
+/// merge to main; the caller's re-read shows them closed).
+pub fn merge_passed(
+    caller: &Caller,
+    clone: &std::path::Path,
+    pipeline_root: &std::path::Path,
+    repo: &str,
+    prs: &[PullRequest],
+    carried_over: &dyn Fn(&PullRequest) -> bool,
+    poller: &Poller<'_>,
+) -> Result<(Vec<u64>, Vec<u64>), CoreError> {
+    let mut merged = Vec::new();
+    let mut closed = Vec::new();
+    for (pr, carried) in ready_prs(prs, carried_over) {
+        let job = MergeJob {
+            pipeline_root,
+            clone,
+            repo,
+            pr,
+            carried_over: carried,
+        };
+        merge(caller, &job, poller)?;
+        merged.push(pr.number);
+        closed.extend(pr.closes.iter().copied());
+    }
+    Ok((merged, closed))
+}
+
 /// Run `merge_pr.py merge ... <flag>` from the pipeline. A non-zero exit is a refusal.
 fn run_merge_pr(job: &MergeJob<'_>, flag: &str) -> Result<(), CoreError> {
     let script = job
