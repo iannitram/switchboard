@@ -1,4 +1,4 @@
-//! SKY-5: drift. Orphan stars (an issue on no feature or on two), dark stars of `release: 1.0`
+//! SKY-5: drift. Orphan stars (an issue on no feature or on two), dark stars of `release: 1.0` (`after-1.0` and `after-2.0` are planned, not drift)
 //! features (an After 1.0 dark star is planned, not drift), and a ROADMAP `Updated:` date more
 //! than 14 days old.
 

@@ -87,6 +87,17 @@ fn after_1_0_dark_stars_are_not_counted() {
 }
 
 #[test]
+fn after_2_0_dark_stars_do_not_dim() {
+    let issues = vec![issue(1, "closed", Some("1.0"), &["feature:core"])];
+    let b = block(&[
+        ("core", Release::V1),
+        ("relay", Release::After1),
+        ("gamification", Release::After2),
+    ]);
+    assert!(close(brightness(&issues, &b), 1.0));
+}
+
+#[test]
 fn a_feature_whose_only_issues_are_outside_1_0_is_not_dark() {
     let issues = vec![
         issue(1, "closed", Some("1.0"), &["feature:core"]),

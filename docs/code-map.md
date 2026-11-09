@@ -99,13 +99,13 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - AUTO-4 merge passed PRs (`ready_to_merge`, `merge_passed`): present.
 
 ### sky-features
-`crates/core/src/sky/features.rs` · SKY-2, SKY-3, SKY-5 · present. Parses ROADMAP.md's `Updated:` and `features:` block (format in `ROADMAP.md`).
+`crates/core/src/sky/features.rs` · SKY-2, SKY-3, SKY-5 · present. Parses ROADMAP.md's `Updated:` and `features:` block (format in `ROADMAP.md`; `release: 1.0`, `after-1.0` or `after-2.0`).
 
 ### sky-layout
-`crates/core/src/sky/layout.rs` · SKY-1, SKY-2 · present. Rank to radius, size and angle; brightness from the `1.0` milestone and `release: 1.0` dark stars.
+`crates/core/src/sky/layout.rs` · SKY-1, SKY-2 · present. Rank to radius, size and angle; brightness from the `1.0` milestone and `release: 1.0` dark stars (`after-1.0` and `after-2.0` are not counted).
 
 ### sky-drift
-`crates/core/src/sky/drift.rs` · SKY-5 · present. Orphan stars, `release: 1.0` dark stars, a roadmap more than 14 days old.
+`crates/core/src/sky/drift.rs` · SKY-5 · present. Orphan stars, `release: 1.0` dark stars (`after-1.0` and `after-2.0` are not drift), a roadmap more than 14 days old.
 
 ### sky-chain
 `crates/core/src/sky/chain.rs` · SKY-3, SKY-7 · present. `Blocked by #N` edges and the longest open chain.

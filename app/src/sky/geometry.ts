@@ -21,7 +21,7 @@ export function glow(brightness: number): number {
 }
 
 /** SKY-3: the milestone rings of a zoomed constellation, by radius in view units. */
-export const RINGS = { "1.0": 250, "after-1.0": 420 } as const;
+export const RINGS = { "1.0": 250, "after-1.0": 420, "after-2.0": 460 } as const;
 
 /** Point i of k spread evenly on a ring, point 0 at the top, the rest clockwise on screen. */
 export function onRing(i: number, k: number, ring: number, cx = VIEW / 2, cy = VIEW / 2): { x: number; y: number } {
@@ -31,11 +31,11 @@ export function onRing(i: number, k: number, ring: number, cx = VIEW / 2, cy = V
 
 /** SKY-3: where each feature and each of its stars sits in a zoomed constellation. */
 export function layoutConstellation(c: {
-  features: { id: string; release: "1.0" | "after-1.0"; stars: { number: number }[] }[];
+  features: { id: string; release: "1.0" | "after-1.0" | "after-2.0"; stars: { number: number }[] }[];
 }): { features: Map<string, { x: number; y: number }>; stars: Map<number, { x: number; y: number }> } {
   const features = new Map<string, { x: number; y: number }>();
   const stars = new Map<number, { x: number; y: number }>();
-  for (const release of ["1.0", "after-1.0"] as const) {
+  for (const release of ["1.0", "after-1.0", "after-2.0"] as const) {
     const group = c.features.filter((f) => f.release === release);
     group.forEach((f, i) => {
       const at = onRing(i, group.length, RINGS[release]);

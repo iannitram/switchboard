@@ -8,9 +8,10 @@
 //! features:
 //! - core: The core and the fleet bridge (release: 1.0)
 //! - relay: A headless relay per machine (release: after-1.0)
+//! - gamification: A gamification plugin (release: after-2.0)
 //! ```
 //!
-//! One line per feature, `- <id>: <title> (release: 1.0|after-1.0)`. An id is lowercase
+//! One line per feature, `- <id>: <title> (release: 1.0|after-1.0|after-2.0)`. An id is lowercase
 //! letters, digits and hyphens. The block ends at the first line that does not start with
 //! `- `. A line without a release marker is `release: 1.0`.
 
@@ -20,6 +21,7 @@ use crate::CoreError;
 pub enum Release {
     V1,
     After1,
+    After2,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,6 +77,8 @@ pub fn parse(roadmap_md: &str) -> Result<FeatureBlock, CoreError> {
             (before.trim(), Release::V1)
         } else if let Some(before) = rest.strip_suffix("(release: after-1.0)") {
             (before.trim(), Release::After1)
+        } else if let Some(before) = rest.strip_suffix("(release: after-2.0)") {
+            (before.trim(), Release::After2)
         } else if rest.contains("(release: ") {
             return Err(bad(line_no, line));
         } else {
