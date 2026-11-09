@@ -47,7 +47,10 @@ fn two_markers_use_the_last_reason_and_remove_both() {
 fn text_around_the_marker_is_not_otherwise_changed() {
     let reply = "Line one.\n  Line two.\n[[handoff: long context]]";
     let kept = "Line one.\n  Line two.\n".to_string();
-    assert_eq!(split_handoff(reply), (kept, Some("long context".to_string())));
+    assert_eq!(
+        split_handoff(reply),
+        (kept, Some("long context".to_string()))
+    );
 }
 
 #[test]
