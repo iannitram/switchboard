@@ -24,12 +24,14 @@ features:
 - platforms: Windows and Mac builds (release: after-1.0)
 - fleet-rust: Porting fleet to Rust (release: after-1.0)
 - dashboard: Retiring the fleet dashboard, only with my yes again (release: after-1.0)
+- plugins: Plugins: add views, commands and MCP tools to Switchboard without changing the core (release: after-1.0)
+- gamification: A gamification plugin (release: after-2.0)
 
 ## The features block
 
-One line per feature: `- <id>: <title> (release: 1.0|after-1.0)`. An id is lowercase letters, digits and hyphens and never changes once issues carry it; it is the `feature:<id>` label. The block ends at the first line that does not start with `- `. The release marker is what SKY-2 and SKY-5 read: a `release: after-1.0` feature is drawn as a dark star but neither dims the constellation nor counts as drift. `Updated:` is the date this file was last brought in line with the code and the issues; re-date it on every edit. (The pipeline's block format is not ruled yet; this follows `SPEC.md` 2.10b and the pipeline's roadmap map. If the ruling changes the format, this block and `crates/core/src/sky/features.rs` change together.)
+One line per feature: `- <id>: <title> (release: 1.0|after-1.0|after-2.0)`. An id is lowercase letters, digits and hyphens and never changes once issues carry it; it is the `feature:<id>` label. The block ends at the first line that does not start with `- `. The release marker is what SKY-2 and SKY-5 read: a `release: after-1.0` feature is drawn as a dark star on the outer ring but neither dims the constellation nor counts as drift. A `release: after-2.0` feature is drawn as a dark star on the outermost ring and, like after-1.0, is never counted and never drift. `Updated:` is the date this file was last brought in line with the code and the issues; re-date it on every edit. (The pipeline's block format is not ruled yet; this follows `SPEC.md` 2.10b and the pipeline's roadmap map. If the ruling changes the format, this block and `crates/core/src/sky/features.rs` change together.)
 
-The regions, their Musts and their checks are in `SPEC.md`. Milestones: `1.0` holds every issue of a `release: 1.0` feature; `After 1.0` holds the dark stars once they get issues. Every issue carries exactly one `feature:<id>` label.
+The regions, their Musts and their checks are in `SPEC.md`. Milestones: `1.0` holds every issue of a `release: 1.0` feature; `After 1.0` and `After 2.0` hold their dark stars once they get issues. Every issue carries exactly one `feature:<id>` label.
 
 ## Development stages
 
@@ -48,7 +50,7 @@ Each stage's first issues are `Blocked by` the stage before (written on the issu
 
 **The live loops (added 2026-11-09).** By 2026-11-09 most of stages 1 to 7 are merged, but several of the core's parts are tested functions that nothing runs yet: the 10-minute GitHub poll and the Refresh button (GH-1), the autopilot's review start, merge pass, PM job and Sunday run (AUTO-2 to AUTO-6), the loadout timer (IT-1), automatic IT tickets (IT-2), the CLI and MCP write paths (CLI-3, MCP-2) and `switchboard loadout` (CLI-1). Each gets one wiring issue. The poll comes first: the autopilot issues that act on a fresh snapshot are `Blocked by` it, and they share one `autopilot::after_poll` hook that the review start adds. They run beside the open stage 3 to 7 issues and before the design pass.
 
-After 1.0 the dark stars above get their own Specs and issues; `platforms` turns the Mac and Windows seams on.
+After 1.0 the dark stars above get their own Specs and issues (the after-2.0 stars wait for 2.0); `platforms` turns the Mac and Windows seams on.
 
 ## Code map and skeleton
 

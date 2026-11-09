@@ -38,6 +38,7 @@ export function ConstellationView({
       <svg viewBox={`0 0 ${VIEW} ${VIEW}`} role="img" aria-label={c.repo}>
         <circle data-testid="ring" data-milestone="1.0" cx={VIEW / 2} cy={VIEW / 2} r={RINGS["1.0"]} fill="none" stroke="currentColor" strokeOpacity={0.3} />
         <circle data-testid="ring" data-milestone="After 1.0" cx={VIEW / 2} cy={VIEW / 2} r={RINGS["after-1.0"]} fill="none" stroke="currentColor" strokeOpacity={0.3} />
+        <circle data-testid="ring" data-milestone="After 2.0" cx={VIEW / 2} cy={VIEW / 2} r={RINGS["after-2.0"]} fill="none" stroke="currentColor" strokeOpacity={0.3} />
         {c.edges.map(([blocker, blocked]) => {
           const from = at.stars.get(blocker);
           const to = at.stars.get(blocked);

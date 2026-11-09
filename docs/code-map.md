@@ -99,13 +99,13 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - AUTO-4 merge passed PRs (`ready_to_merge`, `merge_passed`): present.
 
 ### sky-features
-`crates/core/src/sky/features.rs` · SKY-2, SKY-3, SKY-5 · present. Parses ROADMAP.md's `Updated:` and `features:` block (format in `ROADMAP.md`).
+`crates/core/src/sky/features.rs` · SKY-2, SKY-3, SKY-5 · present. Parses ROADMAP.md's `Updated:` and `features:` block (format in `ROADMAP.md`; `release: 1.0`, `after-1.0` or `after-2.0`).
 
 ### sky-layout
-`crates/core/src/sky/layout.rs` · SKY-1, SKY-2 · present. Rank to radius, size and angle; brightness from the `1.0` milestone and `release: 1.0` dark stars.
+`crates/core/src/sky/layout.rs` · SKY-1, SKY-2 · present. Rank to radius, size and angle; brightness from the `1.0` milestone and `release: 1.0` dark stars (`after-1.0` and `after-2.0` are not counted).
 
 ### sky-drift
-`crates/core/src/sky/drift.rs` · SKY-5 · present. Orphan stars, `release: 1.0` dark stars, a roadmap more than 14 days old.
+`crates/core/src/sky/drift.rs` · SKY-5 · present. Orphan stars, `release: 1.0` dark stars (`after-1.0` and `after-2.0` are not drift), a roadmap more than 14 days old.
 
 ### sky-chain
 `crates/core/src/sky/chain.rs` · SKY-3, SKY-7 · present. `Blocked by #N` edges and the longest open chain.
@@ -193,6 +193,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - AUTO-1 may_spend: present.
 - AUTO-9 classify (`classify`, `from_json`): present.
 - AUTO-6 loop driver (`may_start`, `next_command`): present.
+- AUTO-6 satellite loop (`tick`, `ChildRunner`, `classify_failed`; the app's satellite thread, switched on by `satellite.json`): present.
 - AUTO-5 weekly due check (`weekly_due`): present.
 - AUTO-7 place: present.
 - AUTO-3 review (`step`, `first_rung`): present.
@@ -204,6 +205,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 `crates/core/src/it.rs` · IT-1 to IT-4, FD-12 · planned. The loadout from the platform's probe list, unmet `needs`, IT tickets through `fleet errors file`, `it-triage` jobs with `never_on` (waits for U9), ladder-out bugs with the star's `feature:` label.
 - IT-1 loadout read (`read_loadout`): present.
 - IT-2 file error tickets (`file_error_tickets`): present.
+- IT-2 tickets for the app's fleet errors (`file_tickets`, `record_fleet_error`): present.
 - IT-3 triage job (`triage_job`): present.
 - FD-12 unmet needs (`unmet`, `held_job`): present.
 - IT-4 ladder-out bug (`ladder_out_bug`): present.
@@ -211,7 +213,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 
 ### cli
 `crates/cli/src/main.rs`, `cli.rs` · CLI-1, CLI-2, CLI-3 · CLI-1 and CLI-3 present; CLI-2 planned. Text or `--json`; the same numbers as the GUI; role-flagged writes through `rules::guard`.
-- CLI-1 parse arguments, budget, sky, star, waiting, reports: present; loadout: planned. `sky` and `star` read the stored snapshot in the app data folder (`SWITCHBOARD_DATA`, else the desktop app's) and never call GitHub; `star` reads its running job from the job log when `SWITCHBOARD_PIPELINE` is set.
+- CLI-1 parse arguments, budget, sky, star, waiting, reports, loadout: present. `sky` and `star` read the stored snapshot in the app data folder (`SWITCHBOARD_DATA`, else the desktop app's) and never call GitHub; `star` reads its running job from the job log when `SWITCHBOARD_PIPELINE` is set.
 - CLI-3 delete and restore refused to Waiting on you, `--role` merge through the guard and GH-5's merge (`CliWrites`), none inside a job worktree: present.
 
 ### mcp

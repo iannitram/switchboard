@@ -22,6 +22,7 @@ use switchboard_core::github::poll::Poller;
 use switchboard_core::github::snapshot::SnapshotStore;
 use switchboard_core::github::transport::{GitHubTransport, HttpTransport};
 use switchboard_core::github::RepoSnapshot;
+use switchboard_core::it::{self, Loadout};
 use switchboard_core::joblog::{self, NOT_RECORDED};
 use switchboard_core::platform::{current_os, default_dev_root, GhAuthToken, Os};
 use switchboard_core::reports::{self, Filter, Report};
@@ -277,10 +278,11 @@ pub fn run_with(
         },
         Some("waiting") => waiting(args.json),
         Some("reports") => reports(args.json, &filter),
-        Some("loadout") => {
-            eprintln!("switchboard: loadout is not built yet (IT-1: loadout probes on Linux)");
-            ExitCode::from(2)
-        }
+        Some("loadout") => loadout_command(
+            &it::read_this_machine(&it::SystemProbeRunner, SystemClock.now()),
+            args.json,
+            &mut std::io::stdout(),
+        ),
         Some(other) => {
             eprintln!("switchboard: unknown command: {other}");
             eprintln!("{USAGE}");
@@ -892,4 +894,90 @@ fn running_job(repo: &str, number: u64) -> Result<Option<Option<String>>, String
         }
         text
     })))
+}
+
+/// The toolchains the core probes, in the Loadout panel's order (`it.rs` `LOADOUT_TOOLCHAINS`).
+const TOOLCHAINS: [&str; 3] = ["cargo", "node", "python3"];
+/// The line `loadout` prints when this OS has no probes.
+const NO_PROBES: &str = "no loadout probes on this OS";
+
+/// `switchboard loadout`: the text of `loadout_text`, or the `Loadout` as pretty JSON
+/// (`--json`), written to `out`; exit 0.
+pub fn loadout_command(loadout: &Loadout, json: bool, out: &mut dyn Write) -> ExitCode {
+    let text = if json {
+        match serde_json::to_string_pretty(loadout) {
+            Ok(text) => format!("{text}\n"),
+            Err(e) => {
+                eprintln!("switchboard loadout: {e}");
+                return ExitCode::from(1);
+            }
+        }
+    } else {
+        loadout_text(loadout)
+    };
+    if let Err(e) = out.write_all(text.as_bytes()) {
+        eprintln!("switchboard loadout: {e}");
+        return ExitCode::from(1);
+    }
+    ExitCode::SUCCESS
+}
+
+/// One line per probe, in the Loadout panel's order: `<name>  <state>`, then `  <detail>` when
+/// there is one. No probes gives the no-probes line.
+pub fn loadout_text(loadout: &Loadout) -> String {
+    if loadout.clis.is_empty()
+        && loadout.toolchains.is_empty()
+        && loadout.models_loaded.is_empty()
+        && loadout.recent_errors.is_empty()
+        && !loadout.busy
+    {
+        return format!("{NO_PROBES}\n");
+    }
+    // (name, state, detail): the detail is empty when the row has none.
+    let row =
+        |name: &str, state: &str, detail: String| (name.to_string(), state.to_string(), detail);
+    let mut rows: Vec<(String, String, String)> = Vec::new();
+    for (name, signed_in) in &loadout.clis {
+        let state = if *signed_in {
+            "signed in"
+        } else {
+            "not signed in"
+        };
+        rows.push(row(name, state, String::new()));
+    }
+    let mut toolchains: Vec<&str> = TOOLCHAINS.to_vec();
+    let extra = loadout.toolchains.iter().map(String::as_str);
+    toolchains.extend(extra.filter(|name| !TOOLCHAINS.contains(name)));
+    for name in &toolchains {
+        let found = loadout.toolchains.iter().any(|t| t.as_str() == *name);
+        let state = if found { "found" } else { "not found" };
+        rows.push(row(name, state, String::new()));
+    }
+    let loaded = loadout.models_loaded.len();
+    let loaded_state = if loaded > 0 {
+        format!("{loaded} loaded")
+    } else {
+        "no models loaded".to_string()
+    };
+    let models = loadout.models_loaded.join(", ");
+    rows.push(row("llama-swap", &loaded_state, models));
+    let status = if loadout.busy { "busy" } else { "idle" };
+    rows.push(row("fleet status", status, String::new()));
+    let errors = loadout.recent_errors.len();
+    let errors_state = if errors > 0 {
+        format!("{errors} recent")
+    } else {
+        "none".to_string()
+    };
+    let error_list = loadout.recent_errors.join("; ");
+    rows.push(row("fleet errors", &errors_state, error_list));
+    rows.into_iter()
+        .map(|(name, state, detail)| {
+            if detail.is_empty() {
+                format!("{name}  {state}\n")
+            } else {
+                format!("{name}  {state}  {detail}\n")
+            }
+        })
+        .collect()
 }

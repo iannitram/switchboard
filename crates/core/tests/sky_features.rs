@@ -12,6 +12,7 @@ features:
 - core: The core and the fleet bridge (release: 1.0)
 - sky: Constellation (release: 1.0)
 - relay: A headless relay per machine (release: after-1.0)
+- gamification: A gamification plugin (release: after-2.0)
 - fleet-rust2: Porting fleet to Rust
 After the block.
 - late: not in the block (release: 1.0)
@@ -43,6 +44,7 @@ fn reads_updated_and_every_line_of_the_block_in_order() {
                 feature("core", "The core and the fleet bridge", Release::V1),
                 feature("sky", "Constellation", Release::V1),
                 feature("relay", "A headless relay per machine", Release::After1),
+                feature("gamification", "A gamification plugin", Release::After2),
                 feature("fleet-rust2", "Porting fleet to Rust", Release::V1),
             ],
         }
@@ -128,4 +130,8 @@ fn the_repo_roadmap_parses() {
         .features
         .iter()
         .any(|f| f.id == "relay" && f.release == Release::After1));
+    assert!(block
+        .features
+        .iter()
+        .any(|f| f.id == "gamification" && f.release == Release::After2));
 }
