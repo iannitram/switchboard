@@ -30,5 +30,21 @@ pub fn roadmap_changed(
     previous: &[(String, Option<String>)],
     next: &[(String, Option<String>)],
 ) -> Vec<String> {
-    todo!("AUTO-2")
+    let mut seen: Vec<&str> = Vec::new();
+    let mut changed = Vec::new();
+    for (repo, text) in next {
+        if seen.contains(&repo.as_str()) {
+            continue;
+        }
+        seen.push(repo.as_str());
+        let Some(text) = text else { continue };
+        let before = previous
+            .iter()
+            .find(|(name, _)| name == repo)
+            .and_then(|(_, t)| t.as_deref());
+        if before != Some(text.as_str()) {
+            changed.push(repo.clone());
+        }
+    }
+    changed
 }

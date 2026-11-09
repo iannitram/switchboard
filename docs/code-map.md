@@ -166,6 +166,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - AUTO-3 review (`step`, `first_rung`): present.
 - AUTO-3 review job (`review_job`): present.
 - AUTO-8 drifted copies (`drifted`): present.
+- AUTO-2 roadmap_changed: present.
 
 ### it
 `crates/core/src/it.rs` · IT-1 to IT-4, FD-12 · planned. The loadout from the platform's probe list, unmet `needs`, IT tickets through `fleet errors file`, `it-triage` jobs with `never_on` (waits for U9), ladder-out bugs with the star's `feature:` label.
