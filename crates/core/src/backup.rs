@@ -204,6 +204,96 @@ pub fn write_release_list(
     Ok(())
 }
 
+/// Where release file bytes come from: the network in the app, a stub in tests.
+pub trait FileSource {
+    fn fetch(&self, url: &str) -> Result<Vec<u8>, CoreError>;
+}
+
+/// A tag or file name as one safe path part: `/` and `\` become `_`, and a result that is
+/// empty, `.` or `..` becomes `_`.
+fn safe_part(text: &str) -> String {
+    let s = text.replace(['/', '\\'], "_");
+    if s.is_empty() || s == "." || s == ".." {
+        "_".to_string()
+    } else {
+        s
+    }
+}
+
+/// Fetches every asset under 1 GB into `staging/<tag>/<name>`; returns the count.
+fn fetch_into(
+    releases: &[Value],
+    files: &dyn FileSource,
+    staging: &Path,
+) -> Result<u64, CoreError> {
+    let mut count = 0;
+    for release in releases {
+        let Some(assets) = release.get("assets").and_then(Value::as_array) else {
+            continue;
+        };
+        let tag = release["tag_name"]
+            .as_str()
+            .ok_or_else(|| CoreError::Parse("a release has no tag_name".to_string()))?;
+        for asset in assets {
+            if asset["size"]
+                .as_f64()
+                .is_some_and(|s| s >= RELEASE_FILE_LIMIT as f64)
+            {
+                continue;
+            }
+            let name = asset["name"]
+                .as_str()
+                .ok_or_else(|| CoreError::Parse(format!("release {tag}: an asset has no name")))?;
+            let url = asset["browser_download_url"].as_str().ok_or_else(|| {
+                CoreError::Parse(format!("release {tag}: asset {name} has no download URL"))
+            })?;
+            let bytes = files.fetch(url)?;
+            let dir = staging.join(safe_part(tag));
+            std::fs::create_dir_all(&dir).map_err(|e| io_error(&dir, e))?;
+            let path = dir.join(safe_part(name));
+            std::fs::write(&path, bytes).map_err(|e| io_error(&path, e))?;
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+/// BAK-1: every release file under 1 GB into `releases/<tag>/<name>`; returns the count.
+/// Files go to `releases.new/` first and replace `releases/` only when all of them landed.
+pub fn fetch_release_files(
+    releases: &[Value],
+    files: &dyn FileSource,
+    out_dir: &Path,
+) -> Result<u64, CoreError> {
+    let staging = out_dir.join("releases.new");
+    let live = out_dir.join("releases");
+    let _ = std::fs::remove_dir_all(&staging);
+    std::fs::create_dir_all(&staging).map_err(|e| io_error(&staging, e))?;
+    let result = fetch_into(releases, files, &staging).and_then(|count| {
+        if live.exists() {
+            std::fs::remove_dir_all(&live).map_err(|e| io_error(&live, e))?;
+        }
+        std::fs::rename(&staging, &live).map_err(|e| io_error(&staging, e))?;
+        Ok(count)
+    });
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+    result
+}
+
+/// BAK-1: releases as `releases.json` plus their files under 1 GB; sets `manifest.releases`.
+/// The files are fetched first, so a failed fetch changes neither.
+pub fn write_releases(
+    releases: &[Value],
+    files: &dyn FileSource,
+    out_dir: &Path,
+    manifest: &mut Manifest,
+) -> Result<(), CoreError> {
+    fetch_release_files(releases, files, out_dir)?;
+    write_release_list(releases, out_dir, manifest)
+}
+
 fn pretty<T: Serialize>(value: &T) -> Result<String, CoreError> {
     serde_json::to_string_pretty(value).map_err(|e| CoreError::Parse(e.to_string()))
 }
