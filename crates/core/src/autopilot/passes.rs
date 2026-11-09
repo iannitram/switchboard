@@ -4,7 +4,7 @@
 //! tests' a fake.
 
 use super::review::{first_rung, review_job, Rung};
-use super::weekly::roadmap_changed;
+use super::weekly::{roadmap_changed, weekly_due};
 use crate::clock::UnixSeconds;
 use crate::fleet::{FleetBridge, FLEET_ROOT_ENV};
 use crate::github::merge::merge_passed;
@@ -31,6 +31,10 @@ pub struct AutopilotState {
     pub reviews_started: Vec<String>,
     /// AUTO-2: each repo's ROADMAP.md as last acted on, in the order first seen.
     pub roadmaps: Vec<(String, Option<String>)>,
+    /// AUTO-5: when the weekly run last started.
+    pub weekly_last_run: Option<UnixSeconds>,
+    /// AUTO-5: repos whose drift clear has not started yet (braked), oldest first.
+    pub drift_pending: Vec<String>,
 }
 
 impl AutopilotState {
@@ -300,6 +304,104 @@ pub fn roadmap_pass(
         }
     }
     Ok(started)
+}
+
+/// AUTO-5: the task of the weekly drift clear's Project Manager job.
+pub const DRIFT_TASK: &str = "This is the weekly drift clear. Compare SPEC.md, ROADMAP.md, docs/code-map.md and the open issues with the code on main, then file or adjust an issue for each place they disagree.";
+
+/// AUTO-5: when the weekly run is due (`weekly_due`), record it as taken now and queue each of
+/// `repos` for a drift clear at the end of `drift_pending` (a repo already queued keeps its place).
+/// Answers whether the week's run was taken; changes nothing when it was not due.
+pub fn weekly_take(
+    now: UnixSeconds,
+    utc_offset_secs: i64,
+    repos: &[String],
+    state: &mut AutopilotState,
+) -> bool {
+    if !weekly_due(now, utc_offset_secs, state.weekly_last_run) {
+        return false;
+    }
+    state.weekly_last_run = Some(now);
+    for repo in repos {
+        if !state.drift_pending.contains(repo) {
+            state.drift_pending.push(repo.clone());
+        }
+    }
+    true
+}
+
+/// AUTO-5: start one drift clear for each pending repo, in order, on `PM_LANE`. A braked repo
+/// goes back on the list for a later check. A failed question or start keeps that repo and every
+/// one after it pending, and returns the error. Answers the job ids started.
+pub fn drift_pass(
+    now: UnixSeconds,
+    state: &mut AutopilotState,
+    starter: &mut dyn JobStarter,
+) -> Result<Vec<String>, CoreError> {
+    let pending = std::mem::take(&mut state.drift_pending);
+    let mut started = Vec::new();
+    for (i, repo) in pending.iter().enumerate() {
+        let job = pm_job(repo, "drift", now);
+        let open = match starter.may_spend(PM_LANE) {
+            Ok(open) => open,
+            Err(e) => {
+                state.drift_pending.extend_from_slice(&pending[i..]);
+                return Err(e);
+            }
+        };
+        if !open {
+            state.drift_pending.push(repo.clone());
+            continue;
+        }
+        if let Err(e) = starter.start(&job, &pm_brief(repo, DRIFT_TASK)) {
+            state.drift_pending.extend_from_slice(&pending[i..]);
+            return Err(e);
+        }
+        if let Some(id) = job["id"].as_str() {
+            started.push(id.to_string());
+        }
+    }
+    Ok(started)
+}
+
+/// AUTO-5: what one weekly check decided: the repos to back up, the drift clear jobs started,
+/// and the drift pass's error (the backup still runs).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WeeklyRun {
+    /// The repos to back up now (BAK-1), empty unless this check took the week's run.
+    pub backup: Vec<String>,
+    /// The drift clear job ids started.
+    pub drift_started: Vec<String>,
+    /// The drift pass's error, if it had one.
+    pub drift_error: Option<CoreError>,
+}
+
+/// AUTO-5: one weekly check after a poll. The week's run, when due, queues every repo that is
+/// not archived; the drift pass runs every time, so a braked repo starts at a later check. The
+/// state is saved either way.
+pub fn weekly_run(
+    data_dir: &Path,
+    now: UnixSeconds,
+    utc_offset_secs: i64,
+    starter: &mut dyn JobStarter,
+) -> Result<WeeklyRun, CoreError> {
+    let repos: Vec<String> = SnapshotStore::new(data_dir)
+        .load_all()?
+        .into_iter()
+        .filter(|snap| !snap.archived)
+        .map(|snap| snap.repo)
+        .collect();
+    let mut state = AutopilotState::load(data_dir)?;
+    let mut run = WeeklyRun::default();
+    if weekly_take(now, utc_offset_secs, &repos, &mut state) {
+        run.backup = repos;
+    }
+    match drift_pass(now, &mut state, starter) {
+        Ok(ids) => run.drift_started = ids,
+        Err(e) => run.drift_error = Some(e),
+    }
+    state.save(data_dir)?;
+    Ok(run)
 }
 
 /// What `after_poll` needs: the app data folder, this machine's name and the fleet seam.
