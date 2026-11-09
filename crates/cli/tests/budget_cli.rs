@@ -180,19 +180,6 @@ fn loadout_exits_2_naming_it_1() {
 }
 
 #[test]
-fn unbuilt_commands_exit_2() {
-    for command in ["sky", "star"] {
-        let out = switchboard(&[command], Some(stub_root().as_os_str()));
-        assert_eq!(out.status.code(), Some(2), "{command}");
-        assert!(
-            stderr(&out).contains(&format!("switchboard: {command} is not built yet")),
-            "stderr: {}",
-            stderr(&out)
-        );
-    }
-}
-
-#[test]
 fn an_empty_or_unknown_command_exits_2_with_usage() {
     for argv in [&[][..], &["frobnicate"][..], &["--json"][..]] {
         let out = switchboard(argv, Some(stub_root().as_os_str()));
