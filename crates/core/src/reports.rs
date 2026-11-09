@@ -2,9 +2,15 @@
 //! fixed-report shape plus the line our job cards lack ("what wasn't checked").
 
 use crate::clock::UnixSeconds;
-use crate::joblog::{JobRow, NOT_RECORDED};
+use crate::error::CoreError;
+use crate::fleet::FleetBridge;
+use crate::joblog::{ledger_files, read_all, read_ledger, JobRow, NOT_RECORDED};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::ffi::OsStr;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Report {
@@ -330,4 +336,131 @@ pub fn newest_first(reports: &[Report]) -> Vec<Report> {
     let mut sorted = reports.to_vec();
     sorted.sort_by_key(|r| std::cmp::Reverse(r.at));
     sorted
+}
+
+/// The env var that names the fleet-state checkout outright (REP-W).
+pub const FLEET_STATE_DIR_ENV: &str = "FLEET_STATE_DIR";
+
+/// REP-W: where the fleet-state checkout is, as `fleet` finds it (`state_dir` in
+/// `tools/fleet/common.py`). The first answer that holds: a non-empty `env`; the sibling folder
+/// `<root>-fleet-state` when it is a checkout or the root is not one; the first existing
+/// worktree on `refs/heads/fleet-state` in `worktrees` (the text of `git worktree list
+/// --porcelain`); else the sibling folder.
+pub fn state_dir_from(pipeline_root: &Path, env: Option<&OsStr>, worktrees: &str) -> PathBuf {
+    if let Some(dir) = env.filter(|v| !v.is_empty()) {
+        return PathBuf::from(dir);
+    }
+    let mut name = pipeline_root
+        .file_name()
+        .map(OsStr::to_os_string)
+        .unwrap_or_default();
+    name.push("-fleet-state");
+    let default = pipeline_root.with_file_name(name);
+    if default.join(".git").exists() || !pipeline_root.join(".git").exists() {
+        return default;
+    }
+
+    let mut current: Option<PathBuf> = None;
+    for line in worktrees.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            current = None;
+        } else if let Some(path) = line.strip_prefix("worktree ") {
+            current = Some(PathBuf::from(path.trim()));
+        } else if trimmed == "branch refs/heads/fleet-state" {
+            if let Some(path) = current.as_ref().filter(|p| p.is_dir()) {
+                return path.clone();
+            }
+        }
+    }
+    default
+}
+
+/// REP-W: the done cards in `<state_dir>/jobs/done/`: each `*.json` file that is not a
+/// `*.job.json`, in path order, when it parses to a JSON object. A missing folder is no cards.
+pub fn read_done_cards(state_dir: &Path) -> Result<Vec<Value>, CoreError> {
+    let done = state_dir.join("jobs").join("done");
+    let entries = match fs::read_dir(&done) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(CoreError::Io(format!("{}: {e}", done.display()))),
+    };
+    let mut files: Vec<PathBuf> = Vec::new();
+    for entry in entries {
+        let path = entry
+            .map_err(|e| CoreError::Io(format!("{}: {e}", done.display())))?
+            .path();
+        let card_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.ends_with(".json") && !n.ends_with(".job.json"));
+        if card_name && path.is_file() {
+            files.push(path);
+        }
+    }
+    files.sort();
+
+    let mut cards = Vec::new();
+    for path in files {
+        let text = fs::read_to_string(&path)
+            .map_err(|e| CoreError::Io(format!("{}: {e}", path.display())))?;
+        if let Some(card) = serde_json::from_str::<Value>(&text)
+            .ok()
+            .filter(Value::is_object)
+        {
+            cards.push(card);
+        }
+    }
+    Ok(cards)
+}
+
+/// REP-W: the reports for the cards and the threads, newest first, narrowed by `f` when set.
+/// The cards come first, then the threads, before the sort. Inputs are not changed.
+pub fn assemble(
+    cards: &[Value],
+    ledger_events: &[Value],
+    threads: &[(String, Vec<JobRow>)],
+    f: Option<&Filter>,
+) -> Vec<Report> {
+    let rows = read_all(ledger_events, &[]);
+    let mut reports: Vec<Report> = cards.iter().map(|card| from_card(card, &rows)).collect();
+    reports.extend(
+        threads
+            .iter()
+            .map(|(id, thread_rows)| from_thread(id, thread_rows)),
+    );
+    let sorted = newest_first(&reports);
+    match f {
+        Some(f) => filter(&sorted, f).into_iter().cloned().collect(),
+        None => sorted,
+    }
+}
+
+/// The output of `git -C <root> worktree list --porcelain`, or empty when git cannot run.
+fn git_worktrees(root: &Path) -> String {
+    Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["worktree", "list", "--porcelain"])
+        .stdin(Stdio::null())
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
+        .unwrap_or_default()
+}
+
+/// REP-W: the reports the Reports view shows, read from disk: the done cards and the ledger
+/// under the fleet-state checkout, and the legacy ledger under the pipeline root.
+pub fn load(
+    fleet: &FleetBridge,
+    env: Option<&OsStr>,
+    threads: &[(String, Vec<JobRow>)],
+    f: Option<&Filter>,
+) -> Result<Vec<Report>, CoreError> {
+    let root = fleet.root();
+    let state = state_dir_from(root, env, &git_worktrees(root));
+    let cards = read_done_cards(&state)?;
+    let events = read_ledger(&ledger_files(root, &state))?;
+    Ok(assemble(&cards, &events, threads, f))
 }
