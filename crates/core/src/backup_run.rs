@@ -15,9 +15,9 @@ use std::path::{Path, PathBuf};
 /// One backup's outcome as the face reads it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BackupRow {
-    pub repo: String,             // owner/name
-    pub outcome: String,          // "written" | "refused"
-    pub folder: String,           // folder(backups, repo).display().to_string()
+    pub repo: String,               // owner/name
+    pub outcome: String,            // "written" | "refused"
+    pub folder: String,             // folder(backups, repo).display().to_string()
     pub manifest: Option<Manifest>, // Some when written
     pub reason: Option<String>,     // Some when refused
 }
