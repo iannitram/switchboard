@@ -184,6 +184,8 @@ pub fn bundle(mirror: &Path, out_dir: &Path) -> Result<u64, CoreError> {
             mirror.display()
         )));
     }
+    // git runs with `-C <mirror>`, so a relative `out_dir` would land inside the mirror.
+    let out_dir = &std::path::absolute(out_dir).map_err(|e| io_error(out_dir, e))?;
     std::fs::create_dir_all(out_dir).map_err(|e| io_error(out_dir, e))?;
     let tmp = out_dir.join("repo.bundle.new");
     let _ = std::fs::remove_file(&tmp);
