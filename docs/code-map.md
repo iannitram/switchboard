@@ -204,8 +204,9 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - IT-4 ladder-out bug (`ladder_out_bug`): present.
 
 ### cli
-`crates/cli/src/main.rs`, `cli.rs` · CLI-1, CLI-2, CLI-3 · planned. Text or `--json`; the same numbers as the GUI; role-flagged writes through `rules::guard`.
+`crates/cli/src/main.rs`, `cli.rs` · CLI-1, CLI-2, CLI-3 · CLI-1 and CLI-3 present; CLI-2 planned. Text or `--json`; the same numbers as the GUI; role-flagged writes through `rules::guard`.
 - CLI-1 parse arguments, budget: present; sky, waiting, reports, star, loadout: planned.
+- CLI-3 delete and restore refused to Waiting on you, `--role` merge through the guard, none inside a job worktree: present; the real merge and Waiting write are not wired yet (stubs, as in `mcp.rs`).
 
 ### mcp
 `crates/cli/src/mcp.rs` · MCP-1 and MCP-2 present; MCP-3 planned. JSON-RPC over stdio; six read tools; role write tools; none inside a job worktree.
