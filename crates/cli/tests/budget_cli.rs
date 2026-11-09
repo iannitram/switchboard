@@ -1,4 +1,4 @@
-//! CLI-1 (#64): `parse_args`, and `switchboard budget` / `loadout` run as the built binary
+//! CLI-1 (#64): `parse_args`, and `switchboard budget` run as the built binary
 //! against the fleet stub under `crates/core/tests/fixtures/fleet-stub/`.
 
 // The binary crate has no library target, so main.rs (and through it cli.rs and mcp.rs) is
@@ -170,13 +170,6 @@ fn budget_without_a_pipeline_exits_2() {
             stderr(&out)
         );
     }
-}
-
-#[test]
-fn loadout_exits_2_naming_it_1() {
-    let out = switchboard(&["loadout"], Some(stub_root().as_os_str()));
-    assert_eq!(out.status.code(), Some(2));
-    assert!(stderr(&out).contains("IT-1"), "stderr: {}", stderr(&out));
 }
 
 #[test]
