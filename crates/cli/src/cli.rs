@@ -934,9 +934,8 @@ pub fn loadout_text(loadout: &Loadout) -> String {
         return format!("{NO_PROBES}\n");
     }
     // (name, state, detail): the detail is empty when the row has none.
-    let row = |name: &str, state: &str, detail: String| {
-        (name.to_string(), state.to_string(), detail)
-    };
+    let row =
+        |name: &str, state: &str, detail: String| (name.to_string(), state.to_string(), detail);
     let mut rows: Vec<(String, String, String)> = Vec::new();
     for (name, signed_in) in &loadout.clis {
         let state = if *signed_in {
