@@ -216,7 +216,8 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - CLI-3 delete and restore refused to Waiting on you, `--role` merge through the guard and GH-5's merge (`CliWrites`), none inside a job worktree: present.
 
 ### mcp
-`crates/cli/src/mcp.rs` · MCP-1 and MCP-2 present; MCP-3 planned. JSON-RPC over stdio; six read tools; role write tools; none inside a job worktree.
+`crates/cli/src/mcp.rs` · MCP-1 to MCP-3 present. JSON-RPC over stdio; six read tools; role write tools; none inside a job worktree.
+- MCP-2 write tools reach the real core (`CoreWrites`: the CLI's merge, BUD-2's save, local Waiting items): present.
 - MCP-3 no write tools in a job worktree: present.
 
 ### shell

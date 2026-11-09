@@ -9,6 +9,8 @@ mod mcp;
 
 use std::process::ExitCode;
 
+use switchboard_core::clock::SystemClock;
+use switchboard_core::fleet::FleetBridge;
 use switchboard_core::rules;
 
 /// The parsed command line.
@@ -63,24 +65,6 @@ impl mcp::ReadCore for Core {
     }
 }
 
-/// The real core behind the write tools (MCP-2). Each write answers with the issue that builds
-/// it until then; the guard runs before any of them is called.
-struct Writes;
-
-impl mcp::WriteCore for Writes {
-    fn merge(&self, repo: &str, pr: u64) -> Result<(), String> {
-        Err(format!("merge {repo}#{pr}: not built yet (GH-5)"))
-    }
-
-    fn set_pool_cap(&self, pool: &str, cap: f64) -> Result<(), String> {
-        Err(format!("set_pool_cap {pool}: not built yet (BUD-2)"))
-    }
-
-    fn waiting(&self, text: &str) -> Result<(), String> {
-        Err(format!("waiting: not built yet (WAIT-1, #50): {text}"))
-    }
-}
-
 /// MCP-2: the `--role <role>` flag of `switchboard mcp`; `None` without one. Any other value
 /// is an error, so `serve` never starts.
 fn mcp_role(words: &[String]) -> Result<Option<rules::Role>, String> {
@@ -113,8 +97,17 @@ fn main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             };
+            // MCP-2: the real write core: the CLI's own merge, the pipeline checkout and the
+            // app data folder from the environment, the real clock.
+            let merge = cli::real_merge;
+            let writes = mcp::CoreWrites {
+                merge: &merge,
+                fleet: cli::pipeline_dir().map(|root| FleetBridge::new(&root)),
+                data: cli::data_dir(),
+                clock: &SystemClock,
+            };
             let stdin = std::io::stdin();
-            match mcp::serve(stdin.lock(), std::io::stdout().lock(), &Core, role, &Writes) {
+            match mcp::serve(stdin.lock(), std::io::stdout().lock(), &Core, role, &writes) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("switchboard mcp: {e}");

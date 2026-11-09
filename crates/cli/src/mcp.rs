@@ -5,9 +5,14 @@
 //! MCP-3: inside a job worktree, no write tool whatever the flag.
 
 use std::io::{BufRead, Write};
+use std::path::PathBuf;
 
 use serde_json::{json, Value};
+use switchboard_core::budget::{self, PoolEdit};
+use switchboard_core::clock::Clock;
+use switchboard_core::fleet::FleetBridge;
 use switchboard_core::rules::{self, Caller, Face, GuardedAction, Role, Verdict};
+use switchboard_core::waiting::{Item, LocalItems, Source};
 
 /// The core behind the tools. `serve` passes a read tool's name and arguments here and returns
 /// the answer as text. The real core is a thin struct in main.rs.
@@ -22,6 +27,63 @@ pub trait WriteCore {
     fn set_pool_cap(&self, pool: &str, cap: f64) -> Result<(), String>;
     /// A guarded request the CLI or MCP may not run becomes a Waiting on you item.
     fn waiting(&self, text: &str) -> Result<(), String>;
+}
+
+/// MCP-2: the real write core. `merge` is the CLI's merge (CLI-3, #242); `set_pool_cap` is
+/// BUD-2's `save_edit`; `waiting` adds a local Waiting on you item.
+pub struct CoreWrites<'a> {
+    pub merge: &'a dyn Fn(&str, u64) -> Result<(), String>,
+    /// The pipeline checkout (`SWITCHBOARD_PIPELINE`); `None` when unset.
+    pub fleet: Option<FleetBridge>,
+    /// The app data folder (`SWITCHBOARD_DATA`, else the desktop app's); `None` when unknown.
+    pub data: Option<PathBuf>,
+    pub clock: &'a dyn Clock,
+}
+
+impl WriteCore for CoreWrites<'_> {
+    fn merge(&self, repo: &str, pr: u64) -> Result<(), String> {
+        (self.merge)(repo, pr)
+    }
+
+    fn set_pool_cap(&self, pool: &str, cap: f64) -> Result<(), String> {
+        let fleet = self.fleet.as_ref().ok_or_else(|| {
+            "set_pool_cap: set SWITCHBOARD_PIPELINE to your pipeline checkout".to_string()
+        })?;
+        let data = self.data.as_ref().ok_or_else(|| {
+            "set_pool_cap: set SWITCHBOARD_DATA to the app data folder".to_string()
+        })?;
+        let edit = PoolEdit {
+            pool: pool.to_string(),
+            cap: Some(cap),
+            ..PoolEdit::default()
+        };
+        let saved = budget::save_edit(fleet, &edit, &data.join("pool-edits.jsonl"), self.clock)
+            .map_err(|e| format!("set_pool_cap {pool}: {e}"))?;
+        LocalItems::new(data)
+            .add(saved.waiting)
+            .map_err(|e| format!("set_pool_cap {pool}: {e}"))
+    }
+
+    fn waiting(&self, text: &str) -> Result<(), String> {
+        let data = self
+            .data
+            .as_ref()
+            .ok_or_else(|| "waiting: set SWITCHBOARD_DATA to the app data folder".to_string())?;
+        let item = Item {
+            what: text.to_string(),
+            why: "Asked for from the CLI or MCP; only the app can do it, after I confirm (CORE-3)."
+                .to_string(),
+            source: Source::GuardedAction {
+                text: text.to_string(),
+            },
+            link: String::new(),
+            action: "Confirm in the app".to_string(),
+            since: self.clock.now(),
+        };
+        LocalItems::new(data)
+            .add(item)
+            .map_err(|e| format!("waiting: {e}"))
+    }
 }
 
 /// MCP-1: the read tools, in this order.
