@@ -444,6 +444,31 @@ pub fn backup_all(
         .map_err(|e| FaceError::new("backup_all", &e))
 }
 
+/// FD-12: send a held Chat request as a fleet job another machine pulls (the Chat view's
+/// "Send as a fleet job"). This machine's name comes from `FLEET_MACHINE` or the machine file.
+#[tauri::command]
+pub fn chat_send_as_job(
+    state: tauri::State<'_, AppState>,
+    kind: String,
+    request: String,
+    unmet: Vec<String>,
+) -> Result<serde_json::Value, FaceError> {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    let env_name = std::env::var("FLEET_MACHINE").ok();
+    let machine = switchboard_core::it::this_machine(env_name.as_deref(), &home);
+    let machine = machine.unwrap_or_default();
+    bridge(&state.settings_path)
+        .and_then(|fleet| {
+            switchboard_core::it::send_held_job(&fleet, &kind, &request, &unmet, &machine)
+        })
+        .map_err(|e| {
+            record_fleet_error(&state, &e);
+            FaceError::new("chat_send_as_job", &e)
+        })
+}
+
 #[cfg(test)]
 #[path = "it_tickets_tests.rs"]
 mod it_tickets_tests;

@@ -49,6 +49,44 @@ export function ChatHandoff({ pick, prompt, openInClaude, logImplicit }: ChatHan
   );
 }
 
+/** FD-12: a request the route held because this machine's loadout misses some of its kind's needs. */
+export type Held = { kind: string; request: string; unmet: string[] };
+
+/** FD-12: queues the held request as a fleet job another machine pulls (`chat_send_as_job`). */
+export const sendAsJob = (held: Held): Promise<CoreResult<unknown>> =>
+  call<unknown>("chat_send_as_job", { kind: held.kind, request: held.request, unmet: held.unmet });
+
+export type ChatHeldProps = { held: Held; send?: (held: Held) => Promise<CoreResult<unknown>> };
+
+/** FD-12: the needs this machine lacks, and the "Send as a fleet job" button. Nothing when none are unmet. */
+export function ChatHeld({ held, send = sendAsJob }: ChatHeldProps) {
+  const [busy, setBusy] = useState(false);
+  const [sent, setSent] = useState(false);
+  const [error, setError] = useState<CoreError | null>(null);
+  if (held.unmet.length === 0) return null;
+  const press = async () => {
+    if (busy || sent) return;
+    setBusy(true);
+    setError(null);
+    const r = await send(held);
+    setBusy(false);
+    if ("ok" in r) setSent(true);
+    else setError(r.error);
+  };
+  return (
+    <div data-part="held">
+      <p>{`Held: this machine lacks ${held.unmet.join(", ")}.`}</p>
+      {!sent && (
+        <button type="button" disabled={busy} onClick={() => void press()}>
+          Send as a fleet job
+        </button>
+      )}
+      {sent && <p role="status">Sent as a fleet job. Another machine will pull it.</p>}
+      {error && <p role="alert">{`${error.command} failed: ${error.lines.join(" / ")}`}</p>}
+    </div>
+  );
+}
+
 /** The router's answer to one message (FD-1): the step that picked the model, and the pick. */
 /**
  * The router's answer to one message (FD-1): the step that picked the model, and the pick. When the
@@ -74,9 +112,10 @@ const defaultSend: ChatSend = (message) => call<ChatRoute>("chat_route", { messa
 
 export function Chat({
   handoff,
+  held,
   send = defaultSend,
   resolveLink,
-}: { handoff?: ChatHandoffProps; send?: ChatSend; resolveLink?: ResolveMessageLink } = {}) {
+}: { handoff?: ChatHandoffProps; held?: Held; send?: ChatSend; resolveLink?: ResolveMessageLink } = {}) {
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [route, setRoute] = useState<ChatRoute | null>(null);
@@ -114,9 +153,10 @@ export function Chat({
   return (
     <div>
       <ErrorBanner errors={errors} />
-      {handoff ? (
+      {handoff || held ? (
         <section aria-label="Chat">
-          <ChatHandoff {...handoff} />
+          {handoff && <ChatHandoff {...handoff} />}
+          {held && <ChatHeld held={held} />}
         </section>
       ) : turns.length === 0 ? (
         <Empty view="Chat" />

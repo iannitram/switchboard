@@ -4,7 +4,9 @@
 use crate::clock::UnixSeconds;
 use crate::fleet::{FleetBridge, FleetError, FleetErrorLog};
 use crate::platform::{current_os, loadout_probes, Probe};
+use crate::CoreError;
 use serde::Serialize;
+use std::path::Path;
 
 /// IT-1: what this machine can do right now.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -160,6 +162,53 @@ pub fn held_job(
         "needs": unmet,
         "never_on": [this_machine],
     }))
+}
+
+/// FD-12: the fleet command that queues a held request (the job JSON on stdin). Until the pipeline
+/// has this mode, fleet answers with an error and the press shows it.
+pub const HELD_JOB_ARGS: [&str; 3] = ["attach", "--request", "-"];
+
+/// FD-12: this machine's fleet name, read as fleet reads it: `FLEET_MACHINE`, else the first line
+/// of `~/.config/software-depot/machine`, trimmed. None when neither gives a name.
+pub fn this_machine(fleet_machine_env: Option<&str>, home: &Path) -> Option<String> {
+    if let Some(name) = fleet_machine_env.map(str::trim).filter(|s| !s.is_empty()) {
+        return Some(name.to_string());
+    }
+    let path = home.join(".config").join("software-depot").join("machine");
+    let text = std::fs::read_to_string(path).ok()?;
+    let first = text.lines().next()?.trim();
+    (!first.is_empty()).then(|| first.to_string())
+}
+
+/// FD-12: queue a held request as a fleet job another machine pulls. Exit 0 queued (the job is
+/// returned); 75 not queued; any other exit or a failed call is the fleet's error.
+pub fn send_held_job(
+    fleet: &FleetBridge,
+    kind: &str,
+    request: &str,
+    unmet: &[String],
+    this_machine: &str,
+) -> Result<serde_json::Value, CoreError> {
+    let machine = this_machine.trim();
+    if machine.is_empty() {
+        return Err(CoreError::Refused(
+            "fd-12: this machine has no fleet name (FLEET_MACHINE or the machine file)".to_string(),
+        ));
+    }
+    let Some(job) = held_job(kind, request, unmet, machine) else {
+        return Err(CoreError::Refused(
+            "fd-12: nothing is unmet, so there is no job to send".to_string(),
+        ));
+    };
+    let code = fleet
+        .run_status_with_input(&HELD_JOB_ARGS, &job.to_string())
+        .map_err(CoreError::Fleet)?;
+    match code {
+        0 => Ok(job),
+        code => Err(CoreError::Refused(format!(
+            "fd-12: fleet did not queue the job (exit {code})"
+        ))),
+    }
 }
 
 /// IT-2: one ticket per error signature; the repeat comments on it (`fleet errors file`).
