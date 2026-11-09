@@ -3,6 +3,7 @@ import { call, type CoreResult } from "../core";
 import { Empty } from "./Empty";
 import { ConstellationView } from "../sky/ConstellationView";
 import { SkyMap } from "../sky/SkyMap";
+import { DriftList } from "../sky/DriftList";
 import { StarPanel } from "../sky/StarPanel";
 import type { SkyModel, Star } from "../sky/model";
 
@@ -59,6 +60,7 @@ export function Sky() {
   return (
     <section aria-label="Sky">
       <SkyMap sky={sky} onOpen={setOpen} />
+      <DriftList drift={sky.constellations.flatMap((c) => c.drift.map((d) => ({ ...d, repo: c.repo })))} />
     </section>
   );
 }

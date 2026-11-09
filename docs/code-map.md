@@ -119,8 +119,11 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 ### sky-labels
 `crates/core/src/sky/labels.rs` · SKY-10 · present. The `feature:` label for a design-pass issue and an automatic bug.
 
+### sky-model
+`crates/core/src/sky/model.rs` · SKY-1 to SKY-9 · present. The SkyModel the `sky` command answers: the snapshot store and the priority copy in the app data folder, assembled from the sky modules; no snapshot is `GitHub: no snapshot yet`.
+
 ### sky-face
-`app/src/views/Sky.tsx` (+ `app/src/sky/`) · SKY-1, SKY-3, SKY-4, SKY-5, SKY-6, SKY-7, SKY-8 · planned. SVG: the sky, the zoomed constellation (clusters, stars, blocked-by lines, milestone rings), star states, the drift list, reuse lines, the chain highlight, the star panel. Paints what the core worked out.
+`app/src/views/Sky.tsx` (+ `app/src/sky/`) · SKY-1, SKY-3, SKY-4, SKY-5, SKY-6, SKY-7, SKY-8 · present. SVG: the sky, the zoomed constellation (clusters, stars, blocked-by lines, milestone rings), star states, the drift list, reuse lines, the chain highlight, the star panel. Paints what the core worked out.
 
 ### waiting
 `crates/core/src/waiting.rs`, `app/src/views/Waiting.tsx` · WAIT-1, WAIT-2, WAIT-3 · planned. Items from the snapshot, CalDAV (U7), handoffs, guarded actions, IT tickets, refused backups, the stale priority copy and pool edits (U5); merged newest first; carried between reads. The item view is ported from BroCrew.
@@ -162,6 +165,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 `crates/core/src/frontdoor/` · FD-1 to FD-13 · planned. `router` (the four steps, the `first` list against budget, the learned pick), `labeller` (rules, then a small model, U8), `adapters` (one per service; none for the Claude subscription), `packet` (summary, last 6 turns, links; the summary check), `sticky` (what moves a chat; implicit signals), `thread` (one JSON Lines file per thread). Face: `app/src/views/Chat.tsx` with BroCrew's composer and messages ported; the "Open in Claude" button (FD-8).
 - FD-6 packet (`build`): present.
 - FD-7 summary check (`missing_from_summary`, `checked_summary`): present.
+- FD-13 thread store: present.
 - FD-11 adapter interface (`split_handoff`, `log_row`): present.
 - FD-9 rating and implicit rows (`rating_row`, `implicit_row`): present.
 - FD-10 separate move field (`with_move`, `thumbs_down_counts`): present.
@@ -174,6 +178,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - AUTO-9 classify (`classify`, `from_json`): present.
 - AUTO-6 loop driver (`may_start`, `next_command`): present.
 - AUTO-5 weekly due check (`weekly_due`): present.
+- AUTO-7 place: present.
 - AUTO-3 review (`step`, `first_rung`): present.
 - AUTO-3 review job (`review_job`): present.
 - AUTO-8 drifted copies (`drifted`): present.

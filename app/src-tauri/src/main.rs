@@ -52,6 +52,7 @@ fn main() {
             commands::budget_refresh,
             commands::budget_save_edit,
             commands::waiting,
+            commands::sky,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Switchboard");

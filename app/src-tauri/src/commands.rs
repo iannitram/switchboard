@@ -5,7 +5,7 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use switchboard_core::budget::{self, PoolEdit, PoolRow};
-use switchboard_core::clock::SystemClock;
+use switchboard_core::clock::{Clock, SystemClock};
 use switchboard_core::fleet::{FleetBridge, FleetError, FleetErrorLog};
 use switchboard_core::waiting::LocalItems;
 use switchboard_core::{settings, CoreError};
@@ -85,6 +85,16 @@ pub fn settings_missing(state: tauri::State<'_, AppState>) -> Result<Vec<&'stati
 pub fn fleet_errors(state: tauri::State<'_, AppState>) -> Vec<FleetErrorRow> {
     let log = state.errors.lock().unwrap_or_else(|p| p.into_inner());
     log.errors.iter().map(FleetErrorRow::from).collect()
+}
+
+/// SKY-W: the sky the Sky view paints, from the snapshot in the app data folder.
+#[tauri::command]
+pub fn sky(app: tauri::AppHandle) -> Result<switchboard_core::sky::model::SkyModel, FaceError> {
+    app.path()
+        .app_data_dir()
+        .map_err(|e| CoreError::Io(format!("app data dir: {e}")))
+        .and_then(|data| switchboard_core::sky::model::load(&data, SystemClock.now()))
+        .map_err(|e| FaceError::new("sky", &e))
 }
 
 /// The fleet bridge over the pipeline repo the settings file names.
