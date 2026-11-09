@@ -4,6 +4,8 @@
 
 use crate::fleet::FleetBridge;
 use crate::github::queue::{self, Create};
+use crate::github::transport::{GitHubTransport, HttpTransport};
+use crate::settings::Settings;
 use crate::CoreError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -164,6 +166,46 @@ fn closes_of(body: &str) -> Vec<u64> {
     numbers
 }
 
+/// BAK-1: a release file of this many bytes or more is listed but not fetched.
+pub const RELEASE_FILE_LIMIT: u64 = 1_000_000_000;
+
+/// BAK-1: the releases as `releases.json`, every asset of 1 GB or more marked skipped; sets
+/// `manifest.releases`.
+pub fn write_release_list(
+    releases: &[Value],
+    out_dir: &Path,
+    manifest: &mut Manifest,
+) -> Result<(), CoreError> {
+    let mut list = releases.to_vec();
+    for release in &mut list {
+        if let Some(assets) = release.get_mut("assets").and_then(Value::as_array_mut) {
+            for asset in assets {
+                if asset["size"]
+                    .as_f64()
+                    .is_some_and(|s| s >= RELEASE_FILE_LIMIT as f64)
+                {
+                    if let Some(asset) = asset.as_object_mut() {
+                        asset.insert("skipped".to_string(), Value::from("over 1 GB"));
+                    }
+                }
+            }
+        }
+    }
+    let text = pretty(&list)?;
+    std::fs::create_dir_all(out_dir).map_err(|e| io_error(out_dir, e))?;
+    let tmp = out_dir.join("releases.json.new");
+    if let Err(e) = std::fs::write(&tmp, text) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(io_error(&tmp, e));
+    }
+    if let Err(e) = std::fs::rename(&tmp, out_dir.join("releases.json")) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(io_error(&tmp, e));
+    }
+    manifest.releases = releases.len() as u64;
+    Ok(())
+}
+
 fn pretty<T: Serialize>(value: &T) -> Result<String, CoreError> {
     serde_json::to_string_pretty(value).map_err(|e| CoreError::Parse(e.to_string()))
 }
@@ -226,6 +268,46 @@ fn bundle_new(mirror: &Path, tmp: &Path) -> Result<u64, CoreError> {
         )));
     }
     Ok(count as u64)
+}
+
+/// BAK-1: the wiki as a bare mirror in `wiki.git`; sets `manifest.wiki`.
+///
+/// `wiki_mirror` is a bare mirror of `<repo>.wiki.git` the caller already cloned, or `None` for a
+/// repo with no wiki: then `manifest.wiki` is false and nothing is written, not even `out_dir`.
+/// Otherwise `git clone --mirror` copies it into `wiki.git.new`, which is renamed over
+/// `wiki.git`. A failed copy removes the `.new` copy, returns the error and leaves the old
+/// `wiki.git` and `manifest.wiki` as they were. Makes no network calls.
+pub fn copy_wiki(
+    wiki_mirror: Option<&Path>,
+    out_dir: &Path,
+    manifest: &mut Manifest,
+) -> Result<(), CoreError> {
+    let Some(mirror) = wiki_mirror else {
+        manifest.wiki = false;
+        return Ok(());
+    };
+    // git runs with `-C <out_dir>`, so both paths must be absolute.
+    let mirror = std::path::absolute(mirror).map_err(|e| io_error(mirror, e))?;
+    let out_dir = std::path::absolute(out_dir).map_err(|e| io_error(out_dir, e))?;
+    std::fs::create_dir_all(&out_dir).map_err(|e| io_error(&out_dir, e))?;
+    let tmp = out_dir.join("wiki.git.new");
+    let _ = std::fs::remove_dir_all(&tmp);
+    let mirror_arg = mirror.to_string_lossy();
+    let tmp_arg = tmp.to_string_lossy();
+    if let Err(e) = git(
+        &out_dir,
+        &["clone", "-q", "--mirror", &mirror_arg, &tmp_arg],
+    ) {
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err(e);
+    }
+    let copy = out_dir.join("wiki.git");
+    if copy.exists() {
+        std::fs::remove_dir_all(&copy).map_err(|e| io_error(&copy, e))?;
+    }
+    std::fs::rename(&tmp, &copy).map_err(|e| io_error(&tmp, e))?;
+    manifest.wiki = true;
+    Ok(())
 }
 
 /// Runs `git -C <dir> <args>`; its stdout, or the command and its stderr as the error.
@@ -310,6 +392,321 @@ fn far(old: i128, by: i128) -> bool {
 /// The refusal in my words: "the new backup has 12 open issues, the last had 40".
 fn said(what: &str, new: i128, old: i128) -> String {
     format!("the new backup has {new} {what}, the last had {old}")
+}
+
+/// BAK-1 and BAK-2: what one backup did. `Refused` holds `refuse_reason`'s text for the Waiting
+/// on you item; the last backup was kept.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BackupOutcome {
+    Written(Manifest),
+    Refused(String),
+}
+
+/// Where a backup reads a repo from: git clones `<git_base>/<repo>.git` and
+/// `<git_base>/<repo>.wiki.git`, with each `git_config` entry passed as `-c`, and the REST API
+/// through `api`. The app uses `https://github.com` and `HttpTransport`; tests use a folder of
+/// bare repos and recorded answers.
+pub struct Remote<'a> {
+    pub git_base: String,
+    pub git_config: Vec<String>,
+    pub api: &'a dyn GitHubTransport,
+}
+
+/// BAK-1: back up `repo` (`owner/name`) from GitHub into
+/// `<nextcloud_backups>/github/<owner>/<name>/`, replacing the last backup unless BAK-2 refuses.
+/// Git reads use `gh` as the credential helper and the API uses `gh auth token`.
+pub fn backup_repo(settings: &Settings, repo: &str) -> Result<BackupOutcome, CoreError> {
+    backups_dir(settings)?;
+    let api = HttpTransport::new(&crate::platform::GhAuthToken::default())?;
+    backup_repo_from(settings, repo, &github_remote(&api), &now_rfc3339())
+}
+
+/// BAK-1: back up every repo in `repos`, in order, each as `backup_repo` does. Stops at the
+/// first error, which names the repo; backups already written stay written.
+pub fn backup_all(
+    settings: &Settings,
+    repos: &[String],
+) -> Result<Vec<(String, BackupOutcome)>, CoreError> {
+    backups_dir(settings)?;
+    let api = HttpTransport::new(&crate::platform::GhAuthToken::default())?;
+    backup_all_from(settings, repos, &github_remote(&api), &now_rfc3339())
+}
+
+fn github_remote(api: &dyn GitHubTransport) -> Remote<'_> {
+    Remote {
+        git_base: "https://github.com".to_string(),
+        git_config: vec![
+            "credential.helper=".to_string(),
+            "credential.helper=!gh auth git-credential".to_string(),
+        ],
+        api,
+    }
+}
+
+/// `backup_all` against `remote`, every manifest stamped `taken_at`.
+pub fn backup_all_from(
+    settings: &Settings,
+    repos: &[String],
+    remote: &Remote<'_>,
+    taken_at: &str,
+) -> Result<Vec<(String, BackupOutcome)>, CoreError> {
+    backups_dir(settings)?;
+    let mut outcomes = Vec::new();
+    for repo in repos {
+        let outcome =
+            backup_repo_from(settings, repo, remote, taken_at).map_err(|e| about(repo, e))?;
+        outcomes.push((repo.clone(), outcome));
+    }
+    Ok(outcomes)
+}
+
+/// `backup_repo` against `remote`, the manifest stamped `taken_at` (RFC 3339).
+///
+/// Mirrors the repo into a temp folder, then builds the new backup beside the old one in
+/// `.<name>.new`: `bundle`, `write_json`, `copy_wiki`, and the manifest with the ref count and
+/// the wiki. Asks `refuse_reason` against the old folder's manifest; a refusal removes the new
+/// folder and leaves the old one untouched. Otherwise the old folder moves to `.<name>.old`, the
+/// new one takes its place, and the old one is removed. Any error before the swap leaves the
+/// old folder as it was.
+pub fn backup_repo_from(
+    settings: &Settings,
+    repo: &str,
+    remote: &Remote<'_>,
+    taken_at: &str,
+) -> Result<BackupOutcome, CoreError> {
+    let backups = backups_dir(settings)?;
+    let (owner, name) = split_repo(repo)?;
+    let parent = backups.join("github").join(owner);
+    let folder = parent.join(name);
+    let staging = parent.join(format!(".{name}.new"));
+    let work = work_dir(owner, name);
+    remove_dir(&staging)?;
+    let built = build(repo, remote, taken_at, &work, &staging);
+    let _ = std::fs::remove_dir_all(&work);
+    let manifest = match built {
+        Ok(manifest) => manifest,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(e);
+        }
+    };
+    let old = match read_manifest(&folder) {
+        Ok(old) => old,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(e);
+        }
+    };
+    if let Some(reason) = old.and_then(|old| refuse_reason(&old, &manifest)) {
+        remove_dir(&staging)?;
+        return Ok(BackupOutcome::Refused(reason));
+    }
+    swap_in(&staging, &folder, &parent.join(format!(".{name}.old")))?;
+    Ok(BackupOutcome::Written(manifest))
+}
+
+/// The new backup, written into `staging`; the mirrors go into `work`.
+fn build(
+    repo: &str,
+    remote: &Remote<'_>,
+    taken_at: &str,
+    work: &Path,
+    staging: &Path,
+) -> Result<Manifest, CoreError> {
+    remove_dir(work)?;
+    std::fs::create_dir_all(work).map_err(|e| io_error(work, e))?;
+    let mirror = work.join("repo.git");
+    let url = format!("{}/{repo}.git", remote.git_base);
+    clone_mirror(remote, &url, &mirror)?;
+    let refs = bundle(&mirror, staging)?;
+
+    let answers = RecordedAnswers {
+        repo: repo.to_string(),
+        issues: rest_all(remote.api, &format!("/repos/{repo}/issues?state=all"))?
+            .into_iter()
+            .filter(|item| item.get("pull_request").is_none())
+            .collect(),
+        pulls: rest_all(remote.api, &format!("/repos/{repo}/pulls?state=all"))?,
+        comments: rest_all(remote.api, &format!("/repos/{repo}/issues/comments?"))?,
+        labels: rest_all(remote.api, &format!("/repos/{repo}/labels?"))?,
+        milestones: rest_all(remote.api, &format!("/repos/{repo}/milestones?state=all"))?,
+    };
+    let mut manifest = write_json(&answers, staging, taken_at)?;
+    manifest.refs = refs;
+
+    // A repo with no wiki (or no wiki pages yet) has nothing to clone.
+    let wiki = work.join("wiki.git");
+    let wiki_url = format!("{}/{repo}.wiki.git", remote.git_base);
+    let wiki_mirror = clone_mirror(remote, &wiki_url, &wiki).ok().map(|()| wiki);
+    copy_wiki(wiki_mirror.as_deref(), staging, &mut manifest)?;
+
+    let path = staging.join("manifest.json");
+    std::fs::write(&path, pretty(&manifest)?).map_err(|e| io_error(&path, e))?;
+    Ok(manifest)
+}
+
+/// Every page of a REST list, 100 at a time, until a short page. `path` ends in `?` or carries
+/// a query already.
+fn rest_all(api: &dyn GitHubTransport, path: &str) -> Result<Vec<Value>, CoreError> {
+    let sep = if path.ends_with('?') { "" } else { "&" };
+    let mut items = Vec::new();
+    for page in 1..=1000 {
+        let url = format!("{path}{sep}per_page=100&page={page}");
+        let answer = api.rest_get(&url, None)?;
+        if answer.status != 200 {
+            return Err(CoreError::GitHub(format!(
+                "GET {url}: status {}",
+                answer.status
+            )));
+        }
+        let Value::Array(batch) = answer.body else {
+            return Err(CoreError::GitHub(format!("GET {url}: not a JSON array")));
+        };
+        let full = batch.len() >= 100;
+        items.extend(batch);
+        if !full {
+            return Ok(items);
+        }
+    }
+    Err(CoreError::GitHub(format!(
+        "GET {path}: more than 1000 pages"
+    )))
+}
+
+/// `git clone --mirror <url> <into>`, with the remote's `-c` settings and no prompts.
+fn clone_mirror(remote: &Remote<'_>, url: &str, into: &Path) -> Result<(), CoreError> {
+    let mut cmd = Command::new("git");
+    for config in &remote.git_config {
+        cmd.arg("-c").arg(config);
+    }
+    let out = cmd
+        .args(["clone", "-q", "--mirror", url])
+        .arg(into)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .map_err(|e| CoreError::Io(format!("git clone --mirror {url}: {e}")))?;
+    if !out.status.success() {
+        let _ = std::fs::remove_dir_all(into);
+        return Err(CoreError::Io(format!(
+            "git clone --mirror {url}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    Ok(())
+}
+
+/// The last backup's manifest, or `None` when there is no last backup.
+fn read_manifest(folder: &Path) -> Result<Option<Manifest>, CoreError> {
+    let path = folder.join("manifest.json");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(io_error(&path, e)),
+    };
+    serde_json::from_str(&text)
+        .map(Some)
+        .map_err(|e| CoreError::Parse(format!("{}: {e}", path.display())))
+}
+
+/// Moves `staging` to `folder`, the old `folder` aside to `aside` first and removed after. A
+/// failed move puts the old folder back.
+fn swap_in(staging: &Path, folder: &Path, aside: &Path) -> Result<(), CoreError> {
+    remove_dir(aside)?;
+    let had_old = folder.exists();
+    if had_old {
+        std::fs::rename(folder, aside).map_err(|e| io_error(folder, e))?;
+    }
+    if let Err(e) = std::fs::rename(staging, folder) {
+        if had_old {
+            let _ = std::fs::rename(aside, folder);
+        }
+        let _ = std::fs::remove_dir_all(staging);
+        return Err(io_error(staging, e));
+    }
+    if had_old {
+        remove_dir(aside)?;
+    }
+    Ok(())
+}
+
+fn remove_dir(dir: &Path) -> Result<(), CoreError> {
+    match std::fs::remove_dir_all(dir) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(io_error(dir, e)),
+        _ => Ok(()),
+    }
+}
+
+/// The backups folder, or `MissingPath("nextcloud_backups")` when unset or empty.
+fn backups_dir(settings: &Settings) -> Result<&Path, CoreError> {
+    match settings.nextcloud_backups.as_deref() {
+        Some(p) if !p.as_os_str().is_empty() => Ok(p),
+        _ => Err(CoreError::MissingPath("nextcloud_backups")),
+    }
+}
+
+/// `owner/name` split in two; anything else (an empty part, a third part, `.` or `..`) is an
+/// error, so the folder never lands outside `github/`.
+fn split_repo(repo: &str) -> Result<(&str, &str), CoreError> {
+    let ok = |part: &str| {
+        !part.is_empty()
+            && part != "."
+            && part != ".."
+            && part
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
+    };
+    match repo.split_once('/') {
+        Some((owner, name)) if ok(owner) && ok(name) => Ok((owner, name)),
+        _ => Err(CoreError::Parse(format!("not an owner/name repo: {repo}"))),
+    }
+}
+
+/// A fresh temp folder for this backup's mirrors.
+fn work_dir(owner: &str, name: &str) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    std::env::temp_dir().join(format!(
+        "switchboard-backup-{owner}-{name}-{}-{nanos}",
+        std::process::id()
+    ))
+}
+
+/// `e` with `repo` in front of its text.
+fn about(repo: &str, e: CoreError) -> CoreError {
+    match e {
+        CoreError::GitHub(why) => CoreError::GitHub(format!("{repo}: {why}")),
+        CoreError::Io(why) => CoreError::Io(format!("{repo}: {why}")),
+        CoreError::Parse(why) => CoreError::Parse(format!("{repo}: {why}")),
+        other => other,
+    }
+}
+
+fn now_rfc3339() -> String {
+    use crate::clock::Clock;
+    rfc3339(crate::clock::SystemClock.now())
+}
+
+/// `secs` since the epoch as `YYYY-MM-DDTHH:MM:SSZ`.
+fn rfc3339(secs: i64) -> String {
+    let days = secs.div_euclid(86_400);
+    let rest = secs.rem_euclid(86_400);
+    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        rest / 3600,
+        rest % 3600 / 60,
+        rest % 60
+    )
 }
 
 /// BAK-3: what `restore_history` put back.
@@ -542,4 +939,23 @@ fn push_to_new(
         )));
     }
     Ok(())
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rfc3339_formats_utc() {
+        assert_eq!(rfc3339(0), "1970-01-01T00:00:00Z");
+        assert_eq!(rfc3339(1_762_696_800), "2025-11-09T14:00:00Z");
+        assert_eq!(rfc3339(951_782_400), "2000-02-29T00:00:00Z");
+    }
+
+    #[test]
+    fn split_repo_keeps_the_folder_inside_github() {
+        assert_eq!(split_repo("owner/name").unwrap(), ("owner", "name"));
+        for bad in ["name", "a/b/c", "../x", "a/..", "/x", "a/", "a b/c"] {
+            assert!(split_repo(bad).is_err(), "{bad}");
+        }
+    }
 }

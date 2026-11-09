@@ -308,3 +308,166 @@ impl ChatAdapter for DeepSeekAdapter {
         })
     }
 }
+
+/// FD-11: ChatGPT through its OpenAI-style endpoint, with the user's key in the `Authorization`
+/// header. ChatGPT is a quota that resets, not a pool priced per token, so the cost is None
+/// ("not recorded"), never 0.0.
+pub struct ChatGptAdapter {
+    base_url: String,
+    api_key: String,
+    transport: Box<dyn ChatTransport>,
+}
+
+impl ChatGptAdapter {
+    /// An adapter posting to `<base_url>/v1/chat/completions` (a trailing `/` is dropped).
+    pub fn new(base_url: &str, api_key: &str, transport: Box<dyn ChatTransport>) -> Self {
+        Self {
+            base_url: base_url.trim_end_matches('/').to_string(),
+            api_key: api_key.to_string(),
+            transport,
+        }
+    }
+
+    /// The text with the api key taken out, so no error reason carries it.
+    fn redact(&self, text: &str) -> String {
+        if self.api_key.is_empty() {
+            text.to_string()
+        } else {
+            text.replace(&self.api_key, "[key]")
+        }
+    }
+}
+
+impl ChatAdapter for ChatGptAdapter {
+    fn service(&self) -> &'static str {
+        "chatgpt"
+    }
+
+    fn send(&self, model: &str, system: &str, turns: &[Turn]) -> Result<Answer, CoreError> {
+        let mut messages = vec![serde_json::json!({"role": "system", "content": system})];
+        for turn in turns {
+            messages.push(serde_json::json!({"role": turn.role, "content": turn.text}));
+        }
+        let body = serde_json::json!({"model": model, "messages": messages});
+        let url = format!("{}/v1/chat/completions", self.base_url);
+        let headers = [(
+            "Authorization".to_string(),
+            format!("Bearer {}", self.api_key),
+        )];
+        let reply = self
+            .transport
+            .post_json_headers(&url, &headers, &body)
+            .map_err(|e| match e {
+                CoreError::Refused(why) => CoreError::Refused(self.redact(&why)),
+                other => CoreError::Refused(self.redact(&other.to_string())),
+            })?;
+        let Some(content) = reply["choices"][0]["message"]["content"].as_str() else {
+            return Err(CoreError::Refused(format!(
+                "chatgpt: no reply content from {url}"
+            )));
+        };
+        let (text, handoff) = split_handoff(content);
+        Ok(Answer {
+            text,
+            service: self.service().to_string(),
+            model: model.to_string(),
+            tokens_in: reply["usage"]["prompt_tokens"].as_u64(),
+            tokens_out: reply["usage"]["completion_tokens"].as_u64(),
+            cost_usd: None,
+            handoff,
+        })
+    }
+}
+
+/// FD-11: Gemini through `generateContent`. Gemini is a quota that resets, not a metered bill,
+/// so every answer's cost is `None` ("not recorded"), not 0.0. The API key travels in the URL's
+/// query, so no error reason carries the key or the URL.
+pub struct GeminiAdapter {
+    base_url: String,
+    api_key: String,
+    transport: Box<dyn ChatTransport>,
+}
+
+impl GeminiAdapter {
+    /// An adapter posting to `<base_url>/v1beta/models/<model>:generateContent?key=<api_key>`
+    /// (a trailing `/` is dropped).
+    pub fn new(base_url: &str, api_key: &str, transport: Box<dyn ChatTransport>) -> Self {
+        Self {
+            base_url: base_url.trim_end_matches('/').to_string(),
+            api_key: api_key.to_string(),
+            transport,
+        }
+    }
+
+    /// The text with the URL and the API key taken out.
+    fn redact(&self, text: &str, url: &str) -> String {
+        let text = text.replace(url, "<gemini url>");
+        if self.api_key.is_empty() {
+            text
+        } else {
+            text.replace(&self.api_key, "<redacted>")
+        }
+    }
+}
+
+impl ChatAdapter for GeminiAdapter {
+    fn service(&self) -> &'static str {
+        "gemini"
+    }
+
+    fn send(&self, model: &str, system: &str, turns: &[Turn]) -> Result<Answer, CoreError> {
+        let contents: Vec<serde_json::Value> = turns
+            .iter()
+            .map(|turn| {
+                let role = if turn.role == "assistant" {
+                    "model"
+                } else {
+                    turn.role.as_str()
+                };
+                serde_json::json!({"role": role, "parts": [{"text": turn.text}]})
+            })
+            .collect();
+        let body = serde_json::json!({
+            "systemInstruction": {"parts": [{"text": system}]},
+            "contents": contents,
+        });
+        let url = format!(
+            "{}/v1beta/models/{}:generateContent?key={}",
+            self.base_url, model, self.api_key
+        );
+        let reply = self.transport.post_json(&url, &body).map_err(|e| {
+            let why = match e {
+                CoreError::Refused(why) => why,
+                other => other.to_string(),
+            };
+            CoreError::Refused(format!(
+                "gemini: request failed: {}",
+                self.redact(&why, &url)
+            ))
+        })?;
+        let joined: String = reply["candidates"][0]["content"]["parts"]
+            .as_array()
+            .map(|parts| {
+                parts
+                    .iter()
+                    .filter_map(|part| part["text"].as_str())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if joined.is_empty() {
+            return Err(CoreError::Refused(format!(
+                "gemini: no reply text for model {model}"
+            )));
+        }
+        let (text, handoff) = split_handoff(&joined);
+        Ok(Answer {
+            text,
+            service: self.service().to_string(),
+            model: model.to_string(),
+            tokens_in: reply["usageMetadata"]["promptTokenCount"].as_u64(),
+            tokens_out: reply["usageMetadata"]["candidatesTokenCount"].as_u64(),
+            cost_usd: None,
+            handoff,
+        })
+    }
+}
