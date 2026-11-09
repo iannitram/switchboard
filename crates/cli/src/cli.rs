@@ -17,14 +17,17 @@ use switchboard_core::budget::{self, PoolRow};
 use switchboard_core::clock::{Clock, SystemClock, UnixSeconds};
 use switchboard_core::error::CoreError;
 use switchboard_core::fleet::FleetBridge;
+use switchboard_core::github::merge::{self as gh_merge, MergeJob};
+use switchboard_core::github::poll::Poller;
 use switchboard_core::github::snapshot::SnapshotStore;
+use switchboard_core::github::transport::{GitHubTransport, HttpTransport};
 use switchboard_core::github::RepoSnapshot;
 use switchboard_core::joblog::{self, NOT_RECORDED};
-use switchboard_core::platform::{current_os, Os};
+use switchboard_core::platform::{current_os, default_dev_root, GhAuthToken, Os};
 use switchboard_core::reports::{self, Filter, Report};
 use switchboard_core::rules::{self, Caller, Face, GuardedAction, Role, Verdict};
 use switchboard_core::sky;
-use switchboard_core::waiting::{self, guarded_item, Item};
+use switchboard_core::waiting::{self, guarded_item, Item, LocalItems};
 
 /// The environment variable that names the pipeline checkout. There is no default.
 pub const PIPELINE_ENV: &str = "SWITCHBOARD_PIPELINE";
@@ -34,6 +37,9 @@ pub const DATA_ENV: &str = "SWITCHBOARD_DATA";
 /// The environment variable that names the fleet state folder (its `ledger/` holds the job log).
 /// Unset, the app data folder is used.
 pub const STATE_ENV: &str = "SWITCHBOARD_STATE";
+/// The environment variable that names the folder holding the clones (`<dev root>/<name>`).
+/// Unset, it is this OS's default dev root under `HOME`.
+pub const DEV_ROOT_ENV: &str = "SWITCHBOARD_DEV_ROOT";
 
 /// The app data folder's name: the desktop app's identifier.
 const APP_DIR: &str = "app.switchboard.desktop";
@@ -59,22 +65,148 @@ pub trait Writes {
     fn waiting(&self, item: &Item) -> Result<(), String>;
 }
 
-/// The real writes. Neither is wired to its core call yet, so each answers with the issue that
-/// builds it, as `switchboard mcp` does.
-struct CliWrites;
+/// The real writes (CLI-3): a merge through GH-5 from the stored snapshot, and the Waiting on
+/// you item into the local items. `None` folders are named in the refusal.
+pub struct CliWrites {
+    /// The app data folder: the snapshot store and `waiting/local.json`.
+    pub data: Option<PathBuf>,
+    /// The pipeline checkout: `merge_pr.py` is under it.
+    pub pipeline: Option<PathBuf>,
+    /// The folder that holds the clones: the clone of `owner/name` is `<dev root>/<name>`.
+    pub dev_root: Option<PathBuf>,
+    /// The working folder is a job worktree (the guard has already refused then).
+    pub in_job_worktree: bool,
+    /// The re-read after a merge (GH-3); `None` builds the real one at merge time.
+    pub transport: Option<Box<dyn GitHubTransport>>,
+}
+
+impl CliWrites {
+    /// The folders from the environment: `SWITCHBOARD_DATA` (else the desktop app's folder),
+    /// `SWITCHBOARD_PIPELINE`, and `SWITCHBOARD_DEV_ROOT` (else this OS's default under `HOME`).
+    pub fn from_env(in_job_worktree: bool) -> Self {
+        Self {
+            data: data_dir(),
+            pipeline: env_path(PIPELINE_ENV),
+            dev_root: env_path(DEV_ROOT_ENV)
+                .or_else(|| env_path("HOME").map(|home| default_dev_root(current_os(), &home))),
+            in_job_worktree,
+            transport: None,
+        }
+    }
+
+    /// GH-5 from the snapshot: the stored PR, its clone, then `merge` through `merge_pr.py`.
+    /// The error is the reason alone; `merge` puts the `merge <repo>#<pr>:` prefix on it.
+    fn try_merge(&self, repo: &str, pr: u64) -> Result<(), String> {
+        let data = self
+            .data
+            .as_deref()
+            .ok_or("set SWITCHBOARD_DATA to the app data folder")?;
+        let store = SnapshotStore::new(data);
+        let snaps = store.load_all().map_err(|e| e.to_string())?;
+        let snap = snaps
+            .iter()
+            .find(|snap| snap.repo == repo)
+            .or_else(|| {
+                snaps
+                    .iter()
+                    .find(|snap| snap.repo.ends_with(&format!("/{repo}")))
+            })
+            .ok_or_else(|| format!("no snapshot of {repo}; run switchboard refresh"))?;
+        let pull = snap
+            .pulls
+            .iter()
+            .find(|pull| pull.number == pr)
+            .ok_or("not in the snapshot; run switchboard refresh")?;
+        let pipeline = self
+            .pipeline
+            .as_deref()
+            .ok_or("set SWITCHBOARD_PIPELINE to your pipeline checkout")?;
+        let dev_root = self
+            .dev_root
+            .as_deref()
+            .ok_or("set SWITCHBOARD_DEV_ROOT to the folder that holds the clones")?;
+        let name = snap.repo.rsplit('/').next().unwrap_or_default();
+        let clone = dev_root.join(name);
+        if !clone.is_dir() {
+            return Err(format!("no clone at {}", clone.display()));
+        }
+        // Only `--role project-manager` outside a job worktree reaches `Writes::merge` (the
+        // guard in `write_command`), so this is the caller that was allowed.
+        let caller = Caller {
+            face: Face::Cli,
+            role: Some(Role::ProjectManager),
+            in_job_worktree: self.in_job_worktree,
+            confirmed_in_app: false,
+        };
+        let job = MergeJob {
+            pipeline_root: pipeline,
+            clone: &clone,
+            repo: snap.repo.as_str(),
+            pr: pull,
+            carried_over: false,
+        };
+        // The re-read after the push: a live transport when none was given (best effort).
+        let live: Box<dyn GitHubTransport>;
+        let transport: &dyn GitHubTransport = match &self.transport {
+            Some(transport) => &**transport,
+            None => {
+                live = live_transport();
+                &*live
+            }
+        };
+        let poller = Poller {
+            transport,
+            store: &store,
+            clock: &SystemClock,
+            repos: vec![snap.repo.clone()],
+        };
+        gh_merge::merge(&caller, &job, &poller).map_err(|e| match e {
+            CoreError::Refused(why) => why,
+            other => other.to_string(),
+        })
+    }
+}
 
 impl Writes for CliWrites {
     fn merge(&self, repo: &str, pr: u64) -> Result<(), String> {
-        Err(format!(
-            "merge {repo}#{pr}: not built yet (GH-5: the CLI has no PR snapshot)"
-        ))
+        self.try_merge(repo, pr)
+            .map_err(|why| format!("merge {repo}#{pr}: {why}"))
     }
 
+    /// WAIT-1: the item goes into the local items; asking twice keeps one (same `source`).
     fn waiting(&self, item: &Item) -> Result<(), String> {
-        Err(format!(
-            "waiting: not built yet (WAIT-1, #50): {}",
-            item.what
-        ))
+        let data = self
+            .data
+            .as_deref()
+            .ok_or("waiting: set SWITCHBOARD_DATA to the app data folder")?;
+        LocalItems::new(data)
+            .add(item.clone())
+            .map_err(|e| format!("waiting: {e}"))
+    }
+}
+
+/// A transport that only answers with why there is no GitHub token.
+struct NoGitHub(String);
+
+impl GitHubTransport for NoGitHub {
+    fn graphql(&self, _query: &str, _variables: &Value) -> Result<Value, CoreError> {
+        Err(CoreError::GitHub(self.0.clone()))
+    }
+
+    fn rest_get(
+        &self,
+        _path: &str,
+        _etag: Option<&str>,
+    ) -> Result<switchboard_core::github::transport::RestAnswer, CoreError> {
+        Err(CoreError::GitHub(self.0.clone()))
+    }
+}
+
+/// The real transport for the re-read, or one that says why there is none (`gh auth token`).
+fn live_transport() -> Box<dyn GitHubTransport> {
+    match HttpTransport::new(&GhAuthToken::default()) {
+        Ok(http) => Box::new(http),
+        Err(e) => Box::new(NoGitHub(e.to_string())),
     }
 }
 
@@ -91,7 +223,7 @@ pub fn run(argv: &[String]) -> ExitCode {
         argv,
         &cwd,
         SystemClock.now(),
-        &CliWrites,
+        &CliWrites::from_env(rules::is_job_worktree(&cwd)),
         &mut std::io::stderr(),
     )
 }
@@ -362,8 +494,9 @@ fn snapshots(command: &str) -> Result<(PathBuf, Vec<RepoSnapshot>), ExitCode> {
     }
 }
 
-/// `switchboard waiting`: the Waiting on you items from the stored snapshots, newest first:
-/// one line each (text) or the items as a JSON array (`--json`). CalDAV is not read yet (U7).
+/// `switchboard waiting`: the Waiting on you items from the stored snapshots and the local items
+/// (WAIT-1), newest first: one line each (text) or the items as a JSON array (`--json`). CalDAV
+/// is not read yet (U7).
 fn waiting(json: bool) -> ExitCode {
     let Some(data) = data_dir() else {
         eprintln!("switchboard: set {DATA_ENV} to the app data folder");
@@ -376,11 +509,18 @@ fn waiting(json: bool) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    if snaps.is_empty() {
+    let local = match LocalItems::new(&data).load() {
+        Ok(local) => local,
+        Err(e) => {
+            eprintln!("switchboard waiting: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    if snaps.is_empty() && local.is_empty() {
         eprintln!("{NO_SNAPSHOT}");
         return ExitCode::from(1);
     }
-    let items = waiting::merge(vec![waiting::from_snapshots(&snaps)]);
+    let items = waiting::assemble(&snaps, &local);
     if json {
         return print_json("waiting", serde_json::to_string_pretty(&items));
     }
