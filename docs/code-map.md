@@ -204,6 +204,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 
 ### cli
 `crates/cli/src/main.rs`, `cli.rs` · CLI-1, CLI-2, CLI-3 · planned. Text or `--json`; the same numbers as the GUI; role-flagged writes through `rules::guard`.
+- CLI-1 parse arguments, budget: present; sky, waiting, reports, star, loadout: planned.
 
 ### mcp
 `crates/cli/src/mcp.rs` · MCP-1 and MCP-2 present; MCP-3 planned. JSON-RPC over stdio; six read tools; role write tools; none inside a job worktree.
