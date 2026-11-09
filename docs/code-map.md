@@ -164,6 +164,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - BAK-1 JSON of issues, PRs, comments, labels, milestones (`write_json`): present.
 - BAK-1 git bundle (`bundle`): present.
 - BAK-1 releases.json (`write_release_list`, `RELEASE_FILE_LIMIT`): present.
+- BAK-1 release files under 1 GB (`fetch_release_files`, `write_releases`): present.
 - BAK-1 wiki mirror (`copy_wiki`): present.
 - BAK-1 back up one repo or all (`backup_repo`, `backup_all`, `BackupOutcome`; the Sky's back up buttons): present.
 

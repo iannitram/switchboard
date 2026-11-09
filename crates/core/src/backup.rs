@@ -204,6 +204,108 @@ pub fn write_release_list(
     Ok(())
 }
 
+/// Where release file bytes come from: the network in the app, a stub in tests.
+pub trait FileSource {
+    fn fetch(&self, url: &str) -> Result<Vec<u8>, CoreError>;
+}
+
+/// BAK-1: every release file under 1 GB into `releases/<tag>/<name>`; returns the count.
+///
+/// Files land in `releases.new/` first; only when every one is written does that folder
+/// replace `releases/`. Any error removes `releases.new/` and leaves `releases/` as it was.
+pub fn fetch_release_files(
+    releases: &[Value],
+    files: &dyn FileSource,
+    out_dir: &Path,
+) -> Result<u64, CoreError> {
+    let staging = out_dir.join("releases.new");
+    let _ = std::fs::remove_dir_all(&staging);
+    std::fs::create_dir_all(&staging).map_err(|e| io_error(&staging, e))?;
+    match stage_release_files(releases, files, &staging) {
+        Ok(count) => {
+            let target = out_dir.join("releases");
+            let swapped = if target.exists() {
+                std::fs::remove_dir_all(&target).map_err(|e| io_error(&target, e))
+            } else {
+                Ok(())
+            }
+            .and_then(|()| std::fs::rename(&staging, &target).map_err(|e| io_error(&target, e)));
+            match swapped {
+                Ok(()) => Ok(count),
+                Err(e) => {
+                    let _ = std::fs::remove_dir_all(&staging);
+                    Err(e)
+                }
+            }
+        }
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&staging);
+            Err(e)
+        }
+    }
+}
+
+/// BAK-1: releases as JSON plus their files under 1 GB; sets manifest.releases.
+///
+/// The files are fetched first, so a failed fetch leaves `releases.json` and the manifest as
+/// they were.
+pub fn write_releases(
+    releases: &[Value],
+    files: &dyn FileSource,
+    out_dir: &Path,
+    manifest: &mut Manifest,
+) -> Result<(), CoreError> {
+    fetch_release_files(releases, files, out_dir)?;
+    write_release_list(releases, out_dir, manifest)
+}
+
+fn stage_release_files(
+    releases: &[Value],
+    files: &dyn FileSource,
+    staging: &Path,
+) -> Result<u64, CoreError> {
+    let mut count = 0;
+    for release in releases {
+        let tag = release["tag_name"].as_str().unwrap_or_default();
+        let Some(assets) = release["assets"].as_array() else {
+            continue;
+        };
+        for asset in assets {
+            if asset["size"]
+                .as_f64()
+                .is_some_and(|s| s >= RELEASE_FILE_LIMIT as f64)
+            {
+                continue;
+            }
+            let (Some(name), Some(url)) = (
+                asset["name"].as_str(),
+                asset["browser_download_url"].as_str(),
+            ) else {
+                return Err(CoreError::Parse(format!(
+                    "release {tag}: an asset without a name or browser_download_url"
+                )));
+            };
+            let bytes = files.fetch(url)?;
+            let dir = staging.join(safe_part(tag));
+            std::fs::create_dir_all(&dir).map_err(|e| io_error(&dir, e))?;
+            let path = dir.join(safe_part(name));
+            std::fs::write(&path, bytes).map_err(|e| io_error(&path, e))?;
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+/// A tag or file name as one safe path part: `/` and `\` become `_`; empty, `.` or `..` is `_`.
+fn safe_part(text: &str) -> String {
+    let part = text.replace(['/', '\\'], "_");
+    if part.is_empty() || part == "." || part == ".." {
+        "_".to_string()
+    } else {
+        part
+    }
+}
+
 fn pretty<T: Serialize>(value: &T) -> Result<String, CoreError> {
     serde_json::to_string_pretty(value).map_err(|e| CoreError::Parse(e.to_string()))
 }
