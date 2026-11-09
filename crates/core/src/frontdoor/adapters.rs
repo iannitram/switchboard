@@ -91,3 +91,101 @@ impl ChatAdapter for StubAdapter {
         Ok(self.answer.clone())
     }
 }
+
+/// FD-11: the one HTTP call an adapter makes, behind a trait so tests record it. `post_json`
+/// sends `body` as JSON to `url` and returns the parsed reply.
+pub trait ChatTransport: Send + Sync {
+    fn post_json(
+        &self,
+        url: &str,
+        body: &serde_json::Value,
+    ) -> Result<serde_json::Value, CoreError>;
+}
+
+/// The real transport: a JSON POST over HTTP with the same client the github module uses.
+/// A failed call or a reply that is not JSON is `CoreError::Refused` with the reason.
+pub struct HttpChatTransport {
+    agent: ureq::Agent,
+}
+
+impl HttpChatTransport {
+    pub fn new() -> Self {
+        Self {
+            agent: ureq::AgentBuilder::new()
+                .timeout(std::time::Duration::from_secs(300))
+                .build(),
+        }
+    }
+}
+
+impl Default for HttpChatTransport {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ChatTransport for HttpChatTransport {
+    fn post_json(
+        &self,
+        url: &str,
+        body: &serde_json::Value,
+    ) -> Result<serde_json::Value, CoreError> {
+        self.agent
+            .post(url)
+            .send_json(body.clone())
+            .map_err(|e| CoreError::Refused(format!("POST {url}: {e}")))?
+            .into_json()
+            .map_err(|e| CoreError::Refused(format!("POST {url}: {e}")))
+    }
+}
+
+/// FD-11: local Qwen through llama-swap's OpenAI-style endpoint on this machine. Local Qwen
+/// costs nothing, so every answer's cost is 0.0, not unknown.
+pub struct QwenAdapter {
+    base_url: String,
+    transport: Box<dyn ChatTransport>,
+}
+
+impl QwenAdapter {
+    /// An adapter posting to `<base_url>/v1/chat/completions` (a trailing `/` is dropped).
+    pub fn new(base_url: &str, transport: Box<dyn ChatTransport>) -> Self {
+        Self {
+            base_url: base_url.trim_end_matches('/').to_string(),
+            transport,
+        }
+    }
+}
+
+impl ChatAdapter for QwenAdapter {
+    fn service(&self) -> &'static str {
+        "qwen"
+    }
+
+    fn send(&self, model: &str, system: &str, turns: &[Turn]) -> Result<Answer, CoreError> {
+        let mut messages = vec![serde_json::json!({"role": "system", "content": system})];
+        for turn in turns {
+            messages.push(serde_json::json!({"role": turn.role, "content": turn.text}));
+        }
+        let body = serde_json::json!({"model": model, "messages": messages});
+        let url = format!("{}/v1/chat/completions", self.base_url);
+        let reply = self.transport.post_json(&url, &body).map_err(|e| match e {
+            CoreError::Refused(why) => CoreError::Refused(why),
+            other => CoreError::Refused(other.to_string()),
+        })?;
+        let Some(content) = reply["choices"][0]["message"]["content"].as_str() else {
+            return Err(CoreError::Refused(format!(
+                "qwen: no reply content from {url}"
+            )));
+        };
+        let (text, handoff) = split_handoff(content);
+        Ok(Answer {
+            text,
+            service: self.service().to_string(),
+            model: model.to_string(),
+            tokens_in: reply["usage"]["prompt_tokens"].as_u64(),
+            tokens_out: reply["usage"]["completion_tokens"].as_u64(),
+            cost_usd: Some(0.0),
+            handoff,
+        })
+    }
+}
