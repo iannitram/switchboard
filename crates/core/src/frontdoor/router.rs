@@ -52,9 +52,55 @@ pub trait BudgetGate {
 /// preferring resetting quotas (claude, chatgpt, gemini) and using paid pools only as overflow.
 /// The `claude` subscription is never called: under budget it is a `ClaudeHandoff`; braked, the
 /// kind's next service; none left, `Wait`.
+///
+/// Rules, in order: an id that is not a request kind waits (`unknown request kind <id>`); pass
+/// one walks `first` over the resetting or free services (every service but the paid pools);
+/// pass two walks it again over the paid pools (`deepseek`, `claudeapi`). In each pass a
+/// service that is braked, or that has no model row in the index, is skipped; `claude` under
+/// budget is the handoff. With nothing taken: `waiting for Claude's budget` when `first` lists
+/// `claude`, else `waiting for budget: <kind>`. Reads no clock and no file.
 pub fn pick_for_kind(index: &AbilitiesIndex, kind: &str, budget: &dyn BudgetGate) -> Pick {
-    todo!("FD-3")
+    let Some(ability) = index.get(kind).filter(|a| a.request) else {
+        return Pick::Wait(format!("unknown request kind {kind}"));
+    };
+    let try_service = |service: &str| -> Option<Pick> {
+        if !budget.allows(service) {
+            return None;
+        }
+        if service == CLAUDE_SUBSCRIPTION {
+            return Some(Pick::ClaudeHandoff(format!(
+                "{kind}: the Claude subscription is the kind's pick and under budget"
+            )));
+        }
+        let model = index.model(kind, service)?;
+        Some(Pick::Service {
+            service: service.to_string(),
+            model: model.to_string(),
+        })
+    };
+    for paid in [false, true] {
+        let pass = ability
+            .first
+            .iter()
+            .filter(|service| PAID_POOLS.contains(&service.as_str()) == paid);
+        for service in pass {
+            if let Some(pick) = try_service(service) {
+                return pick;
+            }
+        }
+    }
+    if ability.first.iter().any(|s| s == CLAUDE_SUBSCRIPTION) {
+        Pick::Wait("waiting for Claude's budget".to_string())
+    } else {
+        Pick::Wait(format!("waiting for budget: {kind}"))
+    }
 }
+
+/// The Claude subscription's lane: never called by the core, only handed off (FD-8).
+const CLAUDE_SUBSCRIPTION: &str = "claude";
+
+/// The paid pools FD-3 uses only as overflow, after every resetting or free service.
+const PAID_POOLS: [&str; 2] = ["deepseek", "claudeapi"];
 
 /// FD-4: the sample size: N starts at 6 and rises by 1 for every 20 rows the kind has logged,
 /// to a cap of 30.

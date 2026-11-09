@@ -7,6 +7,7 @@
 use crate::fleet::FleetBridge;
 use crate::CoreError;
 use serde_json::{Map, Value};
+use std::collections::BTreeMap;
 
 /// One action or request kind.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,6 +28,11 @@ pub struct Ability {
 pub struct AbilitiesIndex {
     /// Every entry, in id order.
     pub entries: Vec<Ability>,
+    /// Per id, `ok.<service>.model` for each service whose `ok` entry is an object with a
+    /// string `model` (FD-3's model for a service); a service whose entry is null, false or a
+    /// bare string has no row. Every id has a map, empty when `ok` gives it no row. Kept off
+    /// `Ability` so an `Ability` literal still names only its six fields.
+    pub models: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 impl AbilitiesIndex {
@@ -39,11 +45,13 @@ impl AbilitiesIndex {
             CoreError::Parse("the action table must be a JSON object keyed by id".to_string())
         })?;
         let mut entries = Vec::with_capacity(map.len());
+        let mut models = BTreeMap::new();
         for (id, entry) in map {
             entries.push(parse_entry(id, entry)?);
+            models.insert(id.clone(), parse_models(id, entry)?);
         }
         entries.sort_by(|a, b| a.id.cmp(&b.id));
-        Ok(AbilitiesIndex { entries })
+        Ok(AbilitiesIndex { entries, models })
     }
 
     /// Read it through the fleet bridge (`fleet actions --json`); a failed command is a
@@ -60,6 +68,12 @@ impl AbilitiesIndex {
 
     pub fn get(&self, id: &str) -> Option<&Ability> {
         self.entries.iter().find(|a| a.id == id)
+    }
+
+    /// The model `ok.<service>.model` names for `id`, or `None` when the entry gives that
+    /// service no model row (or there is no such entry).
+    pub fn model(&self, id: &str, service: &str) -> Option<&str> {
+        self.models.get(id)?.get(service).map(String::as_str)
     }
 
     /// The request kinds whose `needs` contain `tag`, in id order (FD-1's explicit-ask step).
@@ -89,6 +103,23 @@ fn parse_entry(id: &str, entry: &Value) -> Result<Ability, CoreError> {
         first: field_strs(entry, id, "first")?,
         writes: field_bool(entry, id, "writes", false)?,
     })
+}
+
+/// `ok.<service>.model` for each service whose `ok` entry is an object with a string `model`.
+/// An `ok` that is absent or null gives no rows; one that is not an object is a parse error.
+fn parse_models(id: &str, entry: &Value) -> Result<BTreeMap<String, String>, CoreError> {
+    let ok = match entry.get("ok") {
+        None | Some(Value::Null) => return Ok(BTreeMap::new()),
+        Some(Value::Object(ok)) => ok,
+        Some(_) => return Err(bad(id, "`ok` is not an object")),
+    };
+    Ok(ok
+        .iter()
+        .filter_map(|(service, value)| {
+            let model = value.get("model")?.as_str()?;
+            Some((service.clone(), model.to_string()))
+        })
+        .collect())
 }
 
 fn field_str(entry: &Map<String, Value>, id: &str, key: &str) -> Result<String, CoreError> {
