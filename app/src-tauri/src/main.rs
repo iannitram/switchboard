@@ -127,6 +127,7 @@ fn main() {
             commands::budget_rows,
             commands::budget_refresh,
             commands::budget_save_edit,
+            commands::reports,
             commands::waiting,
             commands::sky,
             commands::chat_rate,

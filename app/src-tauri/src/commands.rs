@@ -8,6 +8,7 @@ use switchboard_core::budget::{self, PoolEdit, PoolRow};
 use switchboard_core::clock::{Clock, SystemClock};
 use switchboard_core::fleet::{FleetBridge, FleetError, FleetErrorLog};
 use switchboard_core::frontdoor::implicit_log::log_implicit;
+use switchboard_core::reports::{self, Filter, Report, FLEET_STATE_DIR_ENV};
 use switchboard_core::settings::{self, Settings};
 use switchboard_core::waiting::LocalItems;
 use switchboard_core::CoreError;
@@ -281,6 +282,24 @@ pub fn budget_save_edit(
         .map_err(|e| {
             record_fleet_error(&state, &e);
             FaceError::new("budget_save_edit", &e)
+        })
+}
+
+/// REP-1, REP-3: the reports, newest first, narrowed by `filter` when the face sends one.
+/// Chat threads join when FD-13 (#113) fills the thread store.
+#[tauri::command]
+pub fn reports(
+    state: tauri::State<'_, AppState>,
+    filter: Option<Filter>,
+) -> Result<Vec<Report>, FaceError> {
+    bridge(&state.settings_path)
+        .and_then(|fleet| {
+            let env = std::env::var_os(FLEET_STATE_DIR_ENV);
+            reports::load(&fleet, env.as_deref(), &[], filter.as_ref())
+        })
+        .map_err(|e| {
+            record_fleet_error(&state, &e);
+            FaceError::new("reports", &e)
         })
 }
 
