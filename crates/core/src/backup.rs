@@ -177,8 +177,8 @@ pub fn write_release_list(
         if let Some(assets) = release.get_mut("assets").and_then(Value::as_array_mut) {
             for asset in assets {
                 if asset["size"]
-                    .as_u64()
-                    .is_some_and(|s| s >= RELEASE_FILE_LIMIT)
+                    .as_f64()
+                    .is_some_and(|s| s >= RELEASE_FILE_LIMIT as f64)
                 {
                     if let Some(asset) = asset.as_object_mut() {
                         asset.insert("skipped".to_string(), Value::from("over 1 GB"));
