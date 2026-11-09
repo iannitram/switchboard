@@ -5,6 +5,7 @@
 use crate::fleet::FleetBridge;
 use crate::github::queue::{self, Create, QueueStatus};
 use crate::github::transport::{GitHubTransport, HttpTransport};
+use crate::rules::{self, Caller, GuardedAction, Verdict};
 use crate::settings::Settings;
 use crate::CoreError;
 use serde::{Deserialize, Serialize};
@@ -904,25 +905,7 @@ fn restore_into(
     }
 
     let refs = push_refs(remote, work, new_repo).map_err(|e| about(new_repo, e))?;
-
-    let creates: Vec<Create> = labels
-        .iter()
-        .map(|name| Create::Label {
-            repo: new_repo.to_string(),
-            name: name.clone(),
-        })
-        .chain(milestones.iter().map(|title| Create::Milestone {
-            repo: new_repo.to_string(),
-            title: title.clone(),
-        }))
-        .collect();
-    let sent = queue::send(fleet, &creates)?;
-    if sent.failed > made.failed {
-        return Err(CoreError::GitHub(format!(
-            "{new_repo}: {} label or milestone creates failed in the queue",
-            sent.failed - made.failed
-        )));
-    }
+    queue_labels(fleet, new_repo, labels, milestones, &made)?;
     Ok(RestoreReport {
         refs,
         labels: labels.len() as u64,
@@ -930,29 +913,70 @@ fn restore_into(
     })
 }
 
-/// The `key` string of each item in the JSON array `<dir>/<file>`; an error when there are not
-/// `expected` of them, as the manifest says.
-fn names_in(dir: &Path, file: &str, key: &str, expected: u64) -> Result<Vec<String>, CoreError> {
+/// The items of the JSON array `<dir>/<file>`; an error when there are not `expected` of them, as
+/// the manifest says.
+fn items_in(dir: &Path, file: &str, expected: u64) -> Result<Vec<Value>, CoreError> {
     let path = dir.join(file);
     let text = std::fs::read_to_string(&path).map_err(|e| io_error(&path, e))?;
     let items: Vec<Value> = serde_json::from_str(&text)
         .map_err(|e| CoreError::Parse(format!("{}: {e}", path.display())))?;
-    let names: Vec<String> = items
+    if items.len() as u64 != expected {
+        return Err(CoreError::Parse(format!(
+            "{}: {} items, the manifest says {expected}",
+            path.display(),
+            items.len()
+        )));
+    }
+    Ok(items)
+}
+
+/// The `key` string of each item in the JSON array `<dir>/<file>`, as `items_in` checks them.
+fn names_in(dir: &Path, file: &str, key: &str, expected: u64) -> Result<Vec<String>, CoreError> {
+    let path = dir.join(file);
+    items_in(dir, file, expected)?
         .iter()
         .map(|item| {
             item[key].as_str().map(String::from).ok_or_else(|| {
                 CoreError::Parse(format!("{}: an item with no {key}", path.display()))
             })
         })
-        .collect::<Result<_, _>>()?;
-    if names.len() as u64 != expected {
-        return Err(CoreError::Parse(format!(
-            "{}: {} items, the manifest says {expected}",
-            path.display(),
-            names.len()
+        .collect()
+}
+
+/// The backup's manifest; an error when `dir` has none.
+fn manifest_in(dir: &Path) -> Result<Manifest, CoreError> {
+    read_manifest(dir)?
+        .ok_or_else(|| CoreError::Io(format!("{}: no manifest.json, not a backup", dir.display())))
+}
+
+/// The labels then the milestones of the backup, in one batch through the queue; `base` is the
+/// queue's counts before it. A label or milestone the queue fails is an error.
+fn queue_labels(
+    fleet: &FleetBridge,
+    repo: &str,
+    labels: &[String],
+    milestones: &[String],
+    base: &QueueStatus,
+) -> Result<(), CoreError> {
+    let creates: Vec<Create> = labels
+        .iter()
+        .map(|name| Create::Label {
+            repo: repo.to_string(),
+            name: name.clone(),
+        })
+        .chain(milestones.iter().map(|title| Create::Milestone {
+            repo: repo.to_string(),
+            title: title.clone(),
+        }))
+        .collect();
+    let sent = queue::send(fleet, &creates)?;
+    if sent.failed > base.failed {
+        return Err(CoreError::GitHub(format!(
+            "{repo}: {} label or milestone creates failed in the queue",
+            sent.failed - base.failed
         )));
     }
-    Ok(names)
+    Ok(())
 }
 
 /// The queue's counts now (`fleet ghq status`).
@@ -1004,6 +1028,135 @@ fn push_refs(remote: &Remote<'_>, work: &Path, repo: &str) -> Result<u64, CoreEr
         )));
     }
     Ok(refspecs.len() as u64)
+}
+
+/// BAK-3: queues the issues and comments of the backup in `backup_dir` as creates on `repo`
+/// (`owner/name`), each once, in one batch. The counts must be the manifest's. Returns how many
+/// were queued. A rate-limit stop leaves them queued; only a failed create is an error.
+pub fn restore_issues(
+    fleet: &FleetBridge,
+    backup_dir: &Path,
+    repo: &str,
+) -> Result<u64, CoreError> {
+    let manifest = manifest_in(backup_dir)?;
+    let issues = items_in(backup_dir, "issues.json", manifest.issues)?;
+    let comments = items_in(backup_dir, "comments.json", manifest.comments)?;
+    let text = |item: &Value, key: &str| item[key].as_str().unwrap_or("").to_string();
+    let mut creates: Vec<Create> = issues
+        .iter()
+        .map(|issue| Create::Issue {
+            repo: repo.to_string(),
+            title: text(issue, "title"),
+            body: text(issue, "body"),
+            labels: issue["labels"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|label| label["name"].as_str().map(String::from))
+                .collect(),
+            milestone: issue["milestone"]["title"].as_str().map(String::from),
+        })
+        .collect();
+    for comment in &comments {
+        let number = comment["issue_url"]
+            .as_str()
+            .and_then(|url| url.rsplit('/').next())
+            .and_then(|n| n.parse().ok())
+            .ok_or_else(|| CoreError::Parse(format!("{repo}: a comment with no issue number")))?;
+        creates.push(Create::Comment {
+            repo: repo.to_string(),
+            number,
+            body: text(comment, "body"),
+            marker: None,
+        });
+    }
+    let before = queue_counts(fleet)?;
+    let sent = queue::send(fleet, &creates)?;
+    if sent.failed > before.failed {
+        return Err(CoreError::GitHub(format!(
+            "{repo}: {} issue or comment creates failed in the queue",
+            sent.failed - before.failed
+        )));
+    }
+    Ok(creates.len() as u64)
+}
+
+/// BAK-3: restore the backup in `backup_dir` over the live repo `repo` (`owner/name`), as
+/// `restore_over_live_from` does, against GitHub.
+pub fn restore_over_live(
+    caller: &Caller,
+    fleet: &FleetBridge,
+    backup_dir: &Path,
+    repo: &str,
+    confirmed: bool,
+) -> Result<RestoreReport, CoreError> {
+    let api = HttpTransport::new(&crate::platform::GhAuthToken::default())?;
+    restore_over_live_from(
+        caller,
+        fleet,
+        backup_dir,
+        repo,
+        confirmed,
+        &github_remote(&api),
+    )
+}
+
+/// `restore_over_live` against `remote`. Writes nothing unless `rules::guard` allows
+/// `RestoreOverLive` for `caller` and `confirmed` is set. Then the repo must exist, the bundle's
+/// refs are force-pushed to it, its labels and milestones are queued, and `restore_issues`
+/// queues the issues and comments.
+pub fn restore_over_live_from(
+    caller: &Caller,
+    fleet: &FleetBridge,
+    backup_dir: &Path,
+    repo: &str,
+    confirmed: bool,
+    remote: &Remote<'_>,
+) -> Result<RestoreReport, CoreError> {
+    match rules::guard(
+        caller,
+        &GuardedAction::RestoreOverLive {
+            repo: repo.to_string(),
+        },
+    ) {
+        Verdict::Allow => {}
+        Verdict::ToWaiting(why) | Verdict::Refuse(why) => return Err(CoreError::Refused(why)),
+    }
+    if !confirmed {
+        return Err(CoreError::Refused(format!(
+            "restore over {repo}: needs a confirm in the app"
+        )));
+    }
+    let (owner, name) = split_repo(repo)?;
+    let manifest = manifest_in(backup_dir)?;
+    let labels = names_in(backup_dir, "labels.json", "name", manifest.labels)?;
+    let milestones = names_in(backup_dir, "milestones.json", "title", manifest.milestones)?;
+    let path = format!("/repos/{repo}");
+    match remote.api.rest_get(&path, None)?.status {
+        200 => {}
+        404 => {
+            return Err(CoreError::GitHub(format!(
+                "{repo}: no such repo to restore over"
+            )))
+        }
+        other => return Err(CoreError::GitHub(format!("GET {path}: status {other}"))),
+    }
+    let bundle =
+        std::path::absolute(backup_dir.join("repo.bundle")).map_err(|e| io_error(backup_dir, e))?;
+    let work = work_dir(owner, name);
+    let restored = clone_mirror(remote, &bundle.to_string_lossy(), &work).and_then(|()| {
+        let refs = push_refs(remote, &work, repo).map_err(|e| about(repo, e))?;
+        let before = queue_counts(fleet)?;
+        queue_labels(fleet, repo, &labels, &milestones, &before)?;
+        restore_issues(fleet, backup_dir, repo)?;
+        Ok(RestoreReport {
+            refs,
+            labels: labels.len() as u64,
+            milestones: milestones.len() as u64,
+        })
+    });
+    let _ = std::fs::remove_dir_all(&work);
+    restored
 }
 
 #[cfg(test)]
