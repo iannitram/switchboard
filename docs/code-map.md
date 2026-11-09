@@ -62,7 +62,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 ## Modules
 
 ### core-settings
-`crates/core/src/settings.rs` · CORE-5 · planned. The one settings file: pipeline repo clone, NextCloud backups folder, vault agents folder. `Settings::missing()` names what is not set; `load` gives defaults for a missing file. Read by every module that needs a path. Face: a Settings view (`app/src/views/Settings.tsx`, planned).
+`crates/core/src/settings.rs` · CORE-5 · present. The one settings file: pipeline repo clone, NextCloud backups folder, vault agents folder. `Settings::missing()` names what is not set; `load` gives defaults for a missing file. Read by every module that needs a path. Face: a Settings view (`app/src/views/Settings.tsx`, present).
 
 ### core-fleet
 `crates/core/src/fleet.rs` · CORE-1, CORE-2, AUTO-1 · present. `FleetBridge` runs `<python> <root>/tools/fleet/fleet.py <cmd> --json` (root from settings, `FLEET_ROOT` overrides) and parses it; a non-zero exit or bad JSON is a `FleetError` (command, exit code, stderr), recorded in `FleetErrorLog`, never a guessed value. Tests use `tests/fixtures/fleet-stub/` (`FLEET_STUB_EXIT`, `FLEET_STUB_BADJSON`, answers in `answers/<cmd>.json`). Used by abilities, joblog, budget, github::queue, autopilot, it.
@@ -130,9 +130,11 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 
 - WAIT-1 snapshot items (`from_snapshots`): present.
 - WAIT-1 CalDAV items (`caldav_items`, `from_caldav`): present.
+- WAIT-1 view (`WaitingItem`, `WaitingList`, `Waiting`): present.
 - WAIT-2 tick a CalDAV task (`tick_caldav`): present.
 - WAIT-3 carry between reads (`carry`): present.
 - WAIT-1 local items and the merge (`LocalItems`, `merge`): present.
+- WAIT-W command (`assemble`, `load`, `waiting`): present.
 
 ### reports
 `crates/core/src/reports.rs`, `app/src/views/Reports.tsx` · REP-1, REP-2, REP-3 · planned. The five-part fixed report from a done card or a thread, its work tree of moves, filters. The report entry is ported from BroCrew.
@@ -159,17 +161,27 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - BAK-2 overwrite guard (`refuse_reason`): present.
 
 - BAK-1 JSON of issues, PRs, comments, labels, milestones (`write_json`): present.
+- BAK-1 git bundle (`bundle`): present.
+- BAK-1 wiki mirror (`copy_wiki`): present.
+- BAK-1 back up one repo or all (`backup_repo`, `backup_all`, `BackupOutcome`; the Sky's back up buttons): present.
 
 ### frontdoor
 `crates/core/src/frontdoor/` · FD-1 to FD-13 · planned. `router` (the four steps, the `first` list against budget, the learned pick), `labeller` (rules, then a small model, U8), `adapters` (one per service; none for the Claude subscription), `packet` (summary, last 6 turns, links; the summary check), `sticky` (what moves a chat; implicit signals), `thread` (one JSON Lines file per thread). Face: `app/src/views/Chat.tsx` with BroCrew's composer and messages ported; the "Open in Claude" button (FD-8).
 - FD-6 packet (`build`): present.
 - FD-7 summary check (`missing_from_summary`, `checked_summary`): present.
+- FD-2 rules labeller (`by_rules`, `label`): present.
+- FD-2 small labeller (`LlamaLabeller`): present.
 - FD-13 thread store: present.
 - FD-11 adapter interface (`split_handoff`, `log_row`): present.
+- FD-11 Qwen adapter (`QwenAdapter`): present.
+- FD-11 DeepSeek adapter (`DeepSeekAdapter`, `post_json_headers`): present.
+- FD-11 ChatGPT adapter (`ChatGptAdapter`): present.
 - FD-9 rating and implicit rows (`rating_row`, `implicit_row`): present.
+- FD-9 implicit signal log (`implicit_from_name`, `log_implicit`, `chat_implicit`): present.
 - FD-10 separate move field (`with_move`, `thumbs_down_counts`): present.
 - FD-8 Open in Claude (`as_prompt`): present.
 - FD-4 learned pick (`sample_size`, `learned_pick`): present.
+- FD-5 sticky signals (`signals`): present.
 
 ### autopilot
 `crates/core/src/autopilot/` · AUTO-1 to AUTO-9 · planned. `may_spend` (budget allow), `review` (R25's ladder as a state machine), `driver` (script loops, Qwen plus one), `instructions` (untracked instruction files; drift of copies), `classify` (by the card, through `fleet errors classify`), `weekly` (Sunday 6am, ROADMAP changes).
@@ -193,7 +205,9 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - IT-W loadout command (`SystemProbeRunner`, `read_this_machine`, `loadout`): present.
 
 ### cli
-`crates/cli/src/main.rs`, `cli.rs` · CLI-1, CLI-2, CLI-3 · planned. Text or `--json`; the same numbers as the GUI; role-flagged writes through `rules::guard`.
+`crates/cli/src/main.rs`, `cli.rs` · CLI-1, CLI-2, CLI-3 · CLI-1 and CLI-3 present; CLI-2 planned. Text or `--json`; the same numbers as the GUI; role-flagged writes through `rules::guard`.
+- CLI-1 parse arguments, budget: present; sky, waiting, reports, star, loadout: planned.
+- CLI-3 delete and restore refused to Waiting on you, `--role` merge through the guard, none inside a job worktree: present; the real merge and Waiting write are not wired yet (stubs, as in `mcp.rs`).
 
 ### mcp
 `crates/cli/src/mcp.rs` · MCP-1 and MCP-2 present; MCP-3 planned. JSON-RPC over stdio; six read tools; role write tools; none inside a job worktree.

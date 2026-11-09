@@ -1,7 +1,7 @@
 //! FD-5, FD-9, FD-10: a chat stays on its model until a signal moves it; ratings and implicit
 //! signals are logged as their own rows.
 
-use super::adapters::Answer;
+use super::adapters::{split_handoff, Answer};
 use crate::joblog::{JobRow, RowSource};
 
 /// FD-5: what moves a sticky chat.
@@ -18,8 +18,42 @@ pub enum Signal {
 
 /// FD-5: the signals in one turn: my message (`ask Claude`, an agent's name from `agents`),
 /// my rating, and the model's reply (`[[handoff: <reason>]]`).
+///
+/// Matching is case-insensitive and on whole words. The order is: `AskClaude`, one `NamedAgent`
+/// per entry of `agents` found (in `agents` order, spelled as in `agents`), `ThumbsDown`, then
+/// `HandoffMarker` with the reason `split_handoff` finds. No signal gives an empty vec.
 pub fn signals(my_message: &str, agents: &[String], thumbs_down: bool, reply: &str) -> Vec<Signal> {
-    todo!("FD-5")
+    let message_words = words(my_message);
+    let mut found = Vec::new();
+    if has_phrase(&message_words, &["ask".to_string(), "claude".to_string()]) {
+        found.push(Signal::AskClaude);
+    }
+    for agent in agents {
+        if has_phrase(&message_words, &words(agent)) {
+            found.push(Signal::NamedAgent(agent.clone()));
+        }
+    }
+    if thumbs_down {
+        found.push(Signal::ThumbsDown);
+    }
+    if let (_, Some(reason)) = split_handoff(reply) {
+        found.push(Signal::HandoffMarker(reason));
+    }
+    found
+}
+
+/// The lowercased words of `text`: runs of letters and digits; everything else separates them.
+fn words(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// Whether `phrase` (one or more words) appears as consecutive whole words in `words`. An empty
+/// phrase never matches.
+fn has_phrase(words: &[String], phrase: &[String]) -> bool {
+    !phrase.is_empty() && words.windows(phrase.len()).any(|window| window == phrase)
 }
 
 /// FD-9: implicit signals, logged apart and not counted by FD-4 in 1.0.

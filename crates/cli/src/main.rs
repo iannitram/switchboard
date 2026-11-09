@@ -24,7 +24,24 @@ pub struct Args {
 
 /// Parse `std::env::args` (without the program name). Flags may come anywhere.
 pub fn parse_args(argv: &[String]) -> Result<Args, String> {
-    todo!("CLI-1")
+    let mut args = Args {
+        role: None,
+        json: false,
+        command: Vec::new(),
+    };
+    let mut words = argv.iter();
+    while let Some(word) = words.next() {
+        match word.as_str() {
+            "--json" => args.json = true,
+            "--role" => match words.next() {
+                Some(value) if !value.starts_with("--") => args.role = Some(value.clone()),
+                _ => return Err("--role needs a value".to_string()),
+            },
+            flag if flag.starts_with("--") => return Err(format!("unknown flag: {flag}")),
+            _ => args.command.push(word.clone()),
+        }
+    }
+    Ok(args)
 }
 
 /// The real core behind `switchboard mcp`: each read tool calls the same core call the CLI uses
