@@ -140,6 +140,16 @@ fn a_project_whose_only_dark_stars_are_after_1_0_has_no_drift() {
 }
 
 #[test]
+fn an_after_2_0_dark_star_is_not_drift() {
+    let issues = vec![issue(1, "open", &["feature:core"])];
+    let b = block(
+        Some(TODAY),
+        &[("core", Release::V1), ("gamification", Release::After2)],
+    );
+    assert_eq!(find(&issues, &b, TODAY), vec![]);
+}
+
+#[test]
 fn a_feature_label_on_an_orphan_still_keeps_its_feature_from_being_dark() {
     // #3 is on two features, so it is an orphan, but core and sky each have an issue.
     let issues = vec![issue(3, "open", &["feature:core", "feature:sky"])];

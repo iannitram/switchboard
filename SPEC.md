@@ -97,10 +97,10 @@ The main view. Our sky, not wayfinder-maps' viewer: the look is borrowed (MIT, c
 | # | Must | Done looks like | Check |
 |---|---|---|---|
 | SKY-1 | WHEN I open the Sky, THE APP SHALL draw every repo in the priority order as a constellation, its distance from the centre and its size set by its rank, with the top 3 large and in the middle. | Moving a project up the priority order moves it inward and makes it larger. | Pure layout test: rank to radius and size; screenshot of a fixture sky. |
-| SKY-2 | WHEN I look at a constellation, THE APP SHALL set its brightness by its progress to 1.0: closed stars in the `1.0` milestone over all stars in it, each dark star of a feature marked `release: 1.0` in the `features:` block counting as one open star. A dark star of a feature marked `release: after-1.0` is drawn but not counted. | A project with unfiled 1.0 features does not look finished; its After 1.0 features don't keep it dim once 1.0 is done. | Layout test over fixture issues and a `features:` block with both kinds. |
-| SKY-3 | WHEN I click a constellation, THE APP SHALL zoom into it: each feature a cluster (label `feature:<id>` matching the ROADMAP `features:` block), each star one issue, a line for each `Blocked by #N`, and a ring for the `1.0` and `After 1.0` milestones. | The zoomed view of a fixture repo matches its issues. | Face test over a fixture snapshot. |
+| SKY-2 | WHEN I look at a constellation, THE APP SHALL set its brightness by its progress to 1.0: closed stars in the `1.0` milestone over all stars in it, each dark star of a feature marked `release: 1.0` in the `features:` block counting as one open star. A dark star of a feature marked `release: after-1.0` or `release: after-2.0` is drawn but not counted. | A project with unfiled 1.0 features does not look finished; its After 1.0 features don't keep it dim once 1.0 is done. | Layout test over fixture issues and a `features:` block with both kinds. |
+| SKY-3 | WHEN I click a constellation, THE APP SHALL zoom into it: each feature a cluster (label `feature:<id>` matching the ROADMAP `features:` block), each star one issue, a line for each `Blocked by #N`, and a ring for the `1.0`, `After 1.0` and `After 2.0` milestones. | The zoomed view of a fixture repo matches its issues. | Face test over a fixture snapshot. |
 | SKY-4 | WHEN a star changes state, THE APP SHALL draw it dim while open, lit once merged or closed, and pulsing while a fleet job for it is in flight. | A running `fleet run` makes its star pulse. | Face test with a fixture `jobs/running` entry. |
-| SKY-5 | WHEN a project has drift, THE APP SHALL flag it on the constellation and list it: orphan stars (an issue on no feature or on two), dark stars of features marked `release: 1.0` (an After 1.0 dark star is planned, not drift), and a ROADMAP `Updated:` date more than 14 days old. | A drift count on each constellation and a drift list the PM can clear every week; a project whose only dark stars are After 1.0 shows no drift. | Core test for each of the three kinds, and one with only After 1.0 dark stars. |
+| SKY-5 | WHEN a project has drift, THE APP SHALL flag it on the constellation and list it: orphan stars (an issue on no feature or on two), dark stars of features marked `release: 1.0` (an After 1.0 or After 2.0 dark star is planned, not drift), and a ROADMAP `Updated:` date more than 14 days old. | A drift count on each constellation and a drift list the PM can clear every week; a project whose only dark stars are After 1.0 shows no drift. | Core test for each of the three kinds, and one with only After 1.0 dark stars. |
 | SKY-6 | WHEN a project's code map lists `reuses:`, THE APP SHALL draw a dashed reuse line to each project named, drawn as a warning when that project is Parked or archived. | A fixture reuse of an archived repo shows the warning. | Face test. |
 | SKY-7 | WHEN I zoom into a constellation, THE APP SHALL highlight its longest chain of blocked-by lines and say how many stars are on it. | The chain that gates 1.0 stands out. | Pure test over a fixture graph. |
 | SKY-8 | WHEN I click a star, THE APP SHALL show its title, labels, size, linked PR, review verdict and fleet job, with a link to GitHub. | One panel per star. | Face test. |
@@ -220,9 +220,18 @@ These features go in the ROADMAP `features:` block marked `release: after-1.0` (
 | `local-only` | Local only: Readiness, the prep loop and the work loop, plus the six review ideas ruled inside its own Spec (see [dispositions](#review-dispositions)). | Local only rulings |
 | `platforms` | Windows and Mac builds. | proposal §7 |
 | `fleet-rust` | Porting `fleet` to Rust. | proposal §7 |
+| `plugins` | Plugins that add views, commands and MCP tools without changing the core. | my ruling, 2026-11-09 |
 | `dashboard` | Retiring the fleet dashboard, on the Z13 after parity, then everywhere. It needs my yes again before anyone starts (the 2026-11-08 run rule is never to retire it). | grill, Retire / defer |
 
 Moving CC into a repo is its own project, not a Switchboard feature.
+
+## Regions after 2.0 (dark stars)
+
+These features go in the ROADMAP `features:` block marked `release: after-2.0`. They are dark stars like the ones above, but they wait for 2.0: they don't count against the 1.0 brightness (SKY-2) and are not drift (SKY-5).
+
+| Id | Feature | Where it was ruled |
+|---|---|---|
+| `gamification` | A gamification plugin, built on `plugins`. | my ruling, 2026-11-09 |
 
 ## Routes
 
@@ -330,7 +339,7 @@ Every finding and feature idea in the 2026-11-07 adversarial review (pipeline re
 | 2.8 | Latest-only backup can be overwritten by a bad pass | **Keeping 4 weeks: declined**, because the ruling is latest only. **The overwrite guard: in 1.0** (BAK-2), which keeps the one copy good. |
 | 2.9 | Instruction files trip `files_allowed` and collide with tracked files | **In 1.0:** untracked, listed in `.git/info/exclude`, never over a tracked file (AUTO-7); per-CLI file names are U6. |
 | 2.10a | The PM job edits the instruction source the next job reads | **In 1.0:** each job gets the source at the sha it was claimed at (AUTO-7); the source changes only through a reviewed PR. |
-| 2.10b | Dark stars need a feature list the code can read | **In 1.0:** ROADMAP.md carries a `features:` block, which this Spec's region ids fill, each marked `release: 1.0` or `release: after-1.0`; SKY-2, SKY-3 and SKY-5 read it, and design-pass issues and automatic bugs get a `feature:` label (SKY-10). |
+| 2.10b | Dark stars need a feature list the code can read | **In 1.0:** ROADMAP.md carries a `features:` block, which this Spec's region ids fill, each marked `release: 1.0`, `release: after-1.0` or `release: after-2.0`; SKY-2, SKY-3 and SKY-5 read it, and design-pass issues and automatic bugs get a `feature:` label (SKY-10). |
 | 2.10c | RUBRIC's 32k against the config's 131072 | **In 1.0:** read the running config (U12); the RUBRIC fix is Harmon's, filed as an issue in the pipeline repo (the Project Manager may only file there). |
 | 2.10d | Keep the raw `fleet` CLI as the escape hatch | **In 1.0:** documented (`cli`); Switchboard keeps no state only it can read. |
 
