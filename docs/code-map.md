@@ -208,7 +208,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 
 ### cli
 `crates/cli/src/main.rs`, `cli.rs` · CLI-1, CLI-2, CLI-3 · CLI-1 and CLI-3 present; CLI-2 planned. Text or `--json`; the same numbers as the GUI; role-flagged writes through `rules::guard`.
-- CLI-1 parse arguments, budget: present; sky, waiting, reports, star, loadout: planned.
+- CLI-1 parse arguments, budget, waiting, reports: present; sky, star, loadout: planned.
 - CLI-3 delete and restore refused to Waiting on you, `--role` merge through the guard, none inside a job worktree: present; the real merge and Waiting write are not wired yet (stubs, as in `mcp.rs`).
 
 ### mcp

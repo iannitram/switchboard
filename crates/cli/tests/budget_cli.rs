@@ -181,7 +181,7 @@ fn loadout_exits_2_naming_it_1() {
 
 #[test]
 fn unbuilt_commands_exit_2() {
-    for command in ["sky", "waiting", "reports", "star"] {
+    for command in ["sky", "star"] {
         let out = switchboard(&[command], Some(stub_root().as_os_str()));
         assert_eq!(out.status.code(), Some(2), "{command}");
         assert!(

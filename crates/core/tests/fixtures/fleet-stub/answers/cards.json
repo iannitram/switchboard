@@ -1,0 +1,38 @@
+[
+  {
+    "id": "job-a1",
+    "title": "Add the settings screen",
+    "repo": "owner/app-a",
+    "outcome": "passed",
+    "lane": "qwen",
+    "model": "qwen3-coder",
+    "at": "2026-11-06T13:00:43-07:00"
+  },
+  {
+    "id": "job-a2",
+    "title": "Fix the sync retry",
+    "repo": "owner/app-a",
+    "outcome": "failed",
+    "failure_mode": "tests",
+    "lane": "gemini",
+    "model": "gemini-2.5-pro",
+    "at": "2026-11-05T09:00:00-07:00"
+  },
+  {
+    "id": "job-b1",
+    "title": "Tidy the budget copy",
+    "pr_url": "https://github.com/owner/app-b/pull/3",
+    "outcome": "passed",
+    "lane": "gemini",
+    "model": "gemini-2.5-pro",
+    "at": "2026-11-07T08:00:00-07:00"
+  },
+  {
+    "id": "job-n1",
+    "title": "Scratch run",
+    "outcome": "failed",
+    "lane": "qwen",
+    "model": "qwen3-coder",
+    "at": "2026-11-04T10:00:00-07:00"
+  }
+]
