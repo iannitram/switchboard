@@ -42,8 +42,8 @@ pub fn place(repos: &[String]) -> Vec<Placement> {
 }
 
 /// SKY-2: progress to 1.0, 0.0 to 1.0: closed stars in the `1.0` milestone over all stars in
-/// it, each `release: 1.0` feature with no issue counting as one open star; `after-1.0` dark
-/// stars are not counted. No stars and no dark stars is 0.0.
+/// it, each `release: 1.0` feature with no issue counting as one open star; `after-1.0` and
+/// `after-2.0` dark stars are not counted. No stars and no dark stars is 0.0.
 pub fn brightness(issues: &[Issue], block: &FeatureBlock) -> f64 {
     let stars: Vec<&Issue> = issues
         .iter()

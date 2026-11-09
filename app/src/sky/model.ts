@@ -2,7 +2,7 @@
 // rules: placement, brightness, drift, reuse warnings and the chain all come from
 // `switchboard-core` (crates/core/src/sky/) through the `sky` command.
 
-export type Release = "1.0" | "after-1.0";
+export type Release = "1.0" | "after-1.0" | "after-2.0";
 
 /** One GitHub issue. */
 export type Star = {

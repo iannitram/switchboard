@@ -1,6 +1,8 @@
-//! GH-4: every create (issue, comment, label, milestone) goes through the pipeline's one
+//! GH-4: every create (issue, comment, label, milestone, repo) goes through the pipeline's one
 //! throttled create queue, `fleet ghq`, shared with fleet jobs (the create limit is per
-//! account). The core adds items and runs the queue; it never calls `gh` to create.
+//! account). The core adds items and runs the queue; it never calls `gh` to create. A repo
+//! item is created private when asked, answers `exists` when its name is taken, and the
+//! new repo's URL comes back from the queue.
 
 use crate::fleet::FleetBridge;
 use crate::CoreError;
@@ -31,6 +33,11 @@ pub enum Create {
         repo: String,
         title: String,
     },
+    /// A new repo `repo` (owner/name), created private when `private` is set.
+    Repo {
+        repo: String,
+        private: bool,
+    },
 }
 
 /// What the queue said after a run.
@@ -43,27 +50,34 @@ pub struct QueueStatus {
 }
 
 /// Add the creates as one batch (`fleet ghq add-batch <file>`; `--coordinator` when any is a
-/// label or milestone), then `fleet ghq run`. A run that stopped on a rate limit (exit 75) is
+/// label, milestone or repo), then `fleet ghq run`. A run that stopped on a rate limit (exit 75) is
 /// not an error: the items stay queued and the status says so.
 pub fn send(fleet: &FleetBridge, creates: &[Create]) -> Result<QueueStatus, CoreError> {
     if creates.is_empty() {
         return Ok(QueueStatus::default());
     }
+    // The counter keeps two sends in one process apart when the clock does not tick
+    // between them (macOS reads it in whole microseconds).
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
     let file = std::env::temp_dir().join(format!(
-        "switchboard-ghq-{}-{nanos}.json",
+        "switchboard-ghq-{}-{nanos}-{seq}.json",
         std::process::id()
     ));
     let io = |e: String| CoreError::Io(format!("{}: {e}", file.display()));
     let body = serde_json::to_string(creates).map_err(|e| io(e.to_string()))?;
     std::fs::write(&file, body).map_err(|e| io(e.to_string()))?;
     let path = file.to_string_lossy().into_owned();
-    let coordinator = creates
-        .iter()
-        .any(|c| matches!(c, Create::Label { .. } | Create::Milestone { .. }));
+    let coordinator = creates.iter().any(|c| {
+        matches!(
+            c,
+            Create::Label { .. } | Create::Milestone { .. } | Create::Repo { .. }
+        )
+    });
     let mut add = vec!["ghq", "add-batch", path.as_str()];
     if coordinator {
         add.push("--coordinator");

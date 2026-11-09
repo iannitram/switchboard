@@ -45,6 +45,7 @@ const C: Constellation = deepFreeze({
     { id: "sky", title: "Constellation", release: "1.0", stars: [star(3)] },
     { id: "budget", title: "The budget panel", release: "1.0", stars: [] },
     { id: "relay", title: "A relay", release: "after-1.0", stars: [] },
+    { id: "gamification", title: "Gamification", release: "after-2.0", stars: [] },
   ],
   edges: [
     [1, 2],
@@ -73,15 +74,17 @@ test("onRing spreads points evenly from the top, clockwise in screen space", () 
   expect(around.y).toBeCloseTo(70);
 });
 
-test("1.0 features sit on the 250 ring and after-1.0 features on the 420 ring", () => {
-  expect(RINGS).toEqual({ "1.0": 250, "after-1.0": 420 });
+test("1.0 features sit on the 250 ring and after-1.0 on the 350 ring and after-2.0 on the 450 ring", () => {
+  expect(RINGS).toEqual({ "1.0": 250, "after-1.0": 350, "after-2.0": 450 });
   const at = layoutConstellation(C);
   expect(at.features.get("core")!.x).toBeCloseTo(500);
   expect(at.features.get("core")!.y).toBeCloseTo(250);
   expect(at.features.get("sky")!.x).toBeCloseTo(500 + 250 * Math.cos(Math.PI / 6));
   expect(at.features.get("sky")!.y).toBeCloseTo(625);
   expect(at.features.get("relay")!.x).toBeCloseTo(500);
-  expect(at.features.get("relay")!.y).toBeCloseTo(80);
+  expect(at.features.get("relay")!.y).toBeCloseTo(150);
+  expect(at.features.get("gamification")!.x).toBeCloseTo(500);
+  expect(at.features.get("gamification")!.y).toBeCloseTo(50);
 });
 
 test("a feature's stars sit 40 from it, the first at the top", () => {
@@ -96,8 +99,8 @@ test("a feature's stars sit 40 from it, the first at the top", () => {
 test("one cluster per feature in block order, with its release", () => {
   render(<ConstellationView c={C} onBack={() => {}} />);
   const clusters = screen.getAllByTestId("feature");
-  expect(clusters.map((g) => g.getAttribute("data-feature"))).toEqual(["core", "sky", "budget", "relay"]);
-  expect(clusters.map((g) => g.getAttribute("data-release"))).toEqual(["1.0", "1.0", "1.0", "after-1.0"]);
+  expect(clusters.map((g) => g.getAttribute("data-feature"))).toEqual(["core", "sky", "budget", "relay", "gamification"]);
+  expect(clusters.map((g) => g.getAttribute("data-release"))).toEqual(["1.0", "1.0", "1.0", "after-1.0", "after-2.0"]);
   expect(screen.getByText("Constellation")).toBeTruthy();
 });
 
@@ -106,7 +109,7 @@ test("one star per issue at its layout place, and a dark star for a feature with
   const stars = screen.getAllByTestId("star");
   expect(stars.map((s) => num(s, "data-number"))).toEqual([1, 2, 3]);
   expect(num(stars[1], "cy")).toBeCloseTo(290);
-  expect(screen.getAllByTestId("dark-star")).toHaveLength(2);
+  expect(screen.getAllByTestId("dark-star")).toHaveLength(3);
   expect(screen.getByRole("button", { name: "#3 issue 3" })).toBeTruthy();
 });
 
@@ -121,11 +124,11 @@ test("a line for each blocked-by pair whose two stars are drawn", () => {
   expect(num(lines[0], "y2")).toBeCloseTo(290);
 });
 
-test("a ring for the 1.0 and the After 1.0 milestones", () => {
+test("a ring for the 1.0, After 1.0 and After 2.0 milestones", () => {
   render(<ConstellationView c={C} onBack={() => {}} />);
   const rings = screen.getAllByTestId("ring");
-  expect(rings.map((r) => r.getAttribute("data-milestone"))).toEqual(["1.0", "After 1.0"]);
-  expect(rings.map((r) => num(r, "r"))).toEqual([250, 420]);
+  expect(rings.map((r) => r.getAttribute("data-milestone"))).toEqual(["1.0", "After 1.0", "After 2.0"]);
+  expect(rings.map((r) => num(r, "r"))).toEqual([250, 350, 450]);
 });
 
 test("clicking a star calls onStar with that star", () => {
@@ -148,7 +151,7 @@ test("in the Sky view, clicking a constellation zooms in and back returns to the
   call.mockResolvedValue({ ok: SKY });
   render(<Sky />);
   fireEvent.click(await screen.findByTestId("constellation"));
-  expect(screen.getAllByTestId("feature")).toHaveLength(4);
+  expect(screen.getAllByTestId("feature")).toHaveLength(5);
   expect(screen.queryByTestId("constellation")).toBeNull();
   fireEvent.keyDown(window, { key: "Escape" });
   expect(screen.getByTestId("constellation")).toBeTruthy();

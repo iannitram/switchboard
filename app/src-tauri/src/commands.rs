@@ -8,6 +8,7 @@ use switchboard_core::budget::{self, PoolEdit, PoolRow};
 use switchboard_core::clock::{Clock, SystemClock};
 use switchboard_core::fleet::{FleetBridge, FleetError, FleetErrorLog};
 use switchboard_core::frontdoor::implicit_log::log_implicit;
+use switchboard_core::reports::{self, Filter, Report, FLEET_STATE_DIR_ENV};
 use switchboard_core::settings::{self, Settings};
 use switchboard_core::waiting::LocalItems;
 use switchboard_core::CoreError;
@@ -18,6 +19,9 @@ use tauri::Manager;
 pub struct AppState {
     pub settings_path: PathBuf,
     pub errors: Mutex<FleetErrorLog>,
+    /// GH-1: held while the poll thread or the Refresh button reads GitHub, so two never write
+    /// the snapshot store at once.
+    pub github: Mutex<()>,
 }
 
 impl AppState {
@@ -25,6 +29,7 @@ impl AppState {
         Self {
             settings_path,
             errors: Mutex::new(FleetErrorLog::default()),
+            github: Mutex::new(()),
         }
     }
 }
@@ -147,13 +152,40 @@ pub fn bridge(settings_path: &Path) -> Result<FleetBridge, CoreError> {
     Ok(FleetBridge::new(settings.pipeline_repo()?))
 }
 
+/// IT-2: one filing at a time, so two errors close together never hand fleet the log at once.
+static FILING: Mutex<()> = Mutex::new(());
+
+/// IT-2: hand `log` to `fleet errors file` through the pipeline repo the settings name; the count handed over.
+pub fn file_tickets(settings_path: &Path, log: &FleetErrorLog) -> Result<usize, CoreError> {
+    let fleet = bridge(settings_path)?;
+    let _held = FILING.lock().unwrap_or_else(|p| p.into_inner());
+    switchboard_core::it::file_error_tickets(&fleet, log).map_err(CoreError::Fleet)
+}
+
 /// Record a fleet failure in this session's log; other errors are not fleet errors and are
-/// left to the caller.
-pub fn record_fleet_error(state: &AppState, err: &CoreError) {
-    if let CoreError::Fleet(e) = err {
+/// left to the caller. IT-2: then file the whole log on its own thread. None for any other error.
+pub fn record_fleet_error(
+    state: &AppState,
+    err: &CoreError,
+) -> Option<std::thread::JoinHandle<Result<usize, CoreError>>> {
+    let CoreError::Fleet(e) = err else {
+        return None;
+    };
+    let copy = {
         let mut log = state.errors.lock().unwrap_or_else(|p| p.into_inner());
         log.record(e.clone());
-    }
+        FleetErrorLog {
+            errors: log.errors.clone(),
+        }
+    };
+    let settings_path = state.settings_path.clone();
+    Some(std::thread::spawn(move || {
+        let filed = file_tickets(&settings_path, &copy);
+        if let Err(e) = &filed {
+            eprintln!("IT ticket not filed: {e}");
+        }
+        filed
+    }))
 }
 
 /// FD-9: log a thumbs press on one answer (#179) as that turn's rating row in the chat's
@@ -253,6 +285,24 @@ pub fn budget_save_edit(
         })
 }
 
+/// REP-1, REP-3: the reports, newest first, narrowed by `filter` when the face sends one.
+/// Chat threads join when FD-13 (#113) fills the thread store.
+#[tauri::command]
+pub fn reports(
+    state: tauri::State<'_, AppState>,
+    filter: Option<Filter>,
+) -> Result<Vec<Report>, FaceError> {
+    bridge(&state.settings_path)
+        .and_then(|fleet| {
+            let env = std::env::var_os(FLEET_STATE_DIR_ENV);
+            reports::load(&fleet, env.as_deref(), &[], filter.as_ref())
+        })
+        .map_err(|e| {
+            record_fleet_error(&state, &e);
+            FaceError::new("reports", &e)
+        })
+}
+
 /// FD-9: log an implicit chat signal (FD-8's press sends `opened-in-claude`) as its own row in
 /// the chat's thread, in the thread store in the app data folder.
 #[tauri::command]
@@ -280,6 +330,71 @@ pub fn chat_implicit(
         .map(|_| ())
         .map_err(|e| FaceError::new("chat_implicit", &e))
 }
+
+/// GH-1: the GitHub transport, with the token `gh auth token` prints.
+pub fn github_transport() -> Result<switchboard_core::github::transport::HttpTransport, CoreError> {
+    switchboard_core::github::transport::HttpTransport::new(
+        &switchboard_core::platform::GhAuthToken::default(),
+    )
+}
+
+/// GH-1: the Refresh button: read every repo now, whatever its age. Answers the repos read.
+/// It runs off the main thread: it reads GitHub.
+#[tauri::command(async)]
+pub fn refresh_all(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<String>, FaceError> {
+    let _held = state.github.lock().unwrap_or_else(|p| p.into_inner());
+    app.path()
+        .app_data_dir()
+        .map_err(|e| CoreError::Io(format!("app data dir: {e}")))
+        .and_then(|data| {
+            let transport = github_transport()?;
+            switchboard_core::github::live::refresh_all(&transport, &data, &SystemClock)
+        })
+        .map_err(|e| FaceError::new("refresh_all", &e))
+}
+
+/// BAK-1, BAK-2: "back up" on one constellation; a refused backup becomes its Waiting on you
+/// item.
+#[tauri::command]
+pub fn backup_repo(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    repo: String,
+) -> Result<switchboard_core::backup_run::BackupRow, FaceError> {
+    app.path()
+        .app_data_dir()
+        .map_err(|e| CoreError::Io(format!("app data dir: {e}")))
+        .and_then(|data| {
+            let settings = settings::load(&state.settings_path)?;
+            let now = switchboard_core::clock::Clock::now(&SystemClock);
+            switchboard_core::backup_run::run_one(&settings, &data, &repo, now)
+        })
+        .map_err(|e| FaceError::new("backup_repo", &e))
+}
+
+/// BAK-1, BAK-2: "back up all", every repo in the sky.
+#[tauri::command]
+pub fn backup_all(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<switchboard_core::backup_run::BackupRow>, FaceError> {
+    app.path()
+        .app_data_dir()
+        .map_err(|e| CoreError::Io(format!("app data dir: {e}")))
+        .and_then(|data| {
+            let settings = settings::load(&state.settings_path)?;
+            let now = switchboard_core::clock::Clock::now(&SystemClock);
+            switchboard_core::backup_run::run_all(&settings, &data, now)
+        })
+        .map_err(|e| FaceError::new("backup_all", &e))
+}
+
+#[cfg(test)]
+#[path = "it_tickets_tests.rs"]
+mod it_tickets_tests;
 
 #[cfg(test)]
 #[path = "commands_tests.rs"]
