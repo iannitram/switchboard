@@ -2,9 +2,13 @@
 //! fixed-report shape plus the line our job cards lack ("what wasn't checked").
 
 use crate::clock::UnixSeconds;
-use crate::joblog::{JobRow, NOT_RECORDED};
+use crate::error::CoreError;
+use crate::fleet::FleetBridge;
+use crate::joblog::{self, JobRow, NOT_RECORDED};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Report {
@@ -330,4 +334,133 @@ pub fn newest_first(reports: &[Report]) -> Vec<Report> {
     let mut sorted = reports.to_vec();
     sorted.sort_by_key(|r| std::cmp::Reverse(r.at));
     sorted
+}
+
+/// REP-W: the environment variable that points the reports reader at another fleet-state
+/// folder (tests set it to a scratch folder).
+pub const FLEET_STATE_DIR_ENV: &str = "FLEET_STATE_DIR";
+
+/// REP-W: the fleet-state checkout the reports are read from, by the same rule the fleet
+/// itself uses. The first answer in this order wins: a set, non-empty `env`; the sibling
+/// folder beside the root (when it is a checkout or the root is not one); the first existing
+/// worktree on the `fleet-state` branch in `worktrees`; and finally the sibling folder.
+pub fn state_dir_from(pipeline_root: &Path, env: Option<&OsStr>, worktrees: &str) -> PathBuf {
+    if let Some(value) = env.filter(|value| !value.is_empty()) {
+        return PathBuf::from(value);
+    }
+    let name = pipeline_root
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let default = pipeline_root.with_file_name(format!("{name}-fleet-state"));
+    if default.join(".git").exists() || !pipeline_root.join(".git").exists() {
+        return default;
+    }
+    let mut current: Option<PathBuf> = None;
+    for line in worktrees.lines() {
+        let line = line.trim();
+        if let Some(path) = line.strip_prefix("worktree ") {
+            current = Some(PathBuf::from(path.trim()));
+        } else if line == "branch refs/heads/fleet-state" {
+            if current.as_ref().is_some_and(|path| path.is_dir()) {
+                return current.take().unwrap();
+            }
+        } else if line.is_empty() {
+            current = None;
+        }
+    }
+    default
+}
+
+/// REP-W: the done cards in `<state_dir>/jobs/done/`: every `.json` file that is not a
+/// `.job.json`, sorted by path, that parses to a JSON object. A missing folder is none; a
+/// broken file or a non-object is skipped.
+pub fn read_done_cards(state_dir: &Path) -> Result<Vec<Value>, CoreError> {
+    let folder = state_dir.join("jobs").join("done");
+    let entries = match std::fs::read_dir(&folder) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(CoreError::Io(format!("{}: {e}", folder.display()))),
+    };
+    let mut paths: Vec<PathBuf> = entries
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.ends_with(".json") && !n.ends_with(".job.json"))
+        })
+        .collect();
+    paths.sort();
+    let mut cards = Vec::new();
+    for path in &paths {
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) => return Err(CoreError::Io(format!("{}: {e}", path.display()))),
+        };
+        if let Ok(value) = serde_json::from_str::<Value>(&text) {
+            if value.is_object() {
+                cards.push(value);
+            }
+        }
+    }
+    Ok(cards)
+}
+
+/// REP-W: the reports the Reports view asks for: one per done card in card order, then one
+/// per thread in thread order, newest first, narrowed by `f` when it is set. It never
+/// changes its inputs.
+pub fn assemble(
+    cards: &[Value],
+    ledger_events: &[Value],
+    threads: &[(String, Vec<JobRow>)],
+    f: Option<&Filter>,
+) -> Vec<Report> {
+    let rows = joblog::read_all(ledger_events, &[]);
+    let mut reports: Vec<Report> = cards.iter().map(|card| from_card(card, &rows)).collect();
+    for (thread_id, thread_rows) in threads {
+        reports.push(from_thread(thread_id, thread_rows));
+    }
+    let sorted = newest_first(&reports);
+    match f {
+        Some(f) => filter(&sorted, f).into_iter().cloned().collect(),
+        None => sorted,
+    }
+}
+
+/// REP-W: the reports read from the fleet: the done cards and the ledger beside the root,
+/// then the thread rows the caller passes, assembled and, when set, filtered.
+pub fn load(
+    fleet: &FleetBridge,
+    env: Option<&OsStr>,
+    threads: &[(String, Vec<JobRow>)],
+    f: Option<&Filter>,
+) -> Result<Vec<Report>, CoreError> {
+    let root = fleet.root();
+    let worktrees = worktrees_porcelain(root);
+    let state = state_dir_from(root, env, &worktrees);
+    let cards = read_done_cards(&state)?;
+    let events = joblog::read_ledger(&joblog::ledger_files(root, &state))?;
+    Ok(assemble(&cards, &events, threads, f))
+}
+
+/// The text of `git -C <root> worktree list --porcelain`; the empty string when git cannot
+/// start or exits non-zero.
+fn worktrees_porcelain(root: &Path) -> String {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .arg("worktree")
+        .arg("list")
+        .arg("--porcelain")
+        .stdin(std::process::Stdio::null())
+        .output();
+    match output {
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout).into_owned()
+        }
+        _ => String::new(),
+    }
 }
