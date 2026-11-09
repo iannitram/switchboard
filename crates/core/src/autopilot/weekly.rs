@@ -48,3 +48,23 @@ pub fn roadmap_changed(
     }
     changed
 }
+
+/// AUTO-5: the UTC offset in seconds from `date +%z`'s output (`-0700`, `+0530`, surrounding
+/// whitespace allowed). Anything else, or minutes over 59, is `None`.
+pub fn parse_utc_offset(text: &str) -> Option<i64> {
+    let (sign_text, rest) = text.trim().split_at_checked(1)?;
+    let sign = match sign_text {
+        "+" => 1,
+        "-" => -1,
+        _ => return None,
+    };
+    if rest.len() != 4 || !rest.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let hours: i64 = rest[..2].parse().ok()?;
+    let minutes: i64 = rest[2..].parse().ok()?;
+    if minutes > 59 {
+        return None;
+    }
+    Some(sign * (hours * 3_600 + minutes * 60))
+}

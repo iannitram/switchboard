@@ -107,6 +107,7 @@ fn autopilot_after_poll(
                 starter: &mut starter,
             });
         // AUTO-4: then merge what passed, each merge followed by a read of its repo (GH-3).
+        // AUTO-4: then merge what passed, each merge followed by a read of its repo (GH-3).
         let store = switchboard_core::github::snapshot::SnapshotStore::new(data);
         let poller = switchboard_core::github::poll::Poller {
             transport,
@@ -125,6 +126,38 @@ fn autopilot_after_poll(
             }
             Err(e) => eprintln!("autopilot: merge: {e}"),
         }
+        // AUTO-5: the weekly drift clear and backup, once Sunday 6am local has passed.
+        if let Some(offset) = local_utc_offset() {
+            match passes::weekly_run(data, SystemClock.now(), offset, &mut starter) {
+                Ok(run) => {
+                    for id in &run.drift_started {
+                        eprintln!("autopilot: started {id}");
+                    }
+                    if let Some(e) = &run.drift_error {
+                        eprintln!("autopilot: drift clear: {e}");
+                    }
+                    if !run.backup.is_empty() {
+                        let settings = settings.clone();
+                        std::thread::spawn(move || {
+                            match switchboard_core::backup::backup_all(&settings, &run.backup) {
+                                Ok(outcomes) => {
+                                    for (repo, outcome) in outcomes {
+                                        if let switchboard_core::backup::BackupOutcome::Refused(
+                                            why,
+                                        ) = outcome
+                                        {
+                                            eprintln!("weekly backup: {repo} refused: {why}");
+                                        }
+                                    }
+                                }
+                                Err(e) => eprintln!("weekly backup: {e}"),
+                            }
+                        });
+                    }
+                }
+                Err(e) => eprintln!("autopilot: weekly: {e}"),
+            }
+        }
         started
     };
     match result {
@@ -138,6 +171,24 @@ fn autopilot_after_poll(
             eprintln!("autopilot: {e}");
         }
     }
+}
+
+/// AUTO-5: this computer's UTC offset in seconds: `date +%z` on Linux and macOS, PowerShell's
+/// `zzz` on Windows. `None` when neither answers; the weekly run then waits.
+fn local_utc_offset() -> Option<i64> {
+    let out = if cfg!(windows) {
+        std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                "(Get-Date).ToString('zzz').Replace(':','')",
+            ])
+            .output()
+    } else {
+        std::process::Command::new("date").arg("+%z").output()
+    }
+    .ok()?;
+    switchboard_core::autopilot::weekly::parse_utc_offset(&String::from_utf8_lossy(&out.stdout))
 }
 
 fn main() {
