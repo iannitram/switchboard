@@ -89,3 +89,25 @@ pub fn implicit_row(
         ..JobRow::default()
     }
 }
+
+/// FD-10: set `moved` on a rating row whose rating is "down"; any other row is returned unchanged. `rating` and `outcome` are never touched.
+pub fn with_move(row: JobRow, moved: bool) -> JobRow {
+    if row.rating.as_deref() != Some("down") {
+        return row;
+    }
+    JobRow {
+        moved: Some(moved),
+        ..row
+    }
+}
+
+/// FD-10: over the rows, (thumbs-downs that did not move the chat, thumbs-downs that did). Rows with `implicit` true, thumbs-ups and rows with `moved` None are not counted.
+pub fn thumbs_down_counts(rows: &[JobRow]) -> (usize, usize) {
+    rows.iter()
+        .filter(|row| !row.implicit && row.rating.as_deref() == Some("down"))
+        .fold((0, 0), |(not_moved, moved), row| match row.moved {
+            Some(false) => (not_moved + 1, moved),
+            Some(true) => (not_moved, moved + 1),
+            None => (not_moved, moved),
+        })
+}
