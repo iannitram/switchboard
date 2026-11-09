@@ -142,12 +142,15 @@ fn main() {
             commands::budget_rows,
             commands::budget_refresh,
             commands::budget_save_edit,
+            commands::reports,
             commands::waiting,
             commands::sky,
             commands::chat_rate,
             commands::loadout,
             commands::chat_implicit,
             commands::refresh_all,
+            commands::backup_repo,
+            commands::backup_all,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Switchboard");
