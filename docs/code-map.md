@@ -167,6 +167,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - BAK-1 release files under 1 GB (`fetch_release_files`, `write_releases`): present.
 - BAK-1 wiki mirror (`copy_wiki`): present.
 - BAK-1 back up one repo or all (`backup_repo`, `backup_all`, `BackupOutcome`; the Sky's back up buttons): present.
+- BAK-W back up from the app (`backup_run`: `folder`, `repos`, `record`, `run_one`, `run_all`; commands `backup_repo`, `backup_all`): present.
 
 ### frontdoor
 `crates/core/src/frontdoor/` · FD-1 to FD-13 · planned. `router` (the four steps, the `first` list against budget, the learned pick), `labeller` (rules, then a small model, U8), `adapters` (one per service; none for the Claude subscription), `packet` (summary, last 6 turns, links; the summary check), `sticky` (what moves a chat; implicit signals), `thread` (one JSON Lines file per thread). Face: `app/src/views/Chat.tsx` with BroCrew's composer and messages ported; the "Open in Claude" button (FD-8).
