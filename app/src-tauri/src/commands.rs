@@ -56,7 +56,11 @@ pub fn store_loadout(state: &AppState, loadout: Loadout) -> Loadout {
 
 /// IT-1: the newest loadout read so far, None before the first read.
 pub fn latest_loadout(state: &AppState) -> Option<Loadout> {
-    state.loadout.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    state
+        .loadout
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone()
 }
 
 /// IT-1: read the loadout now through `probes` and store it; answer the stored loadout.
@@ -390,8 +394,8 @@ pub fn refresh_all(
 mod it_tickets_tests;
 
 #[cfg(test)]
-#[path = "commands_tests.rs"]
-mod tests;
-#[cfg(test)]
 #[path = "loadout_tests.rs"]
 mod loadout_tests;
+#[cfg(test)]
+#[path = "commands_tests.rs"]
+mod tests;
