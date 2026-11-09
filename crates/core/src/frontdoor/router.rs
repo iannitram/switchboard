@@ -1,7 +1,8 @@
 //! FD-1, FD-3, FD-4: where a message goes.
 
 use crate::abilities::AbilitiesIndex;
-use crate::joblog::JobRow;
+use crate::joblog::{JobRow, RowSource};
+use std::collections::BTreeMap;
 
 /// FD-1: which step picked the model (the chat says it).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,13 +59,69 @@ pub fn pick_for_kind(index: &AbilitiesIndex, kind: &str, budget: &dyn BudgetGate
 /// FD-4: the sample size: N starts at 6 and rises by 1 for every 20 rows the kind has logged,
 /// to a cap of 30.
 pub fn sample_size(rows_logged: usize) -> usize {
-    todo!("FD-4")
+    (6 + rows_logged / 20).min(30)
 }
 
 /// FD-4: with N or more rated rows for a model, the cheapest model with at least 80% passes
 /// over its last N rated rows (implicit rows not counted); `None` leaves the index's guess.
+///
+/// N is `sample_size` of every row logged for `kind` (rated or not, ledger or chat). Only chat
+/// rows of `kind` that are rated and not implicit count toward a model's rated rows. Models are
+/// keyed by (service, model); a row without a lane or a model cannot be picked and is skipped.
+/// A pass is rating "pass" or "up". The mean cost is over those last N rows (None is 0.0);
+/// ties on the mean go to the smaller model name, then the smaller service.
 pub fn learned_pick(kind: &str, rows: &[JobRow]) -> Option<(String, String)> {
-    todo!("FD-4")
+    let logged = rows
+        .iter()
+        .filter(|row| row.kind.as_deref() == Some(kind))
+        .count();
+    let n = sample_size(logged);
+
+    let mut groups: BTreeMap<(String, String), Vec<&JobRow>> = BTreeMap::new();
+    for row in rows {
+        if row.kind.as_deref() != Some(kind)
+            || row.rating.is_none()
+            || row.implicit
+            || row.source != RowSource::Chat
+        {
+            continue;
+        }
+        let (Some(lane), Some(model)) = (row.lane.as_ref(), row.model.as_ref()) else {
+            continue;
+        };
+        groups
+            .entry((lane.clone(), model.clone()))
+            .or_default()
+            .push(row);
+    }
+
+    let mut candidates: Vec<(f64, String, String)> = Vec::new();
+    for ((lane, model), list) in &groups {
+        if list.len() < n {
+            continue;
+        }
+        let last = &list[list.len() - n..];
+        let passes = last
+            .iter()
+            .filter(|row| matches!(row.rating.as_deref(), Some("pass") | Some("up")))
+            .count();
+        // passes / n >= 80%, kept in whole numbers.
+        if passes * 5 < n * 4 {
+            continue;
+        }
+        let total: f64 = last.iter().map(|row| row.cost_usd.unwrap_or(0.0)).sum();
+        let mean = total / n as f64;
+        candidates.push((mean, model.clone(), lane.clone()));
+    }
+
+    candidates
+        .into_iter()
+        .min_by(|a, b| {
+            a.0.total_cmp(&b.0)
+                .then_with(|| a.1.cmp(&b.1))
+                .then_with(|| a.2.cmp(&b.2))
+        })
+        .map(|(_, model, lane)| (lane, model))
 }
 
 /// FD-1: route one message, stopping at the first step that matches.
