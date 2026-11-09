@@ -916,7 +916,13 @@ fn restore_into(
             title: title.clone(),
         }))
         .collect();
-    queue::send(fleet, &creates)?;
+    let sent = queue::send(fleet, &creates)?;
+    if sent.failed > made.failed {
+        return Err(CoreError::GitHub(format!(
+            "{new_repo}: {} label or milestone creates failed in the queue",
+            sent.failed - made.failed
+        )));
+    }
     Ok(RestoreReport {
         refs,
         labels: labels.len() as u64,

@@ -15,7 +15,8 @@ use switchboard_core::CoreError;
 const NEW: &str = "owner/restored";
 
 /// A fixture `fleet ghq`: logs each call, keeps every batch item in `items.json`, and answers
-/// `status` with counts: a repo named in `taken` is `exists`, anything else is `done`.
+/// `status` with counts: a repo named in `taken` is `exists`, an item whose kind is in `fail` is
+/// `failed`, anything else is `done`.
 const STUB: &str = r#"import json, os, sys
 here = os.path.dirname(os.path.abspath(__file__))
 args = sys.argv[1:]
@@ -29,10 +30,13 @@ if sub == "add-batch":
     json.dump(items, open(items_file, "w"))
 taken_file = os.path.join(here, "taken")
 taken = open(taken_file).read().split() if os.path.exists(taken_file) else []
+fail_file = os.path.join(here, "fail")
+failing = open(fail_file).read().split() if os.path.exists(fail_file) else []
 counts = {"pending": 0, "done": 0, "exists": 0, "failed": 0}
 for item in items:
     taken_repo = item["kind"] == "repo" and item["repo"] in taken
-    counts["exists" if taken_repo else "done"] += 1
+    state = "exists" if taken_repo else "failed" if item["kind"] in failing else "done"
+    counts[state] += 1
 print(json.dumps({"counts": counts, "total": len(items)}))
 "#;
 
@@ -264,4 +268,21 @@ fn labels_that_do_not_match_the_manifest_stop_before_any_call() {
     ));
     assert!(api.log.lock().unwrap().is_empty());
     assert!(!f.stub.join("calls.log").exists());
+}
+
+#[test]
+fn a_label_the_queue_fails_is_an_error_not_a_report() {
+    let f = fixture("label-failed");
+    std::fs::write(f.stub.join("fail"), "label").unwrap();
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            answer(404, json!({})),
+            answer(200, json!({"full_name": NEW, "private": true})),
+        ],
+    );
+    match restore_history_from(&f.fleet, &f.backup, NEW, &remote(&f, &api)) {
+        Err(CoreError::GitHub(why)) => assert!(why.contains("2 label or milestone"), "{why}"),
+        other => panic!("expected a queue failure, got {other:?}"),
+    }
 }
