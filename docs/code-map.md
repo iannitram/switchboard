@@ -130,6 +130,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 
 - WAIT-1 snapshot items (`from_snapshots`): present.
 - WAIT-1 CalDAV items (`caldav_items`, `from_caldav`): present.
+- WAIT-1 view (`WaitingItem`, `WaitingList`, `Waiting`): present.
 - WAIT-2 tick a CalDAV task (`tick_caldav`): present.
 - WAIT-3 carry between reads (`carry`): present.
 - WAIT-1 local items and the merge (`LocalItems`, `merge`): present.
