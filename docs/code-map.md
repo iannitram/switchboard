@@ -134,6 +134,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 
 - REP-1 reports (`from_card`, `from_thread`, `newest_first`, `parse_time`, `project_of`): present.
 - REP-2 moves (`moves`): present.
+- REP-2 work tree (`WorkTree`): present.
 - REP-1 view (`ReportEntry`, `ReportList`, `Reports`): present.
 
 ### budget
