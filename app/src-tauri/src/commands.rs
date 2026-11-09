@@ -8,8 +8,9 @@ use switchboard_core::budget::{self, PoolEdit, PoolRow};
 use switchboard_core::clock::{Clock, SystemClock};
 use switchboard_core::fleet::{FleetBridge, FleetError, FleetErrorLog};
 use switchboard_core::frontdoor::implicit_log::log_implicit;
+use switchboard_core::settings::{self, Settings};
 use switchboard_core::waiting::LocalItems;
-use switchboard_core::{settings, CoreError};
+use switchboard_core::CoreError;
 use tauri::Manager;
 
 /// What the shell holds between commands: the settings file's path and this session's fleet
@@ -70,7 +71,14 @@ impl From<&FleetError> for FleetErrorRow {
 /// SHELL-1: the views the window shows, in tab order.
 #[tauri::command]
 pub fn views() -> Vec<&'static str> {
-    vec!["Sky", "Waiting on you", "Reports", "Budget", "Chat"]
+    vec![
+        "Sky",
+        "Waiting on you",
+        "Reports",
+        "Budget",
+        "Chat",
+        "Settings",
+    ]
 }
 
 /// CORE-5: the names of the settings not set, in the core's order.
@@ -79,6 +87,41 @@ pub fn settings_missing(state: tauri::State<'_, AppState>) -> Result<Vec<&'stati
     settings::load(&state.settings_path)
         .map(|s| s.missing())
         .map_err(|e| FaceError::new("settings_missing", &e))
+}
+
+/// CORE-5 as the Settings view reads it: the three paths and the names of those not set.
+#[derive(Debug, Serialize)]
+pub struct SettingsView {
+    pub settings: Settings,
+    pub missing: Vec<&'static str>,
+}
+
+/// The settings file at `path` and the names not set. A missing file is every path unset.
+pub fn settings_view(path: &Path) -> Result<SettingsView, CoreError> {
+    let settings = settings::load(path)?;
+    let missing = settings.missing();
+    Ok(SettingsView { settings, missing })
+}
+
+/// Write `settings` to `path`, then read it back, so the answer is what is on disk.
+pub fn save_settings(path: &Path, settings: &Settings) -> Result<SettingsView, CoreError> {
+    settings::save(path, settings)?;
+    settings_view(path)
+}
+
+/// CORE-5: the settings file and the names not set, for the Settings view.
+#[tauri::command]
+pub fn settings_get(state: tauri::State<'_, AppState>) -> Result<SettingsView, FaceError> {
+    settings_view(&state.settings_path).map_err(|e| FaceError::new("settings_get", &e))
+}
+
+/// CORE-5: save the Settings view's paths and answer as `settings_get` does.
+#[tauri::command]
+pub fn settings_save(
+    state: tauri::State<'_, AppState>,
+    settings: Settings,
+) -> Result<SettingsView, FaceError> {
+    save_settings(&state.settings_path, &settings).map_err(|e| FaceError::new("settings_save", &e))
 }
 
 /// CORE-2: the fleet errors this session recorded, newest first.
@@ -197,3 +240,7 @@ pub fn chat_implicit(
         .map(|_| ())
         .map_err(|e| FaceError::new("chat_implicit", &e))
 }
+
+#[cfg(test)]
+#[path = "commands_tests.rs"]
+mod tests;
