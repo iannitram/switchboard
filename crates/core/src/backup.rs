@@ -164,6 +164,46 @@ fn closes_of(body: &str) -> Vec<u64> {
     numbers
 }
 
+/// BAK-1: a release file of this many bytes or more is listed but not fetched.
+pub const RELEASE_FILE_LIMIT: u64 = 1_000_000_000;
+
+/// BAK-1: the releases as `releases.json`, every asset of 1 GB or more marked skipped; sets
+/// `manifest.releases`.
+pub fn write_release_list(
+    releases: &[Value],
+    out_dir: &Path,
+    manifest: &mut Manifest,
+) -> Result<(), CoreError> {
+    let mut list = releases.to_vec();
+    for release in &mut list {
+        if let Some(assets) = release.get_mut("assets").and_then(Value::as_array_mut) {
+            for asset in assets {
+                if asset["size"]
+                    .as_f64()
+                    .is_some_and(|s| s >= RELEASE_FILE_LIMIT as f64)
+                {
+                    if let Some(asset) = asset.as_object_mut() {
+                        asset.insert("skipped".to_string(), Value::from("over 1 GB"));
+                    }
+                }
+            }
+        }
+    }
+    let text = pretty(&list)?;
+    std::fs::create_dir_all(out_dir).map_err(|e| io_error(out_dir, e))?;
+    let tmp = out_dir.join("releases.json.new");
+    if let Err(e) = std::fs::write(&tmp, text) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(io_error(&tmp, e));
+    }
+    if let Err(e) = std::fs::rename(&tmp, out_dir.join("releases.json")) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(io_error(&tmp, e));
+    }
+    manifest.releases = releases.len() as u64;
+    Ok(())
+}
+
 fn pretty<T: Serialize>(value: &T) -> Result<String, CoreError> {
     serde_json::to_string_pretty(value).map_err(|e| CoreError::Parse(e.to_string()))
 }
