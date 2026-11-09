@@ -7,6 +7,7 @@ use std::sync::Mutex;
 use switchboard_core::budget::{self, PoolEdit, PoolRow};
 use switchboard_core::clock::{Clock, SystemClock};
 use switchboard_core::fleet::{FleetBridge, FleetError, FleetErrorLog};
+use switchboard_core::frontdoor::implicit_log::log_implicit;
 use switchboard_core::waiting::LocalItems;
 use switchboard_core::{settings, CoreError};
 use tauri::Manager;
@@ -157,4 +158,32 @@ pub fn budget_save_edit(
             record_fleet_error(&state, &e);
             FaceError::new("budget_save_edit", &e)
         })
+}
+
+/// FD-9: log an implicit chat signal (FD-8's press sends `opened-in-claude`) as its own row in
+/// the chat's thread, in the thread store in the app data folder.
+#[tauri::command]
+pub fn chat_implicit(
+    app: tauri::AppHandle,
+    handoff_id: String,
+    signal: String,
+    service: Option<String>,
+    model: Option<String>,
+    kind: Option<String>,
+) -> Result<(), FaceError> {
+    app.path()
+        .app_data_dir()
+        .map_err(|e| CoreError::Io(format!("app data dir: {e}")))
+        .and_then(|data| {
+            log_implicit(
+                &data,
+                &handoff_id,
+                &signal,
+                service.as_deref(),
+                model.as_deref(),
+                kind.as_deref(),
+            )
+        })
+        .map(|_| ())
+        .map_err(|e| FaceError::new("chat_implicit", &e))
 }
