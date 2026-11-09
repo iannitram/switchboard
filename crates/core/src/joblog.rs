@@ -41,6 +41,8 @@ pub struct JobRow {
     pub source: RowSource,
     /// FD-9: an implicit signal row, which FD-4 does not count in 1.0.
     pub implicit: bool,
+    /// FD-10: Some(true) when this thumbs-down also moved the chat to another model, Some(false) when it did not; None on every other row.
+    pub moved: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,6 +130,7 @@ pub fn row_from_ledger(event: &Value) -> JobRow {
         review_fix_loc: whole("review_fix_loc"),
         source: RowSource::Ledger,
         implicit: false,
+        moved: None,
     }
 }
 

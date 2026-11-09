@@ -38,6 +38,23 @@ pub fn build(summary: &str, turns: &[Turn], links: &[String]) -> Packet {
     }
 }
 
+/// FD-8: the text a new Claude session starts from: the summary, then the last turns as `user:` /
+/// `assistant:` lines, then the links, one per line, under the headings `Summary`, `Last turns`,
+/// `Links`. A packet with no links keeps the `Links` heading and has no link lines.
+pub fn as_prompt(packet: &Packet) -> String {
+    let turns: Vec<String> = packet
+        .last_turns
+        .iter()
+        .map(|turn| format!("{}: {}", turn.role, turn.text))
+        .collect();
+    format!(
+        "Summary\n{}\n\nLast turns\n{}\n\nLinks\n{}",
+        packet.summary,
+        turns.join("\n"),
+        packet.links.join("\n"),
+    )
+}
+
 /// FD-7: the file links and open questions the summary leaves out (empty when it names all).
 /// A link or question counts as named when its exact text appears in the summary.
 pub fn missing_from_summary(

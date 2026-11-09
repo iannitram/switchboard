@@ -1,6 +1,9 @@
 //! FD-5, FD-9, FD-10: a chat stays on its model until a signal moves it; ratings and implicit
 //! signals are logged as their own rows.
 
+use super::adapters::Answer;
+use crate::joblog::{JobRow, RowSource};
+
 /// FD-5: what moves a sticky chat.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Signal {
@@ -26,4 +29,85 @@ pub enum Implicit {
     ReAsked,
     Abandoned,
     CopiedAnswer,
+}
+
+impl Implicit {
+    /// The signal's name, as it appears after `#implicit-` in a row id.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Implicit::OpenedInClaude => "opened-in-claude",
+            Implicit::ReAsked => "re-asked",
+            Implicit::Abandoned => "abandoned",
+            Implicit::CopiedAnswer => "copied-answer",
+        }
+    }
+}
+
+/// FD-9: a thumbs row for one answer. rating "up" or "down"; outcome "passed" or "failed"; source
+/// Chat; implicit false; lane = the answer's service, model, kind and handoff_id from the arguments.
+pub fn rating_row(
+    answer: &Answer,
+    kind: Option<&str>,
+    handoff_id: &str,
+    thumbs_up: bool,
+) -> JobRow {
+    let (rating, outcome) = if thumbs_up {
+        ("up", "passed")
+    } else {
+        ("down", "failed")
+    };
+    JobRow {
+        lane: Some(answer.service.clone()),
+        model: Some(answer.model.clone()),
+        kind: kind.map(str::to_string),
+        handoff_id: Some(handoff_id.to_string()),
+        rating: Some(rating.to_string()),
+        outcome: Some(outcome.to_string()),
+        source: RowSource::Chat,
+        implicit: false,
+        ..JobRow::default()
+    }
+}
+
+/// FD-9: an implicit signal row. implicit true; rating None; outcome None; source Chat; id =
+/// "<handoff_id>#implicit-<name>"; lane/model/kind from the arguments when known.
+pub fn implicit_row(
+    signal: Implicit,
+    service: Option<&str>,
+    model: Option<&str>,
+    kind: Option<&str>,
+    handoff_id: &str,
+) -> JobRow {
+    JobRow {
+        id: Some(format!("{handoff_id}#implicit-{}", signal.name())),
+        lane: service.map(str::to_string),
+        model: model.map(str::to_string),
+        kind: kind.map(str::to_string),
+        handoff_id: Some(handoff_id.to_string()),
+        source: RowSource::Chat,
+        implicit: true,
+        ..JobRow::default()
+    }
+}
+
+/// FD-10: set `moved` on a rating row whose rating is "down"; any other row is returned unchanged. `rating` and `outcome` are never touched.
+pub fn with_move(row: JobRow, moved: bool) -> JobRow {
+    if row.rating.as_deref() != Some("down") {
+        return row;
+    }
+    JobRow {
+        moved: Some(moved),
+        ..row
+    }
+}
+
+/// FD-10: over the rows, (thumbs-downs that did not move the chat, thumbs-downs that did). Rows with `implicit` true, thumbs-ups and rows with `moved` None are not counted.
+pub fn thumbs_down_counts(rows: &[JobRow]) -> (usize, usize) {
+    rows.iter()
+        .filter(|row| !row.implicit && row.rating.as_deref() == Some("down"))
+        .fold((0, 0), |(not_moved, moved), row| match row.moved {
+            Some(false) => (not_moved + 1, moved),
+            Some(true) => (not_moved, moved + 1),
+            None => (not_moved, moved),
+        })
 }

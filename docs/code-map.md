@@ -162,12 +162,18 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - FD-6 packet (`build`): present.
 - FD-7 summary check (`missing_from_summary`, `checked_summary`): present.
 - FD-2 rules labeller (`by_rules`, `label`): present.
+- FD-13 thread store: present.
 - FD-11 adapter interface (`split_handoff`, `log_row`): present.
+- FD-9 rating and implicit rows (`rating_row`, `implicit_row`): present.
+- FD-10 separate move field (`with_move`, `thumbs_down_counts`): present.
+- FD-8 Open in Claude (`as_prompt`): present.
+- FD-4 learned pick (`sample_size`, `learned_pick`): present.
 
 ### autopilot
 `crates/core/src/autopilot/` · AUTO-1 to AUTO-9 · planned. `may_spend` (budget allow), `review` (R25's ladder as a state machine), `driver` (script loops, Qwen plus one), `instructions` (untracked instruction files; drift of copies), `classify` (by the card, through `fleet errors classify`), `weekly` (Sunday 6am, ROADMAP changes).
 - AUTO-1 may_spend: present.
 - AUTO-9 classify (`classify`, `from_json`): present.
+- AUTO-6 loop driver (`may_start`, `next_command`): present.
 - AUTO-5 weekly due check (`weekly_due`): present.
 - AUTO-3 review (`step`, `first_rung`): present.
 - AUTO-3 review job (`review_job`): present.
@@ -190,4 +196,4 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - MCP-3 no write tools in a job worktree: present.
 
 ### shell
-`app/src-tauri/`, `app/src/App.tsx`, `app/src/core.ts`, `app/src/ErrorBanner.tsx` · SHELL-1, SHELL-2, SHELL-3 · present (empty window, wired to the core: `views`, `settings_missing`, `fleet_errors`; the error banner present), the AppImage planned. `tools/check-notices.py` (present) lists every file under `app/src/brocrew/` and fails on one without its Apache-2.0 notice. `app/src/brocrew/` holds BroCrew's lifted chat helpers (present): `composer-notice.ts`, `message-links.ts`, `message-paths.ts` and `ipc-types.ts`, all listed in `NOTICE`.
+`app/src-tauri/`, `app/src/App.tsx`, `app/src/core.ts`, `app/src/ErrorBanner.tsx` · SHELL-1, SHELL-2, SHELL-3 · present (empty window, wired to the core: `views`, `settings_missing`, `fleet_errors`; the error banner present); the AppImage present: `tools/build-appimage.sh` builds it inside the craft-build container). `tools/check-notices.py` (present) lists every file under `app/src/brocrew/` and fails on one without its Apache-2.0 notice. `app/src/brocrew/` holds BroCrew's lifted chat helpers (present): `composer-notice.ts`, `message-links.ts`, `message-paths.ts` and `ipc-types.ts`, all listed in `NOTICE`.
