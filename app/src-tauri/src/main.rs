@@ -58,6 +58,8 @@ fn main() {
             commands::chat_rate,
             commands::loadout,
             commands::chat_implicit,
+            commands::backup_repo,
+            commands::backup_all,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Switchboard");
