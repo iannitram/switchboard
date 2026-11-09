@@ -191,6 +191,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - FD-5 sticky signals (`signals`): present.
 - FD-3 pick for a kind (`pick_for_kind`): present.
 - FD-1 router (`route`): present.
+- FD-1 Chat composer (`PromptComposer`): present.
 
 ### autopilot
 `crates/core/src/autopilot/` · AUTO-1 to AUTO-9 · planned. `may_spend` (budget allow), `review` (R25's ladder as a state machine), `driver` (script loops, Qwen plus one), `instructions` (untracked instruction files; drift of copies), `classify` (by the card, through `fleet errors classify`), `weekly` (Sunday 6am, ROADMAP changes).
