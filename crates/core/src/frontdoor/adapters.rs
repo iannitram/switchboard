@@ -308,3 +308,73 @@ impl ChatAdapter for DeepSeekAdapter {
         })
     }
 }
+
+/// FD-11: ChatGPT through its OpenAI-style endpoint, with the user's key in the `Authorization`
+/// header. ChatGPT is a quota that resets, not a pool priced per token, so the cost is None
+/// ("not recorded"), never 0.0.
+pub struct ChatGptAdapter {
+    base_url: String,
+    api_key: String,
+    transport: Box<dyn ChatTransport>,
+}
+
+impl ChatGptAdapter {
+    /// An adapter posting to `<base_url>/v1/chat/completions` (a trailing `/` is dropped).
+    pub fn new(base_url: &str, api_key: &str, transport: Box<dyn ChatTransport>) -> Self {
+        Self {
+            base_url: base_url.trim_end_matches('/').to_string(),
+            api_key: api_key.to_string(),
+            transport,
+        }
+    }
+
+    /// The text with the api key taken out, so no error reason carries it.
+    fn redact(&self, text: &str) -> String {
+        if self.api_key.is_empty() {
+            text.to_string()
+        } else {
+            text.replace(&self.api_key, "[key]")
+        }
+    }
+}
+
+impl ChatAdapter for ChatGptAdapter {
+    fn service(&self) -> &'static str {
+        "chatgpt"
+    }
+
+    fn send(&self, model: &str, system: &str, turns: &[Turn]) -> Result<Answer, CoreError> {
+        let mut messages = vec![serde_json::json!({"role": "system", "content": system})];
+        for turn in turns {
+            messages.push(serde_json::json!({"role": turn.role, "content": turn.text}));
+        }
+        let body = serde_json::json!({"model": model, "messages": messages});
+        let url = format!("{}/v1/chat/completions", self.base_url);
+        let headers = [(
+            "Authorization".to_string(),
+            format!("Bearer {}", self.api_key),
+        )];
+        let reply = self
+            .transport
+            .post_json_headers(&url, &headers, &body)
+            .map_err(|e| match e {
+                CoreError::Refused(why) => CoreError::Refused(self.redact(&why)),
+                other => CoreError::Refused(self.redact(&other.to_string())),
+            })?;
+        let Some(content) = reply["choices"][0]["message"]["content"].as_str() else {
+            return Err(CoreError::Refused(format!(
+                "chatgpt: no reply content from {url}"
+            )));
+        };
+        let (text, handoff) = split_handoff(content);
+        Ok(Answer {
+            text,
+            service: self.service().to_string(),
+            model: model.to_string(),
+            tokens_in: reply["usage"]["prompt_tokens"].as_u64(),
+            tokens_out: reply["usage"]["completion_tokens"].as_u64(),
+            cost_usd: None,
+            handoff,
+        })
+    }
+}
