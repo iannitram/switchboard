@@ -13,12 +13,15 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use serde_json::{json, Value};
+use switchboard_core::backup::{self, BackupOutcome};
+use switchboard_core::backup_run::{self, BackupRow};
 use switchboard_core::budget::{self, PoolRow};
 use switchboard_core::clock::{Clock, SystemClock, UnixSeconds};
 use switchboard_core::error::CoreError;
 use switchboard_core::fleet::FleetBridge;
+use switchboard_core::github::live;
 use switchboard_core::github::merge::{self as gh_merge, MergeJob};
-use switchboard_core::github::poll::Poller;
+use switchboard_core::github::poll::{self, Poller};
 use switchboard_core::github::snapshot::SnapshotStore;
 use switchboard_core::github::transport::{GitHubTransport, HttpTransport};
 use switchboard_core::github::RepoSnapshot;
@@ -27,6 +30,7 @@ use switchboard_core::joblog::{self, NOT_RECORDED};
 use switchboard_core::platform::{current_os, default_dev_root, GhAuthToken, Os};
 use switchboard_core::reports::{self, Filter, Report};
 use switchboard_core::rules::{self, Caller, Face, GuardedAction, Role, Verdict};
+use switchboard_core::settings::{self, Settings};
 use switchboard_core::sky;
 use switchboard_core::waiting::{self, guarded_item, Item, LocalItems};
 
@@ -54,7 +58,7 @@ const NO_SNAPSHOT: &str = "switchboard: no snapshot yet; run switchboard refresh
 const USAGE: &str = "usage: switchboard [--json] [--role <role>] \
                      [--project <repo>] [--outcome <o>] [--pool <p>] \
                      <sky | waiting | reports | budget | loadout | star <repo>#<n> | \
-                     delete <repo> | restore <repo> | merge <repo>#<pr> | mcp>";
+                     refresh | backup <repo> | backup --all | delete <repo> | restore <repo> | merge <repo>#<pr> | mcp>";
 
 /// The writes a CLI command can reach (CLI-3). The real ones are `CliWrites`; the tests pass
 /// fakes.
@@ -245,6 +249,7 @@ pub fn run_with(
             return ExitCode::from(2);
         }
     };
+    let (all, argv) = take_all(&argv);
     let args = match super::parse_args(&argv) {
         Ok(args) => args,
         Err(e) => {
@@ -264,7 +269,27 @@ pub fn run_with(
         eprintln!("switchboard: --project, --outcome and --pool are for reports");
         return ExitCode::from(2);
     }
+    if all && command != Some("backup") {
+        eprintln!("switchboard: --all is for backup");
+        eprintln!("{USAGE}");
+        return ExitCode::from(2);
+    }
     match command {
+        Some("refresh") => match args.command.get(1..) {
+            Some([]) => run_refresh(args.json),
+            _ => {
+                eprintln!("switchboard: refresh takes no repo");
+                eprintln!("{USAGE}");
+                ExitCode::from(2)
+            }
+        },
+        Some("backup") => {
+            let mut target = args.command[1..].to_vec();
+            if all {
+                target.push("--all".to_string());
+            }
+            run_backup(&target)
+        }
         Some("delete" | "restore" | "merge") => write_command(&args, cwd, now, writes, err),
         Some("budget") => budget(args.json),
         Some("sky") => sky_command(args.json),
@@ -293,6 +318,201 @@ pub fn run_with(
             ExitCode::from(2)
         }
     }
+}
+
+/// `--all` taken out of `argv` (`parse_args` does not know it): whether it was there, and the
+/// other words in order.
+fn take_all(argv: &[String]) -> (bool, Vec<String>) {
+    let rest: Vec<String> = argv.iter().filter(|w| *w != "--all").cloned().collect();
+    (rest.len() != argv.len(), rest)
+}
+
+/// CLI-2: `switchboard refresh`, the Refresh button: the real GitHub transport over the app
+/// data folder.
+fn run_refresh(json: bool) -> ExitCode {
+    let Some(data) = data_dir() else {
+        eprintln!("switchboard: set {DATA_ENV} to the app data folder");
+        return ExitCode::from(2);
+    };
+    let transport = live_transport();
+    refresh_with(
+        transport.as_ref(),
+        &data,
+        &SystemClock,
+        json,
+        &mut std::io::stdout(),
+        &mut std::io::stderr(),
+    )
+}
+
+/// CLI-2: `refresh` over its seams. Each repo `live::repos` names is tried: a 304 on the
+/// events ETag keeps its snapshot (`unchanged`, GH-2), anything else is read as the Refresh
+/// button reads it (`refreshed`). A repo that fails goes to `err` and the exit is 1 once all
+/// were tried.
+pub fn refresh_with(
+    transport: &dyn GitHubTransport,
+    data: &Path,
+    clock: &dyn Clock,
+    json: bool,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> ExitCode {
+    let repos = match live::repos(data) {
+        Ok(repos) => repos,
+        Err(e) => {
+            let _ = writeln!(err, "switchboard: refresh: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    if repos.is_empty() {
+        let _ = writeln!(
+            err,
+            "switchboard: refresh: no repos (no snapshot and no priority copy)"
+        );
+        return ExitCode::from(1);
+    }
+    let store = SnapshotStore::new(data);
+    let mut failed = false;
+    let mut rows = Vec::new();
+    for repo in &repos {
+        match refresh_one(transport, &store, clock, repo) {
+            Ok(status) => {
+                rows.push(json!({"repo": repo, "status": status}));
+                if !json {
+                    let _ = writeln!(out, "{repo}: {status}");
+                }
+            }
+            Err(e) => {
+                failed = true;
+                rows.push(json!({"repo": repo, "status": "failed", "error": e.to_string()}));
+                let _ = writeln!(err, "{repo}: failed: {e}");
+            }
+        }
+    }
+    if json {
+        let _ = writeln!(out, "{}", Value::Array(rows));
+    }
+    ExitCode::from(u8::from(failed))
+}
+
+/// One repo of `refresh`: `unchanged` or `refreshed`.
+fn refresh_one(
+    transport: &dyn GitHubTransport,
+    store: &SnapshotStore,
+    clock: &dyn Clock,
+    repo: &str,
+) -> Result<&'static str, CoreError> {
+    let old = store.load(repo).ok().flatten();
+    let old_etag = old.as_ref().and_then(|snap| snap.etag.as_deref());
+    let (same, etag) = poll::unchanged(transport, repo, old_etag)?;
+    if let (true, Some(mut snap)) = (same, old) {
+        snap.read_at = clock.now();
+        snap.etag = etag;
+        store.save(&snap)?;
+        return Ok("unchanged");
+    }
+    Poller {
+        transport,
+        store,
+        clock,
+        repos: vec![repo.to_string()],
+    }
+    .refresh_all()?;
+    // Keep the ETag this check answered, so the next refresh can say `unchanged` (GH-2).
+    if let Some(mut snap) = store.load(repo)? {
+        snap.etag = etag;
+        store.save(&snap)?;
+    }
+    Ok("refreshed")
+}
+
+/// CLI-2: `switchboard backup <repo>` or `backup --all` (`target` holds the repo, or
+/// `--all`), the Back up buttons: the settings file in the app data folder and the real GitHub
+/// backup.
+fn run_backup(target: &[String]) -> ExitCode {
+    let Some(data) = data_dir() else {
+        eprintln!("switchboard: set {DATA_ENV} to the app data folder");
+        return ExitCode::from(2);
+    };
+    let settings = match settings::load(&data.join("settings.json")) {
+        Ok(settings) => settings,
+        Err(e) => {
+            eprintln!("switchboard: backup: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    backup_with(
+        &settings,
+        &data,
+        target,
+        SystemClock.now(),
+        &|repo| backup::backup_repo(&settings, repo),
+        &mut std::io::stdout(),
+        &mut std::io::stderr(),
+    )
+}
+
+/// CLI-2: `backup` over its seams: `back_up` backs one repo up (BAK-1). Each outcome is
+/// recorded as the button records it (`backup_run::record`, so a refusal adds its Waiting on
+/// you item, BAK-2). A refusal or a failure on one repo goes to `err`; the other repos are still
+/// tried and the exit is 1. `target` is one repo, or `--all`; anything else is exit 2.
+pub fn backup_with(
+    settings: &Settings,
+    data: &Path,
+    target: &[String],
+    now: UnixSeconds,
+    back_up: &dyn Fn(&str) -> Result<BackupOutcome, CoreError>,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> ExitCode {
+    let repos = match target {
+        [flag] if flag == "--all" => match backup_run::repos(data) {
+            Ok(repos) => repos,
+            Err(e) => {
+                let _ = writeln!(err, "switchboard: backup: {e}");
+                return ExitCode::from(1);
+            }
+        },
+        [repo] if !repo.starts_with("--") => vec![repo.clone()],
+        _ => {
+            let _ = writeln!(err, "switchboard: backup needs a repo or --all");
+            let _ = writeln!(err, "{USAGE}");
+            return ExitCode::from(2);
+        }
+    };
+    let Some(backups) = settings
+        .nextcloud_backups
+        .as_deref()
+        .filter(|path| !path.as_os_str().is_empty())
+    else {
+        let _ = writeln!(
+            err,
+            "switchboard: backup: {}",
+            CoreError::MissingPath("nextcloud_backups")
+        );
+        return ExitCode::from(1);
+    };
+    let mut failed = false;
+    for repo in &repos {
+        let row: Result<BackupRow, CoreError> = back_up(repo)
+            .and_then(|outcome| backup_run::record(data, backups, repo, &outcome, now));
+        match row {
+            Ok(row) => match &row.reason {
+                None => {
+                    let _ = writeln!(out, "{repo}: backed up to {}", row.folder);
+                }
+                Some(reason) => {
+                    failed = true;
+                    let _ = writeln!(err, "{repo}: {reason}");
+                }
+            },
+            Err(e) => {
+                failed = true;
+                let _ = writeln!(err, "{repo}: failed: {e}");
+            }
+        }
+    }
+    ExitCode::from(u8::from(failed))
 }
 
 /// CLI-3: `delete <repo>`, `restore <repo>` and `merge <repo>#<pr>` through `rules::guard`. A
