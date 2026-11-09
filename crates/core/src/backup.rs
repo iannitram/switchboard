@@ -17,6 +17,9 @@ pub struct Manifest {
     pub open_issues: u64,
     pub pulls: u64,
     pub open_pulls: u64,
+    /// PRs merged, of `pulls`.
+    #[serde(default)]
+    pub merged_pulls: u64,
     pub comments: u64,
     pub labels: u64,
     /// Label assignments summed over every issue.
@@ -39,9 +42,10 @@ pub fn bundle(mirror: &Path, out_dir: &Path) -> Result<u64, CoreError> {
 /// Checked: fewer issues, PRs or labels in all; fewer open issues or open PRs; more closed
 /// issues no merged PR closed; fewer label assignments.
 ///
-/// Open issues count only the ones lost to something other than a merged PR: issues newly
-/// closed and not added to `closed_without_pr` were closed by merged PRs, which BAK-2 lets
-/// through ("a week of merged PRs closing their issues can").
+/// Merges are not losses (owner ruling on #92, 2026-11-08): open issues count only the ones
+/// lost to something other than a merged PR (issues newly closed and not added to
+/// `closed_without_pr` were closed by merged PRs), and open PRs count only the ones lost to
+/// something other than a merge (PRs newly merged left the open count by merging).
 pub fn refuse_reason(old: &Manifest, new: &Manifest) -> Option<String> {
     let all = |m: &Manifest| i128::from(m.issues) + i128::from(m.pulls) + i128::from(m.labels);
     if far(all(old), all(old) - all(new)) {
@@ -58,7 +62,12 @@ pub fn refuse_reason(old: &Manifest, new: &Manifest) -> Option<String> {
     }
 
     let open_pulls = |m: &Manifest| i128::from(m.open_pulls);
-    if far(open_pulls(old), open_pulls(old) - open_pulls(new)) {
+    let merged = |m: &Manifest| i128::from(m.merged_pulls);
+    let newly_merged = (merged(new) - merged(old)).max(0);
+    if far(
+        open_pulls(old),
+        open_pulls(old) - open_pulls(new) - newly_merged,
+    ) {
         return Some(said("open PRs", open_pulls(new), open_pulls(old)));
     }
 

@@ -2,8 +2,8 @@
 
 use switchboard_core::backup::{refuse_reason, Manifest};
 
-/// The last good backup: 60 issues (40 open, 4 closed by no merged PR), 10 PRs (3 open),
-/// 5 labels and 30 label assignments.
+/// The last good backup: 60 issues (40 open, 4 closed by no merged PR), 10 PRs (3 open,
+/// 6 merged), 5 labels and 30 label assignments.
 fn old() -> Manifest {
     Manifest {
         repo: "switchboard".into(),
@@ -13,6 +13,7 @@ fn old() -> Manifest {
         open_issues: 40,
         pulls: 10,
         open_pulls: 3,
+        merged_pulls: 6,
         comments: 200,
         labels: 5,
         label_assignments: 30,
@@ -181,4 +182,40 @@ fn a_drop_of_1_on_10_gives_none() {
         ..ten.clone()
     });
     assert_eq!(refuse_reason(&ten, &new), None);
+}
+
+#[test]
+fn a_week_merging_8_already_open_prs_gives_none() {
+    // Owner ruling on #92 (2026-11-08): merged PRs are not losses. 10 PRs open at the last
+    // backup, 8 of them merged in the week: open PRs fall from 10 to 2, merged rise by 8.
+    let ten = Manifest {
+        open_pulls: 10,
+        pulls: 16,
+        ..old()
+    };
+    let new = a_week_later(Manifest {
+        open_pulls: 2,
+        merged_pulls: 14,
+        ..ten.clone()
+    });
+    assert_eq!(refuse_reason(&ten, &new), None);
+}
+
+#[test]
+fn open_prs_closed_unmerged_are_still_refused() {
+    // 8 open PRs gone, only 1 of them merged: 7 lost to something other than a merge.
+    let ten = Manifest {
+        open_pulls: 10,
+        pulls: 16,
+        ..old()
+    };
+    let new = a_week_later(Manifest {
+        open_pulls: 2,
+        merged_pulls: 7,
+        ..ten.clone()
+    });
+    assert_eq!(
+        refuse_reason(&ten, &new).as_deref(),
+        Some("the new backup has 2 open PRs, the last had 10")
+    );
 }
