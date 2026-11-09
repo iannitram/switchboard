@@ -27,15 +27,6 @@ export function answerLine({ service, model, step }: Pick<AssistantMessageProps,
   return [service, model, step ? `picked by ${step}` : undefined].filter(Boolean).join(" · ");
 }
 
-// A thumb as an SVG, so the button adds no text to the turn (FD-9).
-function ThumbIcon({ down }: { down?: boolean }) {
-  return (
-    <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false">
-      <path transform={down ? "rotate(180 12 12)" : undefined} fill="currentColor" d="M2 10h4v11H2zM8 10l4-8c1.1 0 2 .9 2 2v4h7c1.1 0 2 .9 2 2l-2 8c-.2.8-1 1.4-2 1.4H8z" />
-    </svg>
-  );
-}
-
 // One answer: its text, the line naming the service, model and router step, and the handoff reason when the chat moved.
 export function AssistantMessage({ text, service, model, step, handoff, resolveLink, rating, onRate }: AssistantMessageProps) {
   const line = answerLine({ service, model, step });
