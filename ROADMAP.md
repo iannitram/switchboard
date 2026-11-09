@@ -1,6 +1,6 @@
 # Roadmap: Switchboard
 
-Updated: 2026-11-08
+Updated: 2026-11-09
 
 features:
 - core: The core and the fleet bridge, with the abilities index (release: 1.0)
@@ -45,6 +45,8 @@ Each stage's first issues are `Blocked by` the stage before (written on the issu
 | 6 | **The loadout** (IT-1), then **the front door**, after `budget` (the router needs `fleet budget allow`) and the loadout. | `it` (IT-1), `frontdoor` | WP4 Front door |
 | 7 | **Autopilot and the rest of IT**, after `github` and `frontdoor` (routed jobs use the router). | `autopilot`, `it` | WP5 Autopilot, WP6 Errors |
 | 8 | **The design pass** (R04) on the running build, the last stage before 1.0: one shared design system across our apps; its findings are `design-pass` issues, each with the `feature:` label of the region whose view it changes (SKY-10). | all with a view | WP7 1.0 |
+
+**The live loops (added 2026-11-09).** By 2026-11-09 most of stages 1 to 7 are merged, but several of the core's parts are tested functions that nothing runs yet: the 10-minute GitHub poll and the Refresh button (GH-1), the autopilot's review start, merge pass, PM job and Sunday run (AUTO-2 to AUTO-6), the loadout timer (IT-1), automatic IT tickets (IT-2), the CLI and MCP write paths (CLI-3, MCP-2) and `switchboard loadout` (CLI-1). Each gets one wiring issue. The poll comes first: the autopilot issues that act on a fresh snapshot are `Blocked by` it, and they share one `autopilot::after_poll` hook that the review start adds. They run beside the open stage 3 to 7 issues and before the design pass.
 
 After 1.0 the dark stars above get their own Specs and issues; `platforms` turns the Mac and Windows seams on.
 
