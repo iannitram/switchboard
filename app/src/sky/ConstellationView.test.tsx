@@ -74,17 +74,17 @@ test("onRing spreads points evenly from the top, clockwise in screen space", () 
   expect(around.y).toBeCloseTo(70);
 });
 
-test("1.0 features sit on the 250 ring and after-1.0 on the 420 ring and after-2.0 on the 460 ring", () => {
-  expect(RINGS).toEqual({ "1.0": 250, "after-1.0": 420, "after-2.0": 460 });
+test("1.0 features sit on the 250 ring and after-1.0 on the 350 ring and after-2.0 on the 450 ring", () => {
+  expect(RINGS).toEqual({ "1.0": 250, "after-1.0": 350, "after-2.0": 450 });
   const at = layoutConstellation(C);
   expect(at.features.get("core")!.x).toBeCloseTo(500);
   expect(at.features.get("core")!.y).toBeCloseTo(250);
   expect(at.features.get("sky")!.x).toBeCloseTo(500 + 250 * Math.cos(Math.PI / 6));
   expect(at.features.get("sky")!.y).toBeCloseTo(625);
   expect(at.features.get("relay")!.x).toBeCloseTo(500);
-  expect(at.features.get("relay")!.y).toBeCloseTo(80);
+  expect(at.features.get("relay")!.y).toBeCloseTo(150);
   expect(at.features.get("gamification")!.x).toBeCloseTo(500);
-  expect(at.features.get("gamification")!.y).toBeCloseTo(40);
+  expect(at.features.get("gamification")!.y).toBeCloseTo(50);
 });
 
 test("a feature's stars sit 40 from it, the first at the top", () => {
@@ -128,7 +128,7 @@ test("a ring for the 1.0, After 1.0 and After 2.0 milestones", () => {
   render(<ConstellationView c={C} onBack={() => {}} />);
   const rings = screen.getAllByTestId("ring");
   expect(rings.map((r) => r.getAttribute("data-milestone"))).toEqual(["1.0", "After 1.0", "After 2.0"]);
-  expect(rings.map((r) => num(r, "r"))).toEqual([250, 420, 460]);
+  expect(rings.map((r) => num(r, "r"))).toEqual([250, 350, 450]);
 });
 
 test("clicking a star calls onStar with that star", () => {

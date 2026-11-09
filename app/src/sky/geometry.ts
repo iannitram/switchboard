@@ -21,7 +21,7 @@ export function glow(brightness: number): number {
 }
 
 /** SKY-3: the milestone rings of a zoomed constellation, by radius in view units. */
-export const RINGS = { "1.0": 250, "after-1.0": 420, "after-2.0": 460 } as const;
+export const RINGS = { "1.0": 250, "after-1.0": 350, "after-2.0": 450 } as const;
 
 /** Point i of k spread evenly on a ring, point 0 at the top, the rest clockwise on screen. */
 export function onRing(i: number, k: number, ring: number, cx = VIEW / 2, cy = VIEW / 2): { x: number; y: number } {
