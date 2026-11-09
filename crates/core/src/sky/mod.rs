@@ -7,4 +7,5 @@ pub mod drift;
 pub mod features;
 pub mod labels;
 pub mod layout;
+pub mod model;
 pub mod priority;
