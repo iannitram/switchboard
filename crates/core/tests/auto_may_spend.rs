@@ -1,6 +1,6 @@
 //! AUTO-1: `may_spend` asks `fleet budget allow <lane>` and obeys it: exit 0 is `true`, exit 75
 //! is `false`, any other exit is a `FleetError` and never `true`. An empty lane is an error
-//! without a call. The fixture stub answers with `FLEET_STUB_BUDGET`; the empty-lane test uses
+//! without a call. The fixture stub answers with `FLEET_STUB_EXIT`; the empty-lane test uses
 //! an inline logging stub in a temp root, as auto_classify does, to prove nothing was called.
 
 use std::path::{Path, PathBuf};
@@ -32,7 +32,12 @@ fn logging_root(name: &str) -> PathBuf {
 }
 
 fn stub_says(code: &str) -> FleetBridge {
-    FleetBridge::with_root(&fixture_stub()).with_env("FLEET_STUB_BUDGET", code)
+    let b = FleetBridge::with_root(&fixture_stub());
+    if code == "0" {
+        b
+    } else {
+        b.with_env("FLEET_STUB_EXIT", code)
+    }
 }
 
 #[test]

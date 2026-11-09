@@ -3,8 +3,7 @@ FLEET_ROOT=crates/core/tests/fixtures/fleet-stub.
 
 It prints the fixture JSON for the command from ../../answers/<command>.json, where <command>
 is the first argument; with FLEET_STUB_EXIT=<n> it prints FLEET_STUB_STDERR to stderr and
-exits n; with FLEET_STUB_BADJSON=1 it prints text that is not JSON. `budget allow <lane>`
-exits FLEET_STUB_BUDGET (default 0; 75 is braked).
+exits n; with FLEET_STUB_BADJSON=1 it prints text that is not JSON.
 """
 import os
 import pathlib
@@ -15,8 +14,6 @@ ANSWERS = HERE.parent.parent / "answers"
 
 
 def main(argv):
-    if argv[:2] == ["budget", "allow"]:
-        return int(os.environ.get("FLEET_STUB_BUDGET", "0"))
     code = os.environ.get("FLEET_STUB_EXIT")
     if code:
         sys.stderr.write(os.environ.get("FLEET_STUB_STDERR", "stub failure\n"))
