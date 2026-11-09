@@ -23,7 +23,19 @@ pub const LAST_TURNS: usize = 6;
 
 /// FD-6: build the packet; never the full transcript.
 pub fn build(summary: &str, turns: &[Turn], links: &[String]) -> Packet {
-    todo!("FD-6")
+    let start = turns.len().saturating_sub(LAST_TURNS);
+    let last_turns = turns[start..].to_vec();
+    let mut kept: Vec<String> = Vec::new();
+    for link in links {
+        if !kept.contains(link) {
+            kept.push(link.clone());
+        }
+    }
+    Packet {
+        summary: summary.to_string(),
+        last_turns,
+        links: kept,
+    }
 }
 
 /// FD-7: the file links and open questions the summary leaves out (empty when it names all).
