@@ -9,7 +9,7 @@
 use serde_json::{json, Value};
 use std::ffi::OsStr;
 use std::path::PathBuf;
-use switchboard_core::abilities::{AbilitiesIndex, FleetModels};
+use switchboard_core::abilities::{canon_machine, AbilitiesIndex, FleetModels, MACHINE_ALIASES};
 use switchboard_core::fleet::FleetBridge;
 use switchboard_core::frontdoor::router::{pick_for_kind, BudgetGate, Pick};
 
@@ -446,6 +446,58 @@ fn the_machine_token_is_the_env_when_set_else_the_machine_file_else_none() {
     );
     assert_eq!(FleetModels::resolve_machine(None, None), None);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_old_machine_token_resolves_to_its_current_id_the_way_common_py_canon_machine_does() {
+    // Every alias in common.py's MACHINE_ALIASES, in any case, maps to its current ID.
+    let expected = [
+        ("hyperion", "desktop-3090ti"),
+        ("z13", "strix-halo"),
+        ("legiongo", "amd-handheld"),
+        ("shuttlecraft6", "mac-mini"),
+        ("mac", "mac-mini"),
+    ];
+    assert_eq!(MACHINE_ALIASES, &expected[..]);
+    assert_eq!(canon_machine("Z13"), "strix-halo");
+    assert_eq!(canon_machine("z13"), "strix-halo");
+    assert_eq!(canon_machine(" HyPeRiOn \n"), "desktop-3090ti");
+    assert_eq!(canon_machine("LegionGo"), "amd-handheld");
+    assert_eq!(canon_machine("MAC"), "mac-mini");
+    // Unknown names pass through stripped and otherwise unchanged (case kept).
+    assert_eq!(canon_machine(" Some-Box "), "Some-Box");
+    assert_eq!(canon_machine("strix-halo"), "strix-halo");
+    assert_eq!(canon_machine(""), "");
+
+    let dir = std::env::temp_dir().join(format!("sb-fd3-canon-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("machine");
+    std::fs::write(&file, "Z13\n").unwrap();
+    let machine = FleetModels::resolve_machine(None, Some(&file));
+    assert_eq!(machine.as_deref(), Some("strix-halo"));
+    assert_eq!(
+        FleetModels::resolve_machine(Some(OsStr::new(" z13 ")), None).as_deref(),
+        Some("strix-halo")
+    );
+    // The whole file is stripped, as Python's read_text().strip() does, not only its first line.
+    let lead = dir.join("lead");
+    std::fs::write(&lead, "\n  Z13  \n\n").unwrap();
+    assert_eq!(
+        FleetModels::resolve_machine(None, Some(&lead)).as_deref(),
+        Some("strix-halo")
+    );
+    let unknown = dir.join("unknown");
+    std::fs::write(&unknown, "Other-Box\n").unwrap();
+    assert_eq!(
+        FleetModels::resolve_machine(None, Some(&unknown)).as_deref(),
+        Some("Other-Box")
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // A machine file that says Z13 gets the fixture's strix-halo qwen_model.
+    let models = FleetModels::read(&FleetBridge::with_root(&stub()), machine.as_deref()).unwrap();
+    assert_eq!(models.qwen.as_deref(), Some(QWEN_MODEL));
 }
 
 // --- The models map ---

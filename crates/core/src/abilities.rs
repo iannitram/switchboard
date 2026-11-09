@@ -66,9 +66,10 @@ impl FleetModels {
         Some(Self::from_config(&config, machine))
     }
 
-    /// This machine's token the way the fleet tools find it: `FLEET_MACHINE` when set and not
-    /// blank, else the trimmed contents of `~/.config/software-depot/machine`; `None` without
-    /// either.
+    /// This machine's token the way the fleet tools find it (`local_machine` in the pipeline's
+    /// `tools/fleet/common.py`): `FLEET_MACHINE` when set and not blank, else the stripped
+    /// contents of `~/.config/software-depot/machine`, either one run through `canon_machine`;
+    /// `None` without either.
     pub fn local_machine() -> Option<String> {
         let env = std::env::var_os(FLEET_MACHINE_ENV);
         let home = std::env::var_os("HOME")
@@ -78,19 +79,46 @@ impl FleetModels {
         Self::resolve_machine(env.as_deref(), file.as_deref())
     }
 
-    /// `local_machine` over the values it is given: a non-blank `env` wins (trimmed), else the
-    /// trimmed first line of `machine_file` when it reads and is not blank.
+    /// `local_machine` over the values it is given, as `common.py`'s `local_machine` does it: a
+    /// non-blank `env` wins, else the whole of `machine_file` stripped of surrounding whitespace
+    /// (Python's `read_text().strip()`, not only its first line) when it reads and is not blank.
+    /// Either is passed through `canon_machine`, so an old token (`Z13`) comes back as its
+    /// current ID (`strix-halo`).
     pub fn resolve_machine(env: Option<&OsStr>, machine_file: Option<&Path>) -> Option<String> {
         if let Some(value) = env.and_then(OsStr::to_str) {
-            let value = value.trim();
-            if !value.is_empty() {
-                return Some(value.to_string());
+            if !value.trim().is_empty() {
+                return Some(canon_machine(value));
             }
         }
         let text = std::fs::read_to_string(machine_file?).ok()?;
-        let token = text.lines().next().unwrap_or("").trim();
-        (!token.is_empty()).then(|| token.to_string())
+        let token = canon_machine(&text);
+        (!token.is_empty()).then_some(token)
     }
+}
+
+/// The old machine tokens and their current IDs, lower-case keys. A copy of `MACHINE_ALIASES`
+/// in the pipeline's `tools/fleet/common.py`, which is the source of truth: when an entry is
+/// added or changed there, change it here too. Machine files, `FLEET_MACHINE` values and rows
+/// written before the 2026-10-27 rename still hold the old tokens.
+pub const MACHINE_ALIASES: &[(&str, &str)] = &[
+    ("hyperion", "desktop-3090ti"),
+    ("z13", "strix-halo"),
+    ("legiongo", "amd-handheld"),
+    ("shuttlecraft6", "mac-mini"),
+    ("mac", "mac-mini"),
+];
+
+/// The current machine ID for a token as typed or as recorded long ago, mirroring
+/// `canon_machine` in the pipeline's `tools/fleet/common.py` (the source of truth): the token
+/// is stripped, an old token (matched case-insensitively) comes back as its current ID, and
+/// anything else comes back stripped and otherwise unchanged.
+pub fn canon_machine(token: &str) -> String {
+    let token = token.trim();
+    let lower = token.to_lowercase();
+    MACHINE_ALIASES
+        .iter()
+        .find(|(old, _)| *old == lower)
+        .map_or_else(|| token.to_string(), |(_, current)| (*current).to_string())
 }
 
 /// One action or request kind.
