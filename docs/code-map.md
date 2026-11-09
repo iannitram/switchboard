@@ -197,6 +197,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - AUTO-7 place: present.
 - AUTO-3 review (`step`, `first_rung`): present.
 - AUTO-3 review job (`review_job`): present.
+- AUTO-3 review start (`after_poll`, `review_pass` in `passes.rs`; the app's poll thread starts it): present.
 - AUTO-8 drifted copies (`drifted`): present.
 - AUTO-2 roadmap_changed: present.
 

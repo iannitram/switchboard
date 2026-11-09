@@ -5,7 +5,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::time::Duration;
-use switchboard_core::autopilot::{driver, may_spend};
+use switchboard_core::autopilot::{driver, may_spend, passes};
 use switchboard_core::budget::{RefreshTimer, REFRESH_EVERY_SECS};
 use switchboard_core::clock::SystemClock;
 use switchboard_core::github::live;
@@ -60,6 +60,53 @@ fn satellite_loop(handle: tauri::AppHandle, config_dir: std::path::PathBuf) {
     }
 }
 
+/// AUTO-3: the autopilot's passes after each poll (`autopilot::after_poll`), holding the
+/// GitHub lock so no poll writes a snapshot while they read. Jobs go to
+/// `<data>/autopilot/jobs/`; clones are found beside the pipeline repo. A setting that is not
+/// set starts nothing; no machine name starts no review.
+fn autopilot_after_poll(handle: &tauri::AppHandle, data: &std::path::Path) {
+    let state = handle.state::<commands::AppState>();
+    let settings = match switchboard_core::settings::load(&state.settings_path) {
+        Ok(settings) => settings,
+        Err(e) => return eprintln!("autopilot: {e}"),
+    };
+    let dev_root = match settings.pipeline_repo() {
+        Ok(repo) => repo.parent().unwrap_or(repo).to_path_buf(),
+        Err(_) => return,
+    };
+    let fleet = match commands::bridge(&state.settings_path) {
+        Ok(fleet) => fleet,
+        Err(e) => return eprintln!("autopilot: {e}"),
+    };
+    let home = handle.path().home_dir().unwrap_or_default();
+    let env = std::env::var("FLEET_MACHINE").ok();
+    let machine = passes::this_machine(env.as_deref(), &home);
+    let mut starter = passes::FleetStarter {
+        fleet,
+        jobs_dir: data.join("autopilot").join("jobs"),
+        dev_root,
+    };
+    let result = {
+        let _held = state.github.lock().unwrap_or_else(|p| p.into_inner());
+        switchboard_core::autopilot::after_poll(&mut switchboard_core::autopilot::AfterPoll {
+            data_dir: data,
+            machine: machine.as_deref(),
+            starter: &mut starter,
+        })
+    };
+    match result {
+        Ok(ids) => {
+            for id in ids {
+                eprintln!("autopilot: started {id}");
+            }
+        }
+        Err(e) => {
+            commands::record_fleet_error(&state, &e);
+            eprintln!("autopilot: {e}");
+        }
+    }
+}
+
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
@@ -110,6 +157,7 @@ fn main() {
                             Vec::new()
                         });
                         let _ = poll.emit(live::SNAPSHOT_EVENT, read);
+                        autopilot_after_poll(&poll, &data);
                     }
                     std::thread::sleep(Duration::from_secs(live::TICK_EVERY_SECS));
                 }

@@ -5,8 +5,11 @@
 pub mod classify;
 pub mod driver;
 pub mod instructions;
+pub mod passes;
 pub mod review;
 pub mod weekly;
+
+pub use passes::{after_poll, AfterPoll};
 
 use crate::fleet::FleetBridge;
 use crate::CoreError;
