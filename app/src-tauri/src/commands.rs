@@ -156,6 +156,36 @@ pub fn record_fleet_error(state: &AppState, err: &CoreError) {
     }
 }
 
+/// FD-9: log a thumbs press on one answer (#179) as that turn's rating row in the chat's
+/// thread, in the thread store in the app data folder.
+#[tauri::command]
+pub fn chat_rate(
+    app: tauri::AppHandle,
+    handoff_id: String,
+    turn_index: u32,
+    rating: String,
+    service: String,
+    model: String,
+    kind: Option<String>,
+) -> Result<(), FaceError> {
+    app.path()
+        .app_data_dir()
+        .map_err(|e| CoreError::Io(format!("app data dir: {e}")))
+        .and_then(|data| {
+            switchboard_core::frontdoor::rating_log::log_rating(
+                &data,
+                &handoff_id,
+                turn_index,
+                &rating,
+                &service,
+                &model,
+                kind.as_deref(),
+            )
+        })
+        .map(|_| ())
+        .map_err(|e| FaceError::new("chat_rate", &e))
+}
+
 /// BUD-1: the budget rows as fleet last recorded them (no refresh).
 #[tauri::command]
 pub fn budget_rows(state: tauri::State<'_, AppState>) -> Result<Vec<PoolRow>, FaceError> {
