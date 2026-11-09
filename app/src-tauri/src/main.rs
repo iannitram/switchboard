@@ -47,6 +47,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             commands::views,
             commands::settings_missing,
+            commands::settings_get,
+            commands::settings_save,
             commands::fleet_errors,
             commands::budget_rows,
             commands::budget_refresh,
