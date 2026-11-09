@@ -46,5 +46,44 @@ pub struct QueueStatus {
 /// label or milestone), then `fleet ghq run`. A run that stopped on a rate limit (exit 75) is
 /// not an error: the items stay queued and the status says so.
 pub fn send(fleet: &FleetBridge, creates: &[Create]) -> Result<QueueStatus, CoreError> {
-    todo!("GH-4")
+    if creates.is_empty() {
+        return Ok(QueueStatus::default());
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let file = std::env::temp_dir().join(format!(
+        "switchboard-ghq-{}-{nanos}.json",
+        std::process::id()
+    ));
+    let io = |e: String| CoreError::Io(format!("{}: {e}", file.display()));
+    let body = serde_json::to_string(creates).map_err(|e| io(e.to_string()))?;
+    std::fs::write(&file, body).map_err(|e| io(e.to_string()))?;
+    let path = file.to_string_lossy().into_owned();
+    let coordinator = creates
+        .iter()
+        .any(|c| matches!(c, Create::Label { .. } | Create::Milestone { .. }));
+    let mut add = vec!["ghq", "add-batch", path.as_str()];
+    if coordinator {
+        add.push("--coordinator");
+    }
+    let added = fleet.run_json(&add);
+    let _ = std::fs::remove_file(&file);
+    added.map_err(CoreError::Fleet)?;
+    if let Err(e) = fleet.run_json(&["ghq", "run"]) {
+        if !matches!(e.exit_code, Some(75 | 1)) {
+            return Err(CoreError::Fleet(e));
+        }
+    }
+    let answer = fleet
+        .run_json(&["ghq", "status"])
+        .map_err(CoreError::Fleet)?;
+    let count = |name: &str| answer["counts"][name].as_u64().unwrap_or(0);
+    Ok(QueueStatus {
+        pending: count("pending"),
+        done: count("done"),
+        exists: count("exists"),
+        failed: count("failed"),
+    })
 }

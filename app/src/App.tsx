@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { VIEWS, type ViewName } from "./views";
-import { settingsMissing, type CoreResult } from "./core";
+import { ErrorBanner, fromFleetError } from "./ErrorBanner";
+import { fleetErrors, settingsMissing, type CoreError, type CoreResult } from "./core";
 
 // SHELL-1: the status line for the settings the core could not find, or could not read.
 function settingsLine(result: CoreResult<string[]>): string | null {
@@ -16,6 +17,7 @@ function settingsLine(result: CoreResult<string[]>): string | null {
 export function App() {
   const [view, setView] = useState<ViewName>("Sky");
   const [settingsStatus, setSettingsStatus] = useState<string | null>(null);
+  const [errors, setErrors] = useState<CoreError[]>([]);
   const View = VIEWS[view];
 
   useEffect(() => {
@@ -28,6 +30,19 @@ export function App() {
     };
   }, []);
 
+  // SHELL-3: the fleet error log is read when the window opens and again on every view change.
+  useEffect(() => {
+    let live = true;
+    fleetErrors().then((result) => {
+      if (!live) return;
+      if ("error" in result) setErrors([result.error]);
+      else setErrors(result.ok.map(fromFleetError));
+    });
+    return () => {
+      live = false;
+    };
+  }, [view]);
+
   return (
     <div className="app">
       <nav aria-label="Views">
@@ -37,6 +52,7 @@ export function App() {
           </button>
         ))}
       </nav>
+      <ErrorBanner errors={errors} />
       {settingsStatus && <p role="status">{settingsStatus}</p>}
       <main>
         <View />

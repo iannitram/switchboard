@@ -2,10 +2,14 @@
 //! renders, or the core's error as `{ "error": { "command", "lines" } }` (SHELL-3).
 
 use serde::Serialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use switchboard_core::fleet::{FleetError, FleetErrorLog};
+use switchboard_core::budget::{self, PoolEdit, PoolRow};
+use switchboard_core::clock::SystemClock;
+use switchboard_core::fleet::{FleetBridge, FleetError, FleetErrorLog};
+use switchboard_core::waiting::LocalItems;
 use switchboard_core::{settings, CoreError};
+use tauri::Manager;
 
 /// What the shell holds between commands: the settings file's path and this session's fleet
 /// error log.
@@ -81,4 +85,66 @@ pub fn settings_missing(state: tauri::State<'_, AppState>) -> Result<Vec<&'stati
 pub fn fleet_errors(state: tauri::State<'_, AppState>) -> Vec<FleetErrorRow> {
     let log = state.errors.lock().unwrap_or_else(|p| p.into_inner());
     log.errors.iter().map(FleetErrorRow::from).collect()
+}
+
+/// The fleet bridge over the pipeline repo the settings file names.
+pub fn bridge(settings_path: &Path) -> Result<FleetBridge, CoreError> {
+    let settings = settings::load(settings_path)?;
+    Ok(FleetBridge::new(settings.pipeline_repo()?))
+}
+
+/// Record a fleet failure in this session's log; other errors are not fleet errors and are
+/// left to the caller.
+pub fn record_fleet_error(state: &AppState, err: &CoreError) {
+    if let CoreError::Fleet(e) = err {
+        let mut log = state.errors.lock().unwrap_or_else(|p| p.into_inner());
+        log.record(e.clone());
+    }
+}
+
+/// BUD-1: the budget rows as fleet last recorded them (no refresh).
+#[tauri::command]
+pub fn budget_rows(state: tauri::State<'_, AppState>) -> Result<Vec<PoolRow>, FaceError> {
+    bridge(&state.settings_path)
+        .and_then(|fleet| budget::read(&fleet))
+        .map_err(|e| {
+            record_fleet_error(&state, &e);
+            FaceError::new("budget_rows", &e)
+        })
+}
+
+/// BUD-3: refresh every pool with a reader, then return the rows.
+#[tauri::command]
+pub fn budget_refresh(state: tauri::State<'_, AppState>) -> Result<Vec<PoolRow>, FaceError> {
+    bridge(&state.settings_path)
+        .and_then(|fleet| budget::refresh(&fleet))
+        .map_err(|e| {
+            record_fleet_error(&state, &e);
+            FaceError::new("budget_refresh", &e)
+        })
+}
+
+/// BUD-2: save a pool edit to the pipeline clone's config.json, log it in
+/// `<app data dir>/pool-edits.jsonl`, put its Waiting on you item with the local items, and
+/// return the rows read again.
+#[tauri::command]
+pub fn budget_save_edit(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    edit: PoolEdit,
+) -> Result<Vec<PoolRow>, FaceError> {
+    app.path()
+        .app_data_dir()
+        .map_err(|e| CoreError::Io(format!("app data dir: {e}")))
+        .and_then(|data| {
+            let fleet = bridge(&state.settings_path)?;
+            let saved =
+                budget::save_edit(&fleet, &edit, &data.join("pool-edits.jsonl"), &SystemClock)?;
+            LocalItems::new(&data).add(saved.waiting)?;
+            Ok(saved.rows)
+        })
+        .map_err(|e| {
+            record_fleet_error(&state, &e);
+            FaceError::new("budget_save_edit", &e)
+        })
 }

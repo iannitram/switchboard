@@ -6,7 +6,23 @@ use crate::clock::UnixSeconds;
 /// AUTO-5: true when the newest Sunday 6am (local, `utc_offset_secs`) at or before `now` is
 /// later than `last_run`.
 pub fn weekly_due(now: UnixSeconds, utc_offset_secs: i64, last_run: Option<UnixSeconds>) -> bool {
-    todo!("AUTO-5")
+    const DAY: i64 = 86_400;
+    const SIX_AM: i64 = 6 * 3_600;
+    // Local wall-clock seconds since the epoch; days count from Thursday 1970-01-01.
+    let local = now + utc_offset_secs;
+    let day = local.div_euclid(DAY);
+    // 0 is Sunday: 1970-01-01 was a Thursday (4).
+    let days_since_sunday = (day + 4).rem_euclid(7);
+    let mut sunday = day - days_since_sunday;
+    if sunday * DAY + SIX_AM > local {
+        // Today is Sunday before 6am: the newest reset is last Sunday's.
+        sunday -= 7;
+    }
+    let reset = sunday * DAY + SIX_AM - utc_offset_secs;
+    match last_run {
+        None => true,
+        Some(last) => last < reset,
+    }
 }
 
 /// AUTO-2: the repos whose ROADMAP.md text changed between two snapshots (by repo name).

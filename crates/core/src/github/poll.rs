@@ -4,7 +4,7 @@ use super::snapshot::{Issue, Milestone, PullRequest, RepoSnapshot, ReviewVerdict
 use super::transport::GitHubTransport;
 use crate::clock::{Clock, UnixSeconds};
 use crate::CoreError;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 /// GH-1: ten minutes between reads.
 pub const POLL_SECONDS: i64 = 600;
@@ -277,18 +277,76 @@ pub struct Poller<'a> {
 
 impl Poller<'_> {
     /// GH-1: read every repo whose snapshot is `POLL_SECONDS` old or more (or missing). Returns
-    /// the repos read.
+    /// the repos read; the first error met is returned at the end, the other repos are still read.
     pub fn tick(&self) -> Result<Vec<String>, CoreError> {
-        todo!("GH-1")
+        let now = self.clock.now();
+        let mut read = Vec::new();
+        let mut first_error = None;
+        for repo in &self.repos {
+            let stored = match self.store.load(repo) {
+                Ok(stored) => stored,
+                Err(e) => {
+                    first_error.get_or_insert(e);
+                    continue;
+                }
+            };
+            let due = match &stored {
+                None => true,
+                Some(snap) => now - snap.read_at >= POLL_SECONDS,
+            };
+            if !due {
+                continue;
+            }
+            let etag = stored.as_ref().and_then(|s| s.etag.clone());
+            match self.read_one(repo, etag) {
+                Ok(()) => read.push(repo.clone()),
+                Err(e) => {
+                    first_error.get_or_insert(e);
+                }
+            }
+        }
+        match first_error {
+            Some(e) => Err(e),
+            None => Ok(read),
+        }
     }
 
-    /// The Refresh button: read every repo now, whatever its age.
+    /// The Refresh button: read every repo now, whatever its age, keeping the stored ETag.
     pub fn refresh_all(&self) -> Result<Vec<String>, CoreError> {
-        todo!("GH-1")
+        let mut read = Vec::new();
+        let mut first_error = None;
+        for repo in &self.repos {
+            let etag = self.store.load(repo).ok().flatten().and_then(|s| s.etag);
+            match self.read_one(repo, etag) {
+                Ok(()) => read.push(repo.clone()),
+                Err(e) => {
+                    first_error.get_or_insert(e);
+                }
+            }
+        }
+        match first_error {
+            Some(e) => Err(e),
+            None => Ok(read),
+        }
+    }
+
+    /// GH-1: one repo: split it, the GraphQL read, the snapshot, stored with its ETag. Nothing
+    /// is stored when any step fails, so the old snapshot stays.
+    fn read_one(&self, repo: &str, etag: Option<String>) -> Result<(), CoreError> {
+        let Some((owner, name)) = repo.split_once('/') else {
+            return Err(CoreError::GitHub(format!("not owner/name: {repo}")));
+        };
+        let data = self
+            .transport
+            .graphql(REPO_QUERY, &json!({"owner": owner, "name": name}))?;
+        let mut snap = parse_repo(repo, &data, self.clock.now())?;
+        snap.etag = etag;
+        self.store.save(&snap)
     }
 
     /// GH-3: re-read one repo right after a write to it.
     pub fn after_write(&self, repo: &str) -> Result<(), CoreError> {
-        todo!("GH-3")
+        let etag = self.store.load(repo).ok().flatten().and_then(|s| s.etag);
+        self.read_one(repo, etag)
     }
 }

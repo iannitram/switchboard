@@ -2,8 +2,10 @@
 //! is on its head or carries over an update from main by patch-id (R25), and only once CI is
 //! green on that head (R14). Never `gh pr merge` or the merge API.
 
+use super::poll::Poller;
 use super::snapshot::PullRequest;
-use crate::rules::Caller;
+use crate::platform::{current_os, python_launcher};
+use crate::rules::{guard, Caller, GuardedAction};
 use crate::CoreError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,13 +40,99 @@ pub fn eligibility(pr: &PullRequest, carried_over: bool) -> MergeEligibility {
     }
 }
 
+/// One merge: the pipeline and the clone it merges in, the PR, and whether a PASS on an older
+/// head was carried over by patch-id (see `eligibility`).
+pub struct MergeJob<'a> {
+    /// `merge_pr.py` is `<pipeline_root>/tools/merge-pr/merge_pr.py`.
+    pub pipeline_root: &'a std::path::Path,
+    /// The local clone `merge_pr.py` merges in.
+    pub clone: &'a std::path::Path,
+    /// `owner/name`.
+    pub repo: &'a str,
+    pub pr: &'a PullRequest,
+    pub carried_over: bool,
+}
+
 /// GH-5, AUTO-4: merge through `merge_pr.py merge <clone> main origin/<branch> --pr N --repo R`,
-/// a `--dry-run` first and then `--push`, after CORE-3's guard allowed the caller.
-pub fn merge(
-    caller: &Caller,
-    clone: &std::path::Path,
-    repo: &str,
-    pr: &PullRequest,
-) -> Result<(), CoreError> {
-    todo!("GH-5")
+/// a `--dry-run` first and then `--push`, after CORE-3's guard allowed the caller. The repo is
+/// re-read after the push (GH-3). Never `gh pr merge` or the merge API.
+pub fn merge(caller: &Caller, job: &MergeJob<'_>, poller: &Poller<'_>) -> Result<(), CoreError> {
+    guard(
+        caller,
+        &GuardedAction::Merge {
+            repo: job.repo.to_string(),
+            pr: job.pr.number,
+        },
+    )
+    .into_result()?;
+    match eligibility(job.pr, job.carried_over) {
+        MergeEligibility::Eligible => {}
+        MergeEligibility::NoPass => {
+            return Err(CoreError::Refused(
+                "no VERDICT: PASS on this PR".to_string(),
+            ))
+        }
+        MergeEligibility::PassNotOnHead => {
+            return Err(CoreError::Refused(
+                "the latest VERDICT: PASS is not on the head".to_string(),
+            ))
+        }
+        MergeEligibility::CiNotGreen(s) => {
+            return Err(CoreError::Refused(format!("CI on the head is {s}")))
+        }
+    }
+    run_merge_pr(job, "--dry-run")?;
+    run_merge_pr(job, "--push")?;
+    let _ = poller.after_write(job.repo);
+    Ok(())
+}
+
+/// Run `merge_pr.py merge ... <flag>` from the pipeline. A non-zero exit is a refusal.
+fn run_merge_pr(job: &MergeJob<'_>, flag: &str) -> Result<(), CoreError> {
+    let script = job
+        .pipeline_root
+        .join("tools")
+        .join("merge-pr")
+        .join("merge_pr.py");
+    let (py, pre) = python_launcher(current_os());
+    let out = std::process::Command::new(py)
+        .args(pre)
+        .arg(&script)
+        .arg("merge")
+        .arg(job.clone)
+        .arg("main")
+        .arg(format!("origin/{}", job.pr.head_ref))
+        .arg("--pr")
+        .arg(job.pr.number.to_string())
+        .arg("--repo")
+        .arg(job.repo)
+        .arg(flag)
+        .output()
+        .map_err(|e| CoreError::Io(format!("{}: {e}", script.display())))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    Err(CoreError::Refused(refusal(&out, flag)))
+}
+
+/// Why merge_pr.py refused: the text after the first `REFUSED:` line, else its last
+/// non-empty line, else the exit code.
+fn refusal(out: &std::process::Output, flag: &str) -> String {
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    if let Some(why) = lines.iter().find_map(|l| l.strip_prefix("REFUSED:")) {
+        return why.trim().to_string();
+    }
+    match lines.last() {
+        Some(last) => last.to_string(),
+        None => format!("merge_pr.py {flag} exited {:?}", out.status.code()),
+    }
 }
