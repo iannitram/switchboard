@@ -44,10 +44,57 @@ pub const SMALL_FIX_LOC: u32 = 30;
 
 /// AUTO-3: the next state.
 pub fn step(state: &ReviewState, outcome: &Outcome) -> ReviewState {
-    todo!("AUTO-3")
+    let (rung, try_n, reviewing) = match state {
+        ReviewState::Reviewing { rung, try_n } => (*rung, *try_n, true),
+        ReviewState::CheckingFix { rung, try_n } => (*rung, *try_n, false),
+        ReviewState::Passed | ReviewState::NeedsMe | ReviewState::AtFable => {
+            return state.clone();
+        }
+    };
+    match outcome {
+        Outcome::Pass => ReviewState::Passed,
+        Outcome::NeedsMe => ReviewState::NeedsMe,
+        Outcome::Fixed {
+            loc,
+            docs_or_tests_only,
+        } if reviewing => {
+            if *loc <= SMALL_FIX_LOC || *docs_or_tests_only {
+                ReviewState::Passed
+            } else {
+                ReviewState::CheckingFix { rung, try_n }
+            }
+        }
+        // A fix that is checked by the next size up fails there, as does a gap left open.
+        Outcome::Fixed { .. } | Outcome::Failed => failed_try(rung, try_n),
+    }
+}
+
+/// A failed try: retry at the same rung, or climb to the next rung after try 3.
+fn failed_try(rung: Rung, try_n: u8) -> ReviewState {
+    match (rung, try_n) {
+        (Rung::Fable, _) => ReviewState::AtFable,
+        (_, n) if n < 3 => ReviewState::Reviewing { rung, try_n: n + 1 },
+        (Rung::Opus, _) => ReviewState::AtFable,
+        (Rung::Easy, _) => ReviewState::Reviewing {
+            rung: Rung::Medium,
+            try_n: 1,
+        },
+        (Rung::Medium, _) => ReviewState::Reviewing {
+            rung: Rung::Hard,
+            try_n: 1,
+        },
+        (Rung::Hard, _) => ReviewState::Reviewing {
+            rung: Rung::Opus,
+            try_n: 1,
+        },
+    }
 }
 
 /// AUTO-3: the first rung for a PR built at `size` (`easy`, `medium`, `hard`).
 pub fn first_rung(size: &str) -> Rung {
-    todo!("AUTO-3")
+    match size.to_lowercase().as_str() {
+        "easy" => Rung::Easy,
+        "medium" => Rung::Medium,
+        _ => Rung::Hard,
+    }
 }
