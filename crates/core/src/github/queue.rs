@@ -49,12 +49,31 @@ pub struct QueueStatus {
     pub failed: u64,
 }
 
+/// What the queue said about one create of a send: its `status` (`done`, `exists`, `failed`,
+/// `pending`, ...) and the `detail` the run gave (for a created repo or issue, its URL).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sent {
+    pub status: String,
+    pub detail: Option<String>,
+}
+
 /// Add the creates as one batch (`fleet ghq add-batch <file>`; `--coordinator` when any is a
 /// label, milestone or repo), then `fleet ghq run`. A run that stopped on a rate limit (exit 75) is
 /// not an error: the items stay queued and the status says so.
 pub fn send(fleet: &FleetBridge, creates: &[Create]) -> Result<QueueStatus, CoreError> {
+    send_each(fleet, creates).map(|(status, _)| status)
+}
+
+/// `send`, plus what the queue said about each create, in the order given. A create's answer
+/// is its item in the `ghq run` report, matched by the key `ghq add-batch` gave it; an item that
+/// was already queued keeps the status `add-batch` gave. `None` when the queue said nothing
+/// about it (a run that stopped on a rate limit or a failure gives no report).
+pub fn send_each(
+    fleet: &FleetBridge,
+    creates: &[Create],
+) -> Result<(QueueStatus, Vec<Option<Sent>>), CoreError> {
     if creates.is_empty() {
-        return Ok(QueueStatus::default());
+        return Ok((QueueStatus::default(), Vec::new()));
     }
     // The counter keeps two sends in one process apart when the clock does not tick
     // between them (macOS reads it in whole microseconds).
@@ -84,20 +103,47 @@ pub fn send(fleet: &FleetBridge, creates: &[Create]) -> Result<QueueStatus, Core
     }
     let added = fleet.run_json(&add);
     let _ = std::fs::remove_file(&file);
-    added.map_err(CoreError::Fleet)?;
-    if let Err(e) = fleet.run_json(&["ghq", "run"]) {
-        if !matches!(e.exit_code, Some(75 | 1)) {
-            return Err(CoreError::Fleet(e));
-        }
-    }
+    let added = added.map_err(CoreError::Fleet)?;
+    let report = match fleet.run_json(&["ghq", "run"]) {
+        Ok(report) => report,
+        Err(e) if matches!(e.exit_code, Some(75 | 1)) => serde_json::Value::Null,
+        Err(e) => return Err(CoreError::Fleet(e)),
+    };
     let answer = fleet
         .run_json(&["ghq", "status"])
         .map_err(CoreError::Fleet)?;
     let count = |name: &str| answer["counts"][name].as_u64().unwrap_or(0);
-    Ok(QueueStatus {
+    let status = QueueStatus {
         pending: count("pending"),
         done: count("done"),
         exists: count("exists"),
         failed: count("failed"),
-    })
+    };
+    let each = (0..creates.len())
+        .map(|i| sent_for(&added[i], &report))
+        .collect();
+    Ok((status, each))
+}
+
+/// The answer for one `add-batch` row: its item in the run report, else the status it was
+/// queued with when it was already there.
+fn sent_for(row: &serde_json::Value, report: &serde_json::Value) -> Option<Sent> {
+    let text = |v: &serde_json::Value| v.as_str().filter(|t| !t.is_empty()).map(str::to_string);
+    let key = text(&row["key"])?;
+    let ran = report["items"].as_array().and_then(|items| {
+        items
+            .iter()
+            .find(|item| text(&item["key"]) == Some(key.clone()))
+    });
+    match ran {
+        Some(item) => Some(Sent {
+            status: text(&item["status"])?,
+            detail: text(&item["detail"]),
+        }),
+        None if row["added"].as_bool() == Some(false) => Some(Sent {
+            status: text(&row["status"])?,
+            detail: None,
+        }),
+        None => None,
+    }
 }

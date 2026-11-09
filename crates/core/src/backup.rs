@@ -3,7 +3,7 @@
 //! private repo (BAK-3).
 
 use crate::fleet::FleetBridge;
-use crate::github::queue::{self, Create};
+use crate::github::queue::{self, Create, Sent};
 use crate::github::transport::{GitHubTransport, HttpTransport};
 use crate::settings::Settings;
 use crate::CoreError;
@@ -818,13 +818,13 @@ pub struct RestoreReport {
 /// BAK-3, first half: restore a backup (`repo.bundle`, `labels.json`, `milestones.json` and
 /// `manifest.json` in `backup_dir`) to the new private repo `new_repo` (`owner/name`).
 ///
-/// GitHub is reached only through the fleet bridge. `fleet repo view <new_repo>` answers
-/// `{"exists": bool}`; a name that exists is refused (`CoreError::Refused`) before any write,
-/// since restoring over a live repo needs `rules::guard` first (#101). `fleet repo create
-/// <new_repo> --private --coordinator` answers `{"url": <push url>, "private": bool}`; an answer
-/// that is not private stops the restore before the push. Every ref in the bundle is pushed to
-/// that URL (but `refs/pull/`, which GitHub keeps for itself) and read back with `ls-remote`.
-/// The labels and milestones go through the create queue (`github::queue::send`), never `gh`.
+/// GitHub is reached only through the fleet bridge, and every create goes through the create
+/// queue (GH-4), never `gh`. The new repo is a `Create::Repo { private: true }` sent alone
+/// (`github::queue::send_each`): an `exists` answer is refused (`CoreError::Refused`) with no
+/// write, since restoring over a live repo needs `rules::guard` first (#101), and any answer
+/// but `done` with the new repo's URL stops the restore before the push. Every ref in the
+/// bundle is pushed to that URL (but `refs/pull/`, which GitHub keeps for itself) and read back
+/// with `ls-remote`. The labels and milestones then go through the same queue.
 ///
 /// Everything is read and checked first: a missing file, a malformed name, or a label or
 /// milestone count that differs from the manifest is an error with no write.
@@ -849,19 +849,8 @@ pub fn restore_history(
         return Err(CoreError::Io(format!("{}: no bundle", bundle.display())));
     }
 
-    let seen = fleet
-        .run_json(&["repo", "view", new_repo])
-        .map_err(CoreError::Fleet)?;
-    if seen["exists"].as_bool() != Some(false) {
-        return Err(CoreError::Refused(format!(
-            "{new_repo} already exists: a restore goes to a new private repo, and over a live \
-             repo only after I confirm in the app"
-        )));
-    }
-
     let unpacked = scratch_dir()?;
-    let refs = unpack_refs(&bundle, &unpacked);
-    let refs = match refs {
+    let refs = match unpack_refs(&bundle, &unpacked) {
         Ok(refs) => refs,
         Err(e) => {
             let _ = std::fs::remove_dir_all(&unpacked);
@@ -869,10 +858,8 @@ pub fn restore_history(
         }
     };
 
-    let made = fleet
-        .run_json(&["repo", "create", new_repo, "--private", "--coordinator"])
-        .map_err(CoreError::Fleet);
-    let pushed = made.and_then(|made| push_to_new(&made, new_repo, &unpacked, &refs));
+    let pushed =
+        create_repo(fleet, new_repo).and_then(|url| push_to_new(&url, new_repo, &unpacked, &refs));
     let _ = std::fs::remove_dir_all(&unpacked);
     pushed?;
 
@@ -991,26 +978,41 @@ fn pushable<'a>(names: impl Iterator<Item = &'a str>) -> Vec<String> {
     refs
 }
 
-/// Check the create answer, push every ref of the unpacked bundle to it, and read the refs back.
+/// Send the new private repo through the create queue on its own; its push URL. An `exists`
+/// answer is a refusal; any other answer but `done` with a URL is an error. Neither writes.
+fn create_repo(fleet: &FleetBridge, new_repo: &str) -> Result<String, CoreError> {
+    let repo = Create::Repo {
+        repo: new_repo.to_string(),
+        private: true,
+    };
+    let (_, each) = queue::send_each(fleet, &[repo])?;
+    match each.into_iter().next().flatten() {
+        Some(sent) if sent.status == "exists" => Err(CoreError::Refused(format!(
+            "{new_repo} already exists: a restore goes to a new private repo, and over a live \
+             repo only after I confirm in the app"
+        ))),
+        Some(Sent {
+            status,
+            detail: Some(url),
+        }) if status == "done" && url != "created" => Ok(url),
+        Some(sent) => Err(CoreError::GitHub(format!(
+            "the create queue did not give {new_repo} back as created with a URL (status {}); \
+             nothing was pushed",
+            sent.status
+        ))),
+        None => Err(CoreError::GitHub(format!(
+            "the create queue said nothing about {new_repo}; nothing was pushed"
+        ))),
+    }
+}
+
+/// Push every ref of the unpacked bundle to `url` and read the refs back.
 fn push_to_new(
-    made: &Value,
+    url: &str,
     new_repo: &str,
     unpacked: &Path,
     refs: &[String],
 ) -> Result<(), CoreError> {
-    if made["private"].as_bool() != Some(true) {
-        return Err(CoreError::GitHub(format!(
-            "{new_repo} was not created private; nothing was pushed"
-        )));
-    }
-    let url = match made["url"].as_str() {
-        Some(url) if !url.is_empty() => url,
-        _ => {
-            return Err(CoreError::GitHub(format!(
-                "the create answer for {new_repo} has no url"
-            )))
-        }
-    };
     let bare = unpacked.join("repo.git");
     git(
         &bare,

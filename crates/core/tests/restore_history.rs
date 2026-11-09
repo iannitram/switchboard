@@ -1,10 +1,12 @@
 //! Tests for #100 (BAK-3: restore history, labels and milestones to a new private repo).
 //!
 //! The fixture GitHub is a stub `fleet.py` in a temp pipeline root: it logs its arguments,
-//! copies any `ghq add-batch` file, answers `<cmd>-<subcommand>.json` and exits with the code in
-//! `exit-<cmd>-<subcommand>` (0 when there is none). Its `repo create` answer names a local bare
-//! repo as the push URL. Every git repo is made by local `git` in a temp dir; nothing touches
-//! the network.
+//! copies the n-th `ghq add-batch` file to `batch-<n>.json`, answers the n-th call of
+//! `<cmd> <subcommand>` with `<cmd>-<subcommand>-<n>.json` (else `<cmd>-<subcommand>.json`, else
+//! `{}`) and exits with the code in `exit-<cmd>-<subcommand>` (0 when there is none). The new
+//! repo is the first send to the create queue, and its run report names a local bare repo as
+//! the push URL. Every git repo is made by local `git` in a temp dir; nothing touches the
+//! network.
 
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -20,17 +22,28 @@ const NEW_REPO: &str = "example/restored";
 const STUB: &str = r#"import json, os, sys
 here = os.path.dirname(os.path.abspath(__file__))
 args = sys.argv[1:]
-with open(os.path.join(here, "calls.log"), "a") as f:
-    f.write(json.dumps(args) + "\n")
+log = os.path.join(here, "calls.log")
 name = "-".join(args[:2])
+seen = 0
+if os.path.exists(log):
+    with open(log) as f:
+        seen = sum(1 for line in f if "-".join(json.loads(line)[:2]) == name)
+n = seen + 1
+with open(log, "a") as f:
+    f.write(json.dumps(args) + "\n")
 if name == "ghq-add-batch":
-    with open(args[2]) as b, open(os.path.join(here, "batch.json"), "w") as o:
+    with open(args[2]) as b, open(os.path.join(here, "batch-%d.json" % n), "w") as o:
         o.write(b.read())
-answer = os.path.join(here, name + ".json")
+answer = os.path.join(here, "%s-%d.json" % (name, n))
+if not os.path.exists(answer):
+    answer = os.path.join(here, name + ".json")
 print(open(answer).read() if os.path.exists(answer) else "{}")
 code = os.path.join(here, "exit-" + name)
 sys.exit(int(open(code).read()) if os.path.exists(code) else 0)
 "#;
+
+/// The calls one send to the create queue makes.
+const SEND: [&str; 3] = ["ghq add-batch", "ghq run", "ghq status"];
 
 /// A fresh, empty temp dir for one test.
 fn scratch(tag: &str) -> PathBuf {
@@ -136,9 +149,14 @@ fn backup(root: &Path) -> (PathBuf, PathBuf) {
     (dir, mirror)
 }
 
-/// A stub pipeline root whose `repo view` says the name is free and whose `repo create` names a
-/// new local bare repo. Returns (bridge, stub dir, bare repo).
-fn fixture_github(root: &Path, private: bool) -> (FleetBridge, PathBuf, PathBuf) {
+/// A stub pipeline root whose create queue takes the new repo as item `repo-1` and reports it
+/// `status`, with `detail` as its URL (`None` for the local bare repo). Returns (bridge, stub
+/// dir, bare repo).
+fn fixture_github(
+    root: &Path,
+    status: &str,
+    detail: Option<&str>,
+) -> (FleetBridge, PathBuf, PathBuf) {
     let pipeline = root.join("pipeline");
     let dir = pipeline.join("tools").join("fleet");
     std::fs::create_dir_all(&dir).unwrap();
@@ -146,13 +164,28 @@ fn fixture_github(root: &Path, private: bool) -> (FleetBridge, PathBuf, PathBuf)
     let bare = root.join("github").join("restored.git");
     std::fs::create_dir_all(&bare).unwrap();
     git(&bare, &["init", "-q", "--bare"]);
-    std::fs::write(dir.join("repo-view.json"), r#"{"exists": false}"#).unwrap();
     std::fs::write(
-        dir.join("repo-create.json"),
-        json!({"url": bare.to_str().unwrap(), "private": private}).to_string(),
+        dir.join("ghq-add-batch-1.json"),
+        json!([{"key": "repo-1", "added": true, "status": "pending", "kind": "repo"}]).to_string(),
+    )
+    .unwrap();
+    let url = detail.map_or_else(|| bare.to_str().unwrap().to_string(), str::to_string);
+    std::fs::write(
+        dir.join("ghq-run-1.json"),
+        json!({"items": [{"key": "repo-1", "status": status, "detail": url}]}).to_string(),
     )
     .unwrap();
     (FleetBridge::with_root(&pipeline), dir, bare)
+}
+
+/// A fixture GitHub where the new repo is created and its URL is the local bare repo.
+fn creates_it(root: &Path) -> (FleetBridge, PathBuf, PathBuf) {
+    fixture_github(root, "done", None)
+}
+
+fn batch(dir: &Path, n: u32) -> Vec<Value> {
+    let text = std::fs::read_to_string(dir.join(format!("batch-{n}.json"))).unwrap();
+    serde_json::from_str(&text).unwrap()
 }
 
 /// Each logged call's arguments.
@@ -166,7 +199,7 @@ fn calls(dir: &Path) -> Vec<Vec<String>> {
     }
 }
 
-/// The first two arguments of each call (`repo view`, `ghq add-batch`).
+/// The first two arguments of each call (`ghq add-batch`, `ghq run`).
 fn commands(dir: &Path) -> Vec<String> {
     calls(dir).iter().map(|c| c[..2].join(" ")).collect()
 }
@@ -175,7 +208,7 @@ fn commands(dir: &Path) -> Vec<String> {
 fn a_restore_pushes_every_ref_and_queues_the_labels_and_milestones() {
     let root = scratch("full");
     let (backup_dir, mirror) = backup(&root);
-    let (fleet, dir, bare) = fixture_github(&root, true);
+    let (fleet, dir, bare) = creates_it(&root);
 
     let report = restore_history(&fleet, &backup_dir, NEW_REPO).unwrap();
 
@@ -192,41 +225,41 @@ fn a_restore_pushes_every_ref_and_queues_the_labels_and_milestones() {
         .filter(|line| !line.starts_with("refs/pull/"))
         .collect();
     assert_eq!(refs_of(&bare), wanted);
-    assert_eq!(
-        commands(&dir),
-        vec![
-            "repo view",
-            "repo create",
-            "ghq add-batch",
-            "ghq run",
-            "ghq status"
-        ]
-    );
+    assert_eq!(commands(&dir), [SEND, SEND].concat());
 }
 
 #[test]
-fn the_new_repo_is_created_private() {
+fn the_new_repo_is_created_private_through_the_create_queue() {
     let root = scratch("private");
     let (backup_dir, _) = backup(&root);
-    let (fleet, dir, _) = fixture_github(&root, true);
+    let (fleet, dir, _) = creates_it(&root);
     restore_history(&fleet, &backup_dir, NEW_REPO).unwrap();
-    let create = &calls(&dir)[1];
-    assert_eq!(&create[..3], ["repo", "create", NEW_REPO]);
-    assert!(create.contains(&"--private".to_string()));
-    assert!(create.contains(&"--coordinator".to_string()));
+
+    let add = &calls(&dir)[0];
+    assert_eq!(&add[..2], ["ghq", "add-batch"]);
+    assert!(add.contains(&"--coordinator".to_string()));
+    assert_eq!(
+        batch(&dir, 1),
+        vec![json!({"kind": "repo", "repo": NEW_REPO, "private": true})]
+    );
+    assert!(
+        calls(&dir).iter().all(|c| c[0] == "ghq"),
+        "{:?}",
+        calls(&dir)
+    );
 }
 
 #[test]
 fn labels_and_milestones_are_sent_through_the_queue_and_match_the_manifest() {
     let root = scratch("queue");
     let (backup_dir, _) = backup(&root);
-    let (fleet, dir, _) = fixture_github(&root, true);
+    let (fleet, dir, _) = creates_it(&root);
     restore_history(&fleet, &backup_dir, NEW_REPO).unwrap();
 
-    let add = &calls(&dir)[2];
+    let add = &calls(&dir)[3];
+    assert_eq!(&add[..2], ["ghq", "add-batch"]);
     assert!(add.contains(&"--coordinator".to_string()));
-    let batch: Vec<Value> =
-        serde_json::from_str(&std::fs::read_to_string(dir.join("batch.json")).unwrap()).unwrap();
+    let batch = batch(&dir, 2);
     let manifest: Value =
         serde_json::from_str(&std::fs::read_to_string(backup_dir.join("manifest.json")).unwrap())
             .unwrap();
@@ -243,58 +276,89 @@ fn labels_and_milestones_are_sent_through_the_queue_and_match_the_manifest() {
 }
 
 #[test]
-fn a_name_that_already_exists_is_refused_with_no_write() {
+fn a_name_the_queue_says_exists_is_refused_with_no_write() {
     let root = scratch("exists");
     let (backup_dir, _) = backup(&root);
-    let (fleet, dir, bare) = fixture_github(&root, true);
-    std::fs::write(dir.join("repo-view.json"), r#"{"exists": true}"#).unwrap();
+    let (fleet, dir, bare) = fixture_github(&root, "exists", Some("repo exists"));
 
     match restore_history(&fleet, &backup_dir, NEW_REPO) {
         Err(CoreError::Refused(why)) => assert!(why.contains(NEW_REPO), "{why}"),
         other => panic!("expected a refusal, got {other:?}"),
     }
-    assert_eq!(commands(&dir), vec!["repo view"]);
+    assert_eq!(commands(&dir), SEND);
     assert!(refs_of(&bare).is_empty());
 }
 
 #[test]
-fn a_view_answer_that_does_not_say_free_is_refused_with_no_write() {
-    let root = scratch("unsure");
+fn a_repo_already_queued_as_existing_is_refused_with_no_write() {
+    let root = scratch("queued");
     let (backup_dir, _) = backup(&root);
-    let (fleet, dir, bare) = fixture_github(&root, true);
-    std::fs::write(dir.join("repo-view.json"), "{}").unwrap();
+    let (fleet, dir, bare) = creates_it(&root);
+    std::fs::write(
+        dir.join("ghq-add-batch-1.json"),
+        json!([{"key": "repo-1", "added": false, "status": "exists", "kind": "repo"}]).to_string(),
+    )
+    .unwrap();
+    std::fs::write(dir.join("ghq-run-1.json"), r#"{"items": []}"#).unwrap();
 
     assert!(matches!(
         restore_history(&fleet, &backup_dir, NEW_REPO),
         Err(CoreError::Refused(_))
     ));
-    assert_eq!(commands(&dir), vec!["repo view"]);
+    assert_eq!(commands(&dir), SEND);
     assert!(refs_of(&bare).is_empty());
 }
 
 #[test]
-fn a_failed_view_is_a_fleet_error_with_no_write() {
-    let root = scratch("viewfail");
+fn a_repo_the_queue_did_not_create_gets_no_push_and_no_labels() {
+    for (tag, status, detail) in [
+        ("failed", "failed", Some("gh repo create failed")),
+        ("pending", "pending", None),
+        ("nourl", "done", Some("created")),
+    ] {
+        let root = scratch(tag);
+        let (backup_dir, _) = backup(&root);
+        let (fleet, dir, bare) = fixture_github(&root, status, detail);
+
+        assert!(
+            matches!(
+                restore_history(&fleet, &backup_dir, NEW_REPO),
+                Err(CoreError::GitHub(_))
+            ),
+            "{tag}"
+        );
+        assert_eq!(commands(&dir), SEND, "{tag}");
+        assert!(refs_of(&bare).is_empty(), "{tag}");
+    }
+}
+
+#[test]
+fn a_run_with_no_report_gets_no_push_and_no_labels() {
+    let root = scratch("ratelimit");
     let (backup_dir, _) = backup(&root);
-    let (fleet, dir, bare) = fixture_github(&root, true);
-    std::fs::write(dir.join("exit-repo-view"), "2").unwrap();
+    let (fleet, dir, bare) = creates_it(&root);
+    std::fs::write(dir.join("exit-ghq-run"), "75").unwrap();
+
+    assert!(matches!(
+        restore_history(&fleet, &backup_dir, NEW_REPO),
+        Err(CoreError::GitHub(_))
+    ));
+    assert_eq!(commands(&dir), SEND);
+    assert!(refs_of(&bare).is_empty());
+}
+
+#[test]
+fn a_failed_add_is_a_fleet_error_with_no_write() {
+    let root = scratch("addfail");
+    let (backup_dir, _) = backup(&root);
+    let (fleet, dir, bare) = creates_it(&root);
+    std::fs::write(dir.join("exit-ghq-add-batch"), "2").unwrap();
 
     assert!(matches!(
         restore_history(&fleet, &backup_dir, NEW_REPO),
         Err(CoreError::Fleet(_))
     ));
-    assert_eq!(commands(&dir), vec!["repo view"]);
-    assert!(refs_of(&bare).is_empty());
-}
-
-#[test]
-fn a_repo_not_created_private_gets_no_push_and_no_labels() {
-    let root = scratch("public");
-    let (backup_dir, _) = backup(&root);
-    let (fleet, dir, bare) = fixture_github(&root, false);
-
-    assert!(restore_history(&fleet, &backup_dir, NEW_REPO).is_err());
-    assert_eq!(commands(&dir), vec!["repo view", "repo create"]);
+    assert_eq!(commands(&dir), ["ghq add-batch"]);
     assert!(refs_of(&bare).is_empty());
 }
 
@@ -302,7 +366,7 @@ fn a_repo_not_created_private_gets_no_push_and_no_labels() {
 fn counts_that_differ_from_the_manifest_are_an_error_with_no_fleet_call() {
     let root = scratch("count");
     let (backup_dir, _) = backup(&root);
-    let (fleet, dir, bare) = fixture_github(&root, true);
+    let (fleet, dir, bare) = creates_it(&root);
     std::fs::write(backup_dir.join("labels.json"), r#"[{"name": "bug"}]"#).unwrap();
 
     assert!(restore_history(&fleet, &backup_dir, NEW_REPO).is_err());
@@ -314,7 +378,7 @@ fn counts_that_differ_from_the_manifest_are_an_error_with_no_fleet_call() {
 fn a_backup_without_a_bundle_is_an_error_with_no_fleet_call() {
     let root = scratch("nobundle");
     let (backup_dir, _) = backup(&root);
-    let (fleet, dir, _) = fixture_github(&root, true);
+    let (fleet, dir, _) = creates_it(&root);
     std::fs::remove_file(backup_dir.join("repo.bundle")).unwrap();
 
     assert!(matches!(
@@ -328,7 +392,7 @@ fn a_backup_without_a_bundle_is_an_error_with_no_fleet_call() {
 fn a_name_that_is_not_owner_slash_name_is_refused_with_no_fleet_call() {
     let root = scratch("badname");
     let (backup_dir, _) = backup(&root);
-    let (fleet, dir, _) = fixture_github(&root, true);
+    let (fleet, dir, _) = creates_it(&root);
     for name in [
         "restored",
         "a/b/c",
