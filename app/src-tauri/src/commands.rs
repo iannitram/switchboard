@@ -135,6 +135,16 @@ pub fn budget_refresh(state: tauri::State<'_, AppState>) -> Result<Vec<PoolRow>,
         })
 }
 
+/// WAIT-W: the Waiting on you items, newest first: the snapshot's and the local ones.
+#[tauri::command]
+pub fn waiting(app: tauri::AppHandle) -> Result<Vec<switchboard_core::waiting::Item>, FaceError> {
+    app.path()
+        .app_data_dir()
+        .map_err(|e| CoreError::Io(format!("app data dir: {e}")))
+        .and_then(|data| switchboard_core::waiting::load(&data))
+        .map_err(|e| FaceError::new("waiting", &e))
+}
+
 /// BUD-2: save a pool edit to the pipeline clone's config.json, log it in
 /// `<app data dir>/pool-edits.jsonl`, put its Waiting on you item with the local items, and
 /// return the rows read again.
