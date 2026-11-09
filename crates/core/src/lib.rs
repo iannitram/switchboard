@@ -11,6 +11,7 @@
 pub mod abilities;
 pub mod autopilot;
 pub mod backup;
+pub mod backup_run;
 pub mod budget;
 pub mod clock;
 pub mod error;

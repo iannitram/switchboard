@@ -344,3 +344,39 @@ mod it_tickets_tests;
 #[cfg(test)]
 #[path = "commands_tests.rs"]
 mod tests;
+
+/// BAK-1, BAK-2: "back up" on one constellation; a refused backup becomes its Waiting on you
+/// item.
+#[tauri::command]
+pub fn backup_repo(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    repo: String,
+) -> Result<switchboard_core::backup_run::BackupRow, FaceError> {
+    app.path()
+        .app_data_dir()
+        .map_err(|e| CoreError::Io(format!("app data dir: {e}")))
+        .and_then(|data| {
+            let settings = settings::load(&state.settings_path)?;
+            let now = switchboard_core::clock::Clock::now(&SystemClock);
+            switchboard_core::backup_run::run_one(&settings, &data, &repo, now)
+        })
+        .map_err(|e| FaceError::new("backup_repo", &e))
+}
+
+/// BAK-1, BAK-2: "back up all", every repo in the sky.
+#[tauri::command]
+pub fn backup_all(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<switchboard_core::backup_run::BackupRow>, FaceError> {
+    app.path()
+        .app_data_dir()
+        .map_err(|e| CoreError::Io(format!("app data dir: {e}")))
+        .and_then(|data| {
+            let settings = settings::load(&state.settings_path)?;
+            let now = switchboard_core::clock::Clock::now(&SystemClock);
+            switchboard_core::backup_run::run_all(&settings, &data, now)
+        })
+        .map_err(|e| FaceError::new("backup_all", &e))
+}
