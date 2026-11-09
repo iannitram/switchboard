@@ -5,6 +5,7 @@
 use super::packet::Turn;
 use crate::joblog::{JobRow, RowSource};
 use crate::CoreError;
+use serde_json::{json, Value};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Answer {
@@ -72,6 +73,64 @@ pub fn log_row(answer: &Answer, kind: Option<&str>, handoff_id: &str) -> JobRow 
         handoff_id: Some(handoff_id.to_string()),
         source: RowSource::Chat,
         ..JobRow::default()
+    }
+}
+
+/// FD-11: the one HTTP call the Qwen adapter makes, behind a trait so tests record it. `url` is
+/// the full address; the reply is the parsed JSON body. A failed call is an error, not a reply.
+pub trait ChatTransport: Send + Sync {
+    fn post_json(&self, url: &str, body: &Value) -> Result<Value, CoreError>;
+}
+
+/// FD-11: local Qwen through llama-swap's OpenAI-style endpoint. It runs on this machine, so its
+/// cost is 0.0, not unknown.
+pub struct QwenAdapter {
+    base_url: String,
+    transport: Box<dyn ChatTransport>,
+}
+
+impl QwenAdapter {
+    pub fn new(base_url: &str, transport: Box<dyn ChatTransport>) -> Self {
+        Self {
+            base_url: base_url.trim_end_matches('/').to_string(),
+            transport,
+        }
+    }
+}
+
+impl ChatAdapter for QwenAdapter {
+    fn service(&self) -> &'static str {
+        "qwen"
+    }
+
+    /// Posts `{model, messages: [system, ...turns]}` to `<base_url>/v1/chat/completions`. A
+    /// transport error, or a reply with no `choices[0].message.content`, is `Refused` with the
+    /// reason. Tokens come from `usage` and are None when it is missing.
+    fn send(&self, model: &str, system: &str, turns: &[Turn]) -> Result<Answer, CoreError> {
+        let mut messages = vec![json!({"role": "system", "content": system})];
+        messages.extend(turns.iter().map(|turn| json!({"role": turn.role, "content": turn.text})));
+        let body = json!({"model": model, "messages": messages});
+        let url = format!("{}/v1/chat/completions", self.base_url);
+        let reply = self
+            .transport
+            .post_json(&url, &body)
+            .map_err(|e| CoreError::Refused(format!("llama-swap call failed: {e}")))?;
+        let content = reply["choices"][0]["message"]["content"]
+            .as_str()
+            .filter(|content| !content.is_empty())
+            .ok_or_else(|| {
+                CoreError::Refused("llama-swap reply has no choices[0].message.content".to_string())
+            })?;
+        let (text, handoff) = split_handoff(content);
+        Ok(Answer {
+            text,
+            service: "qwen".to_string(),
+            model: model.to_string(),
+            tokens_in: reply["usage"]["prompt_tokens"].as_u64(),
+            tokens_out: reply["usage"]["completion_tokens"].as_u64(),
+            cost_usd: Some(0.0),
+            handoff,
+        })
     }
 }
 
