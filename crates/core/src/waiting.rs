@@ -5,6 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::clock::UnixSeconds;
+use crate::github::snapshot::SnapshotStore;
 use crate::github::RepoSnapshot;
 use crate::rules::GuardedAction;
 use crate::sky::priority::{self, PriorityCopy, STALE_DAYS};
@@ -340,4 +341,17 @@ pub fn tick_caldav(caldav: &dyn CalDav, item: &Item) -> Result<Source, CoreError
 pub trait CalDav: Send + Sync {
     fn open_tasks(&self) -> Result<Vec<(String, String)>, CoreError>;
     fn mark_done(&self, uid: &str) -> Result<(), CoreError>;
+}
+
+/// WAIT-W: the one list the Waiting view shows: the snapshot's items and the local ones,
+/// merged newest first.
+pub fn assemble(snaps: &[RepoSnapshot], local: &[Item]) -> Vec<Item> {
+    merge(vec![from_snapshots(snaps), local.to_vec()])
+}
+
+/// WAIT-W: `assemble` over the snapshot store and the local items in the app data folder.
+pub fn load(data_dir: &Path) -> Result<Vec<Item>, CoreError> {
+    let snaps = SnapshotStore::new(data_dir).load_all()?;
+    let local = LocalItems::new(data_dir).load()?;
+    Ok(assemble(&snaps, &local))
 }
