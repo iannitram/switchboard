@@ -134,6 +134,16 @@ pub fn budget_refresh(state: tauri::State<'_, AppState>) -> Result<Vec<PoolRow>,
         })
 }
 
+/// IT-W: this machine's loadout, read now through this OS's probe list (the Loadout panel).
+/// It runs off the main thread: the probes start ten programs.
+#[tauri::command(async)]
+pub fn loadout() -> switchboard_core::it::Loadout {
+    switchboard_core::it::read_this_machine(
+        &switchboard_core::it::SystemProbeRunner,
+        switchboard_core::clock::Clock::now(&SystemClock),
+    )
+}
+
 /// BUD-2: save a pool edit to the pipeline clone's config.json, log it in
 /// `<app data dir>/pool-edits.jsonl`, put its Waiting on you item with the local items, and
 /// return the rows read again.
