@@ -45,5 +45,28 @@ pub fn missing_from_summary(
     links: &[String],
     open_questions: &[String],
 ) -> Vec<String> {
-    todo!("FD-7")
+    links
+        .iter()
+        .chain(open_questions.iter())
+        .filter(|item| !summary.contains(item.as_str()))
+        .cloned()
+        .collect()
+}
+
+/// FD-7: the summary to use. Calls `ask_again` at most once, with the missing items, when `first`
+/// leaves any out; the second answer is used as it comes (never a third ask). Returns the summary
+/// and the items it still leaves out.
+pub fn checked_summary(
+    first: String,
+    links: &[String],
+    open_questions: &[String],
+    ask_again: &mut dyn FnMut(&[String]) -> String,
+) -> (String, Vec<String>) {
+    let missing = missing_from_summary(&first, links, open_questions);
+    if missing.is_empty() {
+        return (first, missing);
+    }
+    let second = ask_again(&missing);
+    let still_missing = missing_from_summary(&second, links, open_questions);
+    (second, still_missing)
 }
