@@ -189,3 +189,57 @@ fn a_failed_add_is_a_fleet_error_and_runs_nothing() {
     ));
     assert_eq!(subcommands(&dir), vec!["ghq add-batch"]);
 }
+
+fn repo(private: bool) -> Create {
+    Create::Repo {
+        repo: "o/new".to_string(),
+        private,
+    }
+}
+
+#[test]
+fn a_repo_item_serialises_with_kind_repo() {
+    for private in [true, false] {
+        let (root, dir) = stub_root("repo-batch");
+        send(&FleetBridge::new(&root), &[repo(private)]).unwrap();
+        let batch: Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("batch.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            batch,
+            json!([{"kind": "repo", "repo": "o/new", "private": private}])
+        );
+    }
+}
+
+#[test]
+fn a_repo_item_goes_out_with_coordinator() {
+    let (root, dir) = stub_root("repo-coord");
+    send(&FleetBridge::new(&root), &[issue(), repo(true)]).unwrap();
+    assert!(calls(&dir)[0].contains(&"--coordinator".to_string()));
+}
+
+#[test]
+fn a_repo_status_with_an_exists_count_is_exists_not_an_error() {
+    let (root, dir) = stub_root("repo-exists");
+    std::fs::write(
+        dir.join("status.json"),
+        r#"{"counts": {"pending": 0, "done": 0, "exists": 1, "failed": 0}, "total": 1}"#,
+    )
+    .unwrap();
+    let st = send(&FleetBridge::new(&root), &[repo(true)])
+        .expect("an exists answer is not a fleet error");
+    assert_eq!(
+        st,
+        QueueStatus {
+            pending: 0,
+            done: 0,
+            exists: 1,
+            failed: 0
+        }
+    );
+    assert_eq!(
+        subcommands(&dir),
+        vec!["ghq add-batch", "ghq run", "ghq status"]
+    );
+}
