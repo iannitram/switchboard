@@ -5,22 +5,26 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use switchboard_core::budget::{self, PoolEdit, PoolRow};
-use switchboard_core::clock::{Clock, SystemClock};
+use switchboard_core::clock::{Clock, SystemClock, UnixSeconds};
 use switchboard_core::fleet::{FleetBridge, FleetError, FleetErrorLog};
 use switchboard_core::frontdoor::implicit_log::log_implicit;
+use switchboard_core::it::{self, Loadout, ProbeRunner};
+use switchboard_core::platform::{current_os, loadout_probes, Probe};
 use switchboard_core::settings::{self, Settings};
 use switchboard_core::waiting::LocalItems;
 use switchboard_core::CoreError;
 use tauri::Manager;
 
-/// What the shell holds between commands: the settings file's path and this session's fleet
-/// error log.
+/// What the shell holds between commands: the settings file's path, this session's fleet
+/// error log, and the newest loadout read.
 pub struct AppState {
     pub settings_path: PathBuf,
     pub errors: Mutex<FleetErrorLog>,
     /// GH-1: held while the poll thread or the Refresh button reads GitHub, so two never write
     /// the snapshot store at once.
     pub github: Mutex<()>,
+    /// IT-1: the newest loadout read, for the panel and the router (FD-12); None before the first read.
+    pub loadout: Mutex<Option<Loadout>>,
 }
 
 impl AppState {
@@ -29,8 +33,50 @@ impl AppState {
             settings_path,
             errors: Mutex::new(FleetErrorLog::default()),
             github: Mutex::new(()),
+            loadout: Mutex::new(None),
         }
     }
+}
+
+/// IT-1: the event the minute read pushes its loadout on.
+pub const LOADOUT_EVENT: &str = "loadout";
+/// IT-1: how often the core reads the loadout while the app is open.
+pub const LOADOUT_EVERY_SECS: u64 = 60;
+
+/// IT-1: keep `loadout` as the stored one unless the stored one was read later; answer what is
+/// stored. A read at the same second replaces the stored one.
+pub fn store_loadout(state: &AppState, loadout: Loadout) -> Loadout {
+    let mut kept = state.loadout.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(newest) = kept.as_ref().filter(|k| k.read_at > loadout.read_at) {
+        return newest.clone();
+    }
+    *kept = Some(loadout.clone());
+    loadout
+}
+
+/// IT-1: the newest loadout read so far, None before the first read.
+pub fn latest_loadout(state: &AppState) -> Option<Loadout> {
+    state.loadout.lock().unwrap_or_else(|p| p.into_inner()).clone()
+}
+
+/// IT-1: read the loadout now through `probes` and store it; answer the stored loadout.
+pub fn read_and_store(
+    state: &AppState,
+    probes: &[Probe],
+    runner: &dyn ProbeRunner,
+    now: UnixSeconds,
+) -> Loadout {
+    store_loadout(state, it::read_loadout(probes, runner, now))
+}
+
+/// IT-1: the stored loadout, with no probe run; the first read only when none is stored yet.
+pub fn current_loadout(
+    state: &AppState,
+    probes: &[Probe],
+    runner: &dyn ProbeRunner,
+    now: UnixSeconds,
+) -> Loadout {
+    latest_loadout(state).unwrap_or_else(|| read_and_store(state, probes, runner, now))
 }
 
 /// A core error as the face reads it: the command's name and the first 5 lines of the message.
@@ -239,14 +285,16 @@ pub fn budget_refresh(state: tauri::State<'_, AppState>) -> Result<Vec<PoolRow>,
         })
 }
 
-/// IT-W: this machine's loadout, read now through this OS's probe list (the Loadout panel).
-/// It runs off the main thread: the probes start ten programs.
+/// IT-W / IT-1: the stored loadout (the Loadout panel). The core's minute read keeps it; only
+/// before that first read does this run the probes. It runs off the main thread.
 #[tauri::command(async)]
-pub fn loadout() -> switchboard_core::it::Loadout {
-    switchboard_core::it::read_this_machine(
-        &switchboard_core::it::SystemProbeRunner,
-        switchboard_core::clock::Clock::now(&SystemClock),
-    )
+pub fn loadout(state: tauri::State<'_, AppState>) -> Result<Loadout, FaceError> {
+    Ok(current_loadout(
+        &state,
+        loadout_probes(current_os()),
+        &it::SystemProbeRunner,
+        SystemClock.now(),
+    ))
 }
 
 /// WAIT-W: the Waiting on you items, newest first: the snapshot's and the local ones.
@@ -344,3 +392,6 @@ mod it_tickets_tests;
 #[cfg(test)]
 #[path = "commands_tests.rs"]
 mod tests;
+#[cfg(test)]
+#[path = "loadout_tests.rs"]
+mod loadout_tests;
