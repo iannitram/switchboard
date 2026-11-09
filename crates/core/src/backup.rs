@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 /// The manifest BAK-1 writes beside the bundle and the JSON.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -169,10 +170,79 @@ fn io_error(path: &Path, e: std::io::Error) -> CoreError {
     CoreError::Io(format!("{}: {e}", path.display()))
 }
 
-/// BAK-1: `git bundle create <dir>/repo.bundle --all` from a mirror clone, then
-/// `git bundle verify`.
+/// BAK-1: bundle every ref of the mirror; verified; returns the ref count.
+///
+/// Runs `git bundle create <out_dir>/repo.bundle.new --all` in the mirror clone, then
+/// `git bundle verify` on it, then renames it over `repo.bundle`. `out_dir` is made if missing.
+/// A mirror with no refs, a failed create or a failed verify is an error; the half-written
+/// `.new` file is removed and any older `repo.bundle` is left as it was.
 pub fn bundle(mirror: &Path, out_dir: &Path) -> Result<u64, CoreError> {
-    todo!("BAK-1")
+    let refs = git(mirror, &["for-each-ref", "--format=%(refname)"])?;
+    if refs.lines().all(|line| line.trim().is_empty()) {
+        return Err(CoreError::Io(format!(
+            "{}: the mirror has no refs to bundle",
+            mirror.display()
+        )));
+    }
+    // git runs with `-C <mirror>`, so a relative `out_dir` would land inside the mirror.
+    let out_dir = &std::path::absolute(out_dir).map_err(|e| io_error(out_dir, e))?;
+    std::fs::create_dir_all(out_dir).map_err(|e| io_error(out_dir, e))?;
+    let tmp = out_dir.join("repo.bundle.new");
+    let _ = std::fs::remove_file(&tmp);
+    let made = bundle_new(mirror, &tmp);
+    let count = match made {
+        Ok(count) => count,
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
+    };
+    let file = out_dir.join("repo.bundle");
+    if let Err(e) = std::fs::rename(&tmp, &file) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(io_error(&tmp, e));
+    }
+    Ok(count)
+}
+
+/// Writes and verifies the bundle at `tmp`; returns the number of refs it holds (`HEAD` aside).
+fn bundle_new(mirror: &Path, tmp: &Path) -> Result<u64, CoreError> {
+    let tmp_arg = tmp.to_string_lossy();
+    git(mirror, &["bundle", "create", "-q", &tmp_arg, "--all"])?;
+    git(mirror, &["bundle", "verify", "-q", &tmp_arg])?;
+    let heads = git(mirror, &["bundle", "list-heads", &tmp_arg])?;
+    let count = heads
+        .lines()
+        .filter_map(|line| line.split_whitespace().nth(1))
+        .filter(|name| *name != "HEAD")
+        .collect::<HashSet<_>>()
+        .len();
+    if count == 0 {
+        return Err(CoreError::Io(format!(
+            "{}: the bundle holds no refs",
+            tmp.display()
+        )));
+    }
+    Ok(count as u64)
+}
+
+/// Runs `git -C <dir> <args>`; its stdout, or the command and its stderr as the error.
+fn git(dir: &Path, args: &[&str]) -> Result<String, CoreError> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .map_err(|e| CoreError::Io(format!("git {}: {e}", args.join(" "))))?;
+    if !out.status.success() {
+        return Err(CoreError::Io(format!(
+            "git {} in {}: {}",
+            args.join(" "),
+            dir.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// BAK-2: why the new backup may not replace the old one, or `None` when it may. A change is
