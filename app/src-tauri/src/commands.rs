@@ -7,8 +7,10 @@ use std::sync::Mutex;
 use switchboard_core::budget::{self, PoolEdit, PoolRow};
 use switchboard_core::clock::{Clock, SystemClock};
 use switchboard_core::fleet::{FleetBridge, FleetError, FleetErrorLog};
+use switchboard_core::frontdoor::implicit_log::log_implicit;
+use switchboard_core::settings::{self, Settings};
 use switchboard_core::waiting::LocalItems;
-use switchboard_core::{settings, CoreError};
+use switchboard_core::CoreError;
 use tauri::Manager;
 
 /// What the shell holds between commands: the settings file's path and this session's fleet
@@ -69,7 +71,14 @@ impl From<&FleetError> for FleetErrorRow {
 /// SHELL-1: the views the window shows, in tab order.
 #[tauri::command]
 pub fn views() -> Vec<&'static str> {
-    vec!["Sky", "Waiting on you", "Reports", "Budget", "Chat"]
+    vec![
+        "Sky",
+        "Waiting on you",
+        "Reports",
+        "Budget",
+        "Chat",
+        "Settings",
+    ]
 }
 
 /// CORE-5: the names of the settings not set, in the core's order.
@@ -78,6 +87,41 @@ pub fn settings_missing(state: tauri::State<'_, AppState>) -> Result<Vec<&'stati
     settings::load(&state.settings_path)
         .map(|s| s.missing())
         .map_err(|e| FaceError::new("settings_missing", &e))
+}
+
+/// CORE-5 as the Settings view reads it: the three paths and the names of those not set.
+#[derive(Debug, Serialize)]
+pub struct SettingsView {
+    pub settings: Settings,
+    pub missing: Vec<&'static str>,
+}
+
+/// The settings file at `path` and the names not set. A missing file is every path unset.
+pub fn settings_view(path: &Path) -> Result<SettingsView, CoreError> {
+    let settings = settings::load(path)?;
+    let missing = settings.missing();
+    Ok(SettingsView { settings, missing })
+}
+
+/// Write `settings` to `path`, then read it back, so the answer is what is on disk.
+pub fn save_settings(path: &Path, settings: &Settings) -> Result<SettingsView, CoreError> {
+    settings::save(path, settings)?;
+    settings_view(path)
+}
+
+/// CORE-5: the settings file and the names not set, for the Settings view.
+#[tauri::command]
+pub fn settings_get(state: tauri::State<'_, AppState>) -> Result<SettingsView, FaceError> {
+    settings_view(&state.settings_path).map_err(|e| FaceError::new("settings_get", &e))
+}
+
+/// CORE-5: save the Settings view's paths and answer as `settings_get` does.
+#[tauri::command]
+pub fn settings_save(
+    state: tauri::State<'_, AppState>,
+    settings: Settings,
+) -> Result<SettingsView, FaceError> {
+    save_settings(&state.settings_path, &settings).map_err(|e| FaceError::new("settings_save", &e))
 }
 
 /// CORE-2: the fleet errors this session recorded, newest first.
@@ -164,6 +208,26 @@ pub fn budget_refresh(state: tauri::State<'_, AppState>) -> Result<Vec<PoolRow>,
         })
 }
 
+/// IT-W: this machine's loadout, read now through this OS's probe list (the Loadout panel).
+/// It runs off the main thread: the probes start ten programs.
+#[tauri::command(async)]
+pub fn loadout() -> switchboard_core::it::Loadout {
+    switchboard_core::it::read_this_machine(
+        &switchboard_core::it::SystemProbeRunner,
+        switchboard_core::clock::Clock::now(&SystemClock),
+    )
+}
+
+/// WAIT-W: the Waiting on you items, newest first: the snapshot's and the local ones.
+#[tauri::command]
+pub fn waiting(app: tauri::AppHandle) -> Result<Vec<switchboard_core::waiting::Item>, FaceError> {
+    app.path()
+        .app_data_dir()
+        .map_err(|e| CoreError::Io(format!("app data dir: {e}")))
+        .and_then(|data| switchboard_core::waiting::load(&data))
+        .map_err(|e| FaceError::new("waiting", &e))
+}
+
 /// BUD-2: save a pool edit to the pipeline clone's config.json, log it in
 /// `<app data dir>/pool-edits.jsonl`, put its Waiting on you item with the local items, and
 /// return the rows read again.
@@ -188,3 +252,35 @@ pub fn budget_save_edit(
             FaceError::new("budget_save_edit", &e)
         })
 }
+
+/// FD-9: log an implicit chat signal (FD-8's press sends `opened-in-claude`) as its own row in
+/// the chat's thread, in the thread store in the app data folder.
+#[tauri::command]
+pub fn chat_implicit(
+    app: tauri::AppHandle,
+    handoff_id: String,
+    signal: String,
+    service: Option<String>,
+    model: Option<String>,
+    kind: Option<String>,
+) -> Result<(), FaceError> {
+    app.path()
+        .app_data_dir()
+        .map_err(|e| CoreError::Io(format!("app data dir: {e}")))
+        .and_then(|data| {
+            log_implicit(
+                &data,
+                &handoff_id,
+                &signal,
+                service.as_deref(),
+                model.as_deref(),
+                kind.as_deref(),
+            )
+        })
+        .map(|_| ())
+        .map_err(|e| FaceError::new("chat_implicit", &e))
+}
+
+#[cfg(test)]
+#[path = "commands_tests.rs"]
+mod tests;
