@@ -218,7 +218,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 ### cli
 `crates/cli/src/main.rs`, `cli.rs` · CLI-1, CLI-2, CLI-3 · all present. Text or `--json`; the same numbers as the GUI; role-flagged writes through `rules::guard`.
 - CLI-1 parse arguments, budget, sky, star, waiting, reports, loadout: present. `sky` and `star` read the stored snapshot in the app data folder (`SWITCHBOARD_DATA`, else the desktop app's) and never call GitHub; `star` reads its running job from the job log when `SWITCHBOARD_PIPELINE` is set.
-- CLI-2 `refresh`, `backup <repo>`, `backup --all`: present. `refresh` reads the Refresh button's repos through GH-2's ETag check and GH-3's re-read (`<repo>: refreshed` or `unchanged`, failures on stderr, exit 1 after all were tried); `backup` calls `backup_run::run_one` / `run_all`, the Back up buttons' entries, a BAK-2 refusal on stderr with exit 1 and its Waiting on you item from the core. The seams are `Writes` (`run_io` takes stdout too).
+- CLI-2 `refresh`, `backup <repo>`, `backup --all`: present. `refresh` reads the Refresh button's repos through GH-2's ETag check and GH-3's re-read (`<repo>: refreshed` or `unchanged`, failures on stderr, exit 1 after all were tried); `backup` calls `backup_run::run_one` / `run_all`, the Back up buttons' entries, with the app's settings file (Tauri's config folder, `~/.config` on Linux; the `SWITCHBOARD_DATA` folder when set), a BAK-2 refusal on stderr with exit 1 and its Waiting on you item from the core. The seams are `Writes` (`run_io` takes stdout too).
 - CLI-3 delete and restore refused to Waiting on you, `--role` merge through the guard and GH-5's merge (`CliWrites`), none inside a job worktree: present.
 
 ### mcp

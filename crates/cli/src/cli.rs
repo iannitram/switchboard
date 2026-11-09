@@ -48,7 +48,7 @@ pub const DEV_ROOT_ENV: &str = "SWITCHBOARD_DEV_ROOT";
 
 /// The app data folder's name: the desktop app's identifier.
 const APP_DIR: &str = "app.switchboard.desktop";
-/// CORE-5: the settings file, in the app data folder.
+/// CORE-5: the settings file's name (`settings_path` says which folder).
 const SETTINGS_FILE: &str = "settings.json";
 /// The line `waiting` and `reports` print when nothing is waiting.
 const NOTHING_WAITING: &str = "nothing waiting on you";
@@ -211,10 +211,10 @@ impl CliWrites {
             .ok_or_else(|| format!("{command}: set {DATA_ENV} to the app data folder"))
     }
 
-    /// CORE-5: the settings file in the app data folder, read for `command`.
+    /// CORE-5: the desktop app's one settings file (`settings_path`), read for `command`.
     fn settings(&self, command: &str) -> Result<settings::Settings, String> {
         let data = self.data(command)?;
-        settings::load(&data.join(SETTINGS_FILE)).map_err(|e| format!("{command}: {e}"))
+        settings::load(&settings_path(data)).map_err(|e| format!("{command}: {e}"))
     }
 }
 
@@ -667,6 +667,20 @@ fn env_path(key: &str) -> Option<PathBuf> {
     std::env::var_os(key)
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
+}
+
+/// CORE-5: where the desktop app keeps its settings file, Tauri's app config folder. On Linux
+/// that is `$XDG_CONFIG_HOME` (else `~/.config`), not the data folder; on Windows and macOS the
+/// two are one folder. With `SWITCHBOARD_DATA` set, the file in that folder.
+fn settings_path(data: &Path) -> PathBuf {
+    if env_path(DATA_ENV).is_none() && current_os() == Os::Linux {
+        let config =
+            env_path("XDG_CONFIG_HOME").or_else(|| env_path("HOME").map(|h| h.join(".config")));
+        if let Some(config) = config {
+            return config.join(APP_DIR).join(SETTINGS_FILE);
+        }
+    }
+    data.join(SETTINGS_FILE)
 }
 
 /// The app data folder: `SWITCHBOARD_DATA`, else the desktop app's folder for this OS.
