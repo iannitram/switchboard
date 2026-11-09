@@ -177,6 +177,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - FD-11 Qwen adapter (`QwenAdapter`): present.
 - FD-11 DeepSeek adapter (`DeepSeekAdapter`, `post_json_headers`): present.
 - FD-11 ChatGPT adapter (`ChatGptAdapter`): present.
+- FD-11 Gemini adapter (`GeminiAdapter`): present.
 - FD-9 rating and implicit rows (`rating_row`, `implicit_row`): present.
 - FD-9 implicit signal log (`implicit_from_name`, `log_implicit`, `chat_implicit`): present.
 - FD-10 separate move field (`with_move`, `thumbs_down_counts`): present.
