@@ -4,6 +4,8 @@
 //! tests' a fake.
 
 use super::review::{first_rung, review_job, Rung};
+use super::weekly::roadmap_changed;
+use crate::clock::UnixSeconds;
 use crate::fleet::{FleetBridge, FLEET_ROOT_ENV};
 use crate::github::merge::merge_passed;
 use crate::github::poll::Poller;
@@ -27,6 +29,8 @@ pub const REVIEW_LANES: [&str; 3] = ["chatgpt", "gemini", "claudeapi"];
 pub struct AutopilotState {
     /// `owner/name#pr` of every review started, oldest first.
     pub reviews_started: Vec<String>,
+    /// AUTO-2: each repo's ROADMAP.md as last acted on, in the order first seen.
+    pub roadmaps: Vec<(String, Option<String>)>,
 }
 
 impl AutopilotState {
@@ -229,6 +233,75 @@ pub fn review_pass(
     Ok(started)
 }
 
+/// AUTO-2: the lane a Project Manager job runs on (`judgement-planning`'s first lane; the router's pick, FD-3, replaces it when it lands).
+pub const PM_LANE: &str = "claudeapi";
+
+/// AUTO-2: the Project Manager job for `what` in `repo`, read at `stamp`, on `PM_LANE`.
+pub fn pm_job(repo: &str, what: &str, stamp: UnixSeconds) -> Value {
+    let name = repo.rsplit_once('/').map_or(repo, |(_, name)| name);
+    json!({
+        "id": format!("pm-{what}-{}-{stamp}", id_part(name)),
+        "title": format!("Project Manager: {what} for {repo}"),
+        "kind": "judgement-planning",
+        "size": "M",
+        "repo": repo,
+        "base": "main",
+        "est_minutes": 30,
+        "no_issue": format!("Project Manager job ({what})"),
+        "verify": [],
+        "files_allowed": [],
+        "lane": PM_LANE,
+        "brief": "open",
+    })
+}
+
+/// AUTO-2: the Project Manager's prompt for `repo`: who it is, the `task`, and how it files.
+pub fn pm_brief(repo: &str, task: &str) -> String {
+    format!(
+        "You are the Project Manager for {repo}.\n\
+         {task}\n\
+         File every new issue, label or comment through `fleet ghq add-batch` (never `gh issue create`), sized and labelled by RUBRIC.md, written in the owner's first person.\n"
+    )
+}
+
+/// AUTO-2: the task of a job started because ROADMAP.md changed.
+pub const ROADMAP_TASK: &str = "ROADMAP.md changed since the last poll. Read it, SPEC.md and the open issues, then file or adjust the issues the change needs.";
+
+/// AUTO-2: start one Project Manager job for each repo whose ROADMAP.md changed since the text
+/// last acted on. A braked pool starts none and keeps the old text, so the change is tried at
+/// the next poll. A repo seen first is recorded and starts nothing; archived repos are skipped.
+pub fn roadmap_pass(
+    snaps: &[RepoSnapshot],
+    state: &mut AutopilotState,
+    starter: &mut dyn JobStarter,
+) -> Result<Vec<String>, CoreError> {
+    let mut started = Vec::new();
+    for snap in snaps.iter().filter(|s| !s.archived) {
+        let next = (snap.repo.clone(), snap.roadmap_md.clone());
+        let Some(i) = state
+            .roadmaps
+            .iter()
+            .position(|(repo, _)| *repo == snap.repo)
+        else {
+            state.roadmaps.push(next);
+            continue;
+        };
+        if roadmap_changed(&state.roadmaps[i..=i], std::slice::from_ref(&next)).is_empty() {
+            continue;
+        }
+        if !starter.may_spend(PM_LANE)? {
+            continue;
+        }
+        let job = pm_job(&snap.repo, "roadmap", snap.read_at);
+        starter.start(&job, &pm_brief(&snap.repo, ROADMAP_TASK))?;
+        state.roadmaps[i] = next;
+        if let Some(id) = job["id"].as_str() {
+            started.push(id.to_string());
+        }
+    }
+    Ok(started)
+}
+
 /// What `after_poll` needs: the app data folder, this machine's name and the fleet seam.
 pub struct AfterPoll<'a> {
     pub data_dir: &'a Path,
@@ -257,6 +330,7 @@ fn run_passes(
     if let Some(machine) = machine {
         started.extend(review_pass(snaps, machine, state, starter)?);
     }
+    started.extend(roadmap_pass(snaps, state, starter)?);
     Ok(started)
 }
 
