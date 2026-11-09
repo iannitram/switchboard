@@ -298,7 +298,8 @@ fn the_code_map_marks_it_present() {
     let map = std::fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/code-map.md"),
     )
-    .unwrap();
+    .unwrap()
+    .replace("\r\n", "\n");
     let section = map
         .split("\n### it\n")
         .nth(1)
