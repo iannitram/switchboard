@@ -125,6 +125,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 ### waiting
 `crates/core/src/waiting.rs`, `app/src/views/Waiting.tsx` · WAIT-1, WAIT-2, WAIT-3 · planned. Items from the snapshot, CalDAV (U7), handoffs, guarded actions, IT tickets, refused backups, the stale priority copy and pool edits (U5); merged newest first; carried between reads. The item view is ported from BroCrew.
 
+- WAIT-1 snapshot items (`from_snapshots`): present.
 - WAIT-1 CalDAV items (`caldav_items`, `from_caldav`): present.
 - WAIT-2 tick a CalDAV task (`tick_caldav`): present.
 - WAIT-3 carry between reads (`carry`): present.
