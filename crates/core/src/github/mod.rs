@@ -3,6 +3,7 @@
 //! unchanged repo (GH-2). Creates go through the pipeline's create queue (GH-4); merges only
 //! through `merge_pr.py` (GH-5).
 
+pub mod live;
 pub mod merge;
 pub mod poll;
 pub mod queue;

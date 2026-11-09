@@ -18,6 +18,9 @@ use tauri::Manager;
 pub struct AppState {
     pub settings_path: PathBuf,
     pub errors: Mutex<FleetErrorLog>,
+    /// GH-1: held while the poll thread or the Refresh button reads GitHub, so two never write
+    /// the snapshot store at once.
+    pub github: Mutex<()>,
 }
 
 impl AppState {
@@ -25,6 +28,7 @@ impl AppState {
         Self {
             settings_path,
             errors: Mutex::new(FleetErrorLog::default()),
+            github: Mutex::new(()),
         }
     }
 }
@@ -279,6 +283,31 @@ pub fn chat_implicit(
         })
         .map(|_| ())
         .map_err(|e| FaceError::new("chat_implicit", &e))
+}
+
+/// GH-1: the GitHub transport, with the token `gh auth token` prints.
+pub fn github_transport() -> Result<switchboard_core::github::transport::HttpTransport, CoreError> {
+    switchboard_core::github::transport::HttpTransport::new(
+        &switchboard_core::platform::GhAuthToken::default(),
+    )
+}
+
+/// GH-1: the Refresh button: read every repo now, whatever its age. Answers the repos read.
+/// It runs off the main thread: it reads GitHub.
+#[tauri::command(async)]
+pub fn refresh_all(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<String>, FaceError> {
+    let _held = state.github.lock().unwrap_or_else(|p| p.into_inner());
+    app.path()
+        .app_data_dir()
+        .map_err(|e| CoreError::Io(format!("app data dir: {e}")))
+        .and_then(|data| {
+            let transport = github_transport()?;
+            switchboard_core::github::live::refresh_all(&transport, &data, &SystemClock)
+        })
+        .map_err(|e| FaceError::new("refresh_all", &e))
 }
 
 #[cfg(test)]

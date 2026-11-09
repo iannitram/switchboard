@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { call, type CoreResult } from "../core";
 import { Empty } from "./Empty";
 import { ConstellationView } from "../sky/ConstellationView";
@@ -92,27 +93,60 @@ function BackUp({ repo }: { repo?: string }) {
   );
 }
 
+// GH-1 (#240): the Refresh button. Reads every repo now, then asks the sky again (`onDone`).
+function Refresh({ onDone }: { onDone: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function run() {
+    setBusy(true);
+    const r = await call<string[]>("refresh_all");
+    setBusy(false);
+    setError("error" in r ? `${r.error.command} failed: ${r.error.lines.join(" / ")}` : null);
+    onDone();
+  }
+
+  return (
+    <div data-testid="refresh">
+      <button onClick={run} disabled={busy}>
+        Refresh
+      </button>
+      {busy && <p role="status">Refreshing…</p>}
+      {error && <p role="alert" aria-label="Refresh outcome">{error}</p>}
+    </div>
+  );
+}
+
 // The Sky view (feature:sky, SPEC.md). Asks the core for the sky and paints what it answers.
+// It asks again on each `snapshot` event from the poll thread and after a Refresh (GH-1).
 export function Sky() {
   const [answer, setAnswer] = useState<CoreResult<SkyModel> | null>(null);
   const [open, setOpen] = useState<string | null>(null);
   const [picked, setPicked] = useState<Star | null>(null);
+  const alive = useRef(true);
+  const load = useCallback(() => {
+    call<SkyModel>("sky").then((r) => {
+      if (alive.current) setAnswer(r);
+    });
+  }, []);
 
   useEffect(() => {
-    let live = true;
-    call<SkyModel>("sky").then((r) => {
-      if (live) setAnswer(r);
-    });
+    alive.current = true;
+    load();
+    // Without the Tauri runtime listen rejects; the view keeps its sky.
+    const stop = listen<string[]>("snapshot", () => load()).catch(() => () => {});
     return () => {
-      live = false;
+      alive.current = false;
+      stop.then((f) => f());
     };
-  }, []);
+  }, [load]);
 
   if (answer && "error" in answer) {
     const { error } = answer;
     return (
       <>
         <Empty view="Sky" />
+        <Refresh onDone={load} />
         <p role="alert">
           {error.command} failed: {error.lines.join(" / ")}
         </p>
@@ -122,7 +156,12 @@ export function Sky() {
 
   const sky = answer?.ok;
   if (!sky?.constellations?.length) {
-    return <Empty view="Sky" />;
+    return (
+      <>
+        <Empty view="Sky" />
+        {answer && <Refresh onDone={load} />}
+      </>
+    );
   }
 
   const zoomed = open === null ? undefined : sky.constellations.find((c) => c.repo === open);
@@ -145,6 +184,7 @@ export function Sky() {
 
   return (
     <section aria-label="Sky">
+      <Refresh onDone={load} />
       <BackUp />
       <SkyMap sky={sky} onOpen={setOpen} />
       <DriftList drift={sky.constellations.flatMap((c) => c.drift.map((d) => ({ ...d, repo: c.repo })))} />
