@@ -190,6 +190,17 @@ impl Writes for CliWrites {
     }
 }
 
+/// The CLI's own merge (CLI-3, #242): builds `CliWrites` the way `run` does and calls its
+/// `merge`, so the MCP's `merge` (MCP-2) is the CLI's merge and the two faces never drift.
+pub(crate) fn real_merge(repo: &str, pr: u64) -> Result<(), String> {
+    let in_job_worktree = match std::env::current_dir() {
+        Ok(dir) => rules::is_job_worktree(&dir),
+        // Cannot tell where we are: fail closed, no writes.
+        Err(_) => true,
+    };
+    CliWrites::from_env(in_job_worktree).merge(repo, pr)
+}
+
 /// A transport that only answers with why there is no GitHub token.
 struct NoGitHub(String);
 
@@ -629,7 +640,7 @@ fn env_path(key: &str) -> Option<PathBuf> {
 }
 
 /// The app data folder: `SWITCHBOARD_DATA`, else the desktop app's folder for this OS.
-fn data_dir() -> Option<PathBuf> {
+pub(crate) fn data_dir() -> Option<PathBuf> {
     if let Some(dir) = env_path(DATA_ENV) {
         return Some(dir);
     }
@@ -641,6 +652,11 @@ fn data_dir() -> Option<PathBuf> {
             .or_else(|| home.map(|h| h.join(".local").join("share")))
             .map(|d| d.join(APP_DIR)),
     }
+}
+
+/// The pipeline checkout (`SWITCHBOARD_PIPELINE`), or `None` when unset.
+pub(crate) fn pipeline_dir() -> Option<PathBuf> {
+    env_path(PIPELINE_ENV)
 }
 
 /// The pipeline checkout, or the exit code after saying it is not set.
