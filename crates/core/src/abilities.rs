@@ -3,11 +3,95 @@
 //! the `needs` tags the loadout must match (FD-12).
 //!
 //! An entry with `"request": true` is a request kind; the rest are fleet job actions.
+//!
+//! FD-3's model for a service is the entry's `ok.<service>.model` row. Two services carry a
+//! flag there instead of a row, and their models come from the pipeline's `tools/fleet/config.json`
+//! (`FleetModels`, the ruling on #130): `ok.qwen: true` is this machine's
+//! `machines.<machine>.qwen_model`, and a top-level `claudeapi: true` is `ok.claude`'s tier
+//! (`sonnet`) mapped through `claudeapi_models`. A config that cannot be read fills neither, so
+//! those services have no model and the router skips them.
 
+use crate::budget::config_path;
 use crate::fleet::FleetBridge;
 use crate::CoreError;
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
+
+/// The environment variable the fleet tools read for this machine's token (`FLEET_MACHINE`).
+pub const FLEET_MACHINE_ENV: &str = "FLEET_MACHINE";
+
+/// The file the fleet tools fall back to for this machine's token, under the home folder.
+pub const MACHINE_FILE: &str = ".config/software-depot/machine";
+
+/// FD-3: the model names `tools/fleet/config.json` supplies where `actions.json` holds a flag
+/// instead of a `{model}` row. Empty (`Default`) when the config cannot be read: then neither
+/// flag gets a model.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FleetModels {
+    /// `machines.<this machine>.qwen_model`: the model `ok.qwen: true` names. `None` when the
+    /// machine is unknown, not in `machines`, or has no `qwen_model` (not Qwen-capable).
+    pub qwen: Option<String>,
+    /// `claudeapi_models`: a Claude tier (`sonnet`) to the API model id. A top-level
+    /// `claudeapi: true` takes `ok.claude`'s tier through this map.
+    pub claudeapi: BTreeMap<String, String>,
+}
+
+impl FleetModels {
+    /// The models from a parsed `config.json` for `machine`. A key that is absent or of the
+    /// wrong type is simply not there; nothing is an error.
+    pub fn from_config(config: &Value, machine: Option<&str>) -> FleetModels {
+        let qwen = machine
+            .and_then(|m| config.get("machines")?.get(m)?.get("qwen_model")?.as_str())
+            .map(str::to_string);
+        let claudeapi = config
+            .get("claudeapi_models")
+            .and_then(Value::as_object)
+            .map(|map| {
+                map.iter()
+                    .filter_map(|(tier, model)| Some((tier.clone(), model.as_str()?.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default();
+        FleetModels { qwen, claudeapi }
+    }
+
+    /// Read `<root>/tools/fleet/config.json` through the bridge's root (`budget::config_path`)
+    /// for `machine`. `None` when the file is missing, unreadable or not JSON: the caller takes
+    /// `FleetModels::default()` and the flagged services are skipped.
+    pub fn read(fleet: &FleetBridge, machine: Option<&str>) -> Option<FleetModels> {
+        let text = std::fs::read_to_string(config_path(fleet)).ok()?;
+        let config: Value = serde_json::from_str(&text).ok()?;
+        Some(Self::from_config(&config, machine))
+    }
+
+    /// This machine's token the way the fleet tools find it: `FLEET_MACHINE` when set and not
+    /// blank, else the trimmed contents of `~/.config/software-depot/machine`; `None` without
+    /// either.
+    pub fn local_machine() -> Option<String> {
+        let env = std::env::var_os(FLEET_MACHINE_ENV);
+        let home = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(PathBuf::from);
+        let file = home.map(|h| h.join(MACHINE_FILE));
+        Self::resolve_machine(env.as_deref(), file.as_deref())
+    }
+
+    /// `local_machine` over the values it is given: a non-blank `env` wins (trimmed), else the
+    /// trimmed first line of `machine_file` when it reads and is not blank.
+    pub fn resolve_machine(env: Option<&OsStr>, machine_file: Option<&Path>) -> Option<String> {
+        if let Some(value) = env.and_then(OsStr::to_str) {
+            let value = value.trim();
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+        let text = std::fs::read_to_string(machine_file?).ok()?;
+        let token = text.lines().next().unwrap_or("").trim();
+        (!token.is_empty()).then(|| token.to_string())
+    }
+}
 
 /// One action or request kind.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,10 +112,13 @@ pub struct Ability {
 pub struct AbilitiesIndex {
     /// Every entry, in id order.
     pub entries: Vec<Ability>,
-    /// Per id, `ok.<service>.model` for each service whose `ok` entry is an object with a
-    /// string `model` (FD-3's model for a service); a service whose entry is null, false or a
-    /// bare string has no row. Every id has a map, empty when `ok` gives it no row. Kept off
-    /// `Ability` so an `Ability` literal still names only its six fields.
+    /// Per id, the model for each service (FD-3): `ok.<service>.model` for each service whose
+    /// `ok` entry is an object with a string `model`, plus, from the `FleetModels` the index was
+    /// built with, `qwen` for an `ok.qwen` of `true` and `claudeapi` for a top-level
+    /// `claudeapi: true` whose `ok.claude` tier the config maps. A service whose entry is null,
+    /// false or a bare string has no row, and an explicit row wins over a derived one. Every id
+    /// has a map, empty when nothing gives it a row. Kept off `Ability` so an `Ability` literal
+    /// still names only its six fields.
     pub models: BTreeMap<String, BTreeMap<String, String>>,
 }
 
@@ -39,8 +126,15 @@ impl AbilitiesIndex {
     /// Parse the JSON object `fleet actions --json` prints: one `Ability` per key, the entries
     /// sorted by id (plain `String` order), never by the object's key order. A key that is
     /// absent or `null` takes its default; a key of the wrong type is a `CoreError::Parse`
-    /// naming the id. The input is not changed.
+    /// naming the id. The input is not changed. The model rows are the explicit
+    /// `ok.<service>.model` ones only (`from_json_with` adds the fleet config's).
     pub fn from_json(value: &Value) -> Result<AbilitiesIndex, CoreError> {
+        Self::from_json_with(value, &FleetModels::default())
+    }
+
+    /// `from_json`, with `fleet` filling the model rows `actions.json` leaves as flags
+    /// (`ok.qwen: true`, top-level `claudeapi: true`).
+    pub fn from_json_with(value: &Value, fleet: &FleetModels) -> Result<AbilitiesIndex, CoreError> {
         let map = value.as_object().ok_or_else(|| {
             CoreError::Parse("the action table must be a JSON object keyed by id".to_string())
         })?;
@@ -48,17 +142,30 @@ impl AbilitiesIndex {
         let mut models = BTreeMap::new();
         for (id, entry) in map {
             entries.push(parse_entry(id, entry)?);
-            models.insert(id.clone(), parse_models(id, entry)?);
+            models.insert(id.clone(), parse_models(id, entry, fleet)?);
         }
         entries.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(AbilitiesIndex { entries, models })
     }
 
     /// Read it through the fleet bridge (`fleet actions --json`); a failed command is a
-    /// `CoreError::Fleet`.
+    /// `CoreError::Fleet`. Explicit model rows only, as `from_json`; the front door loads with
+    /// `load_with` so qwen and the Claude API get their models.
     pub fn load(fleet: &FleetBridge) -> Result<AbilitiesIndex, CoreError> {
         let value = fleet.run_json(&["actions"]).map_err(CoreError::Fleet)?;
         Self::from_json(&value)
+    }
+
+    /// `load`, with the model rows the pipeline's `tools/fleet/config.json` supplies for
+    /// `machine` (`FleetModels::read`; `FleetModels::local_machine()` names this machine). A
+    /// config that cannot be read is not an error: those services simply have no model.
+    pub fn load_with(
+        fleet: &FleetBridge,
+        machine: Option<&str>,
+    ) -> Result<AbilitiesIndex, CoreError> {
+        let value = fleet.run_json(&["actions"]).map_err(CoreError::Fleet)?;
+        let models = FleetModels::read(fleet, machine).unwrap_or_default();
+        Self::from_json_with(&value, &models)
     }
 
     /// The request kinds only, in id order.
@@ -105,22 +212,51 @@ fn parse_entry(id: &str, entry: &Value) -> Result<Ability, CoreError> {
     })
 }
 
-/// `ok.<service>.model` for each service whose `ok` entry is an object with a string `model`.
-/// An `ok` that is absent or null gives no rows; one that is not an object is a parse error.
-fn parse_models(id: &str, entry: &Value) -> Result<BTreeMap<String, String>, CoreError> {
+/// `ok.<service>.model` for each service whose `ok` entry is an object with a string `model`,
+/// then the two flags `fleet` can fill: `ok.qwen: true` takes `fleet.qwen`, and a top-level
+/// `claudeapi: true` takes `ok.claude`'s tier through `fleet.claudeapi` (only when no explicit
+/// `ok.claudeapi` row named one). An `ok` that is absent or null gives no rows; one that is not
+/// an object is a parse error.
+fn parse_models(
+    id: &str,
+    entry: &Value,
+    fleet: &FleetModels,
+) -> Result<BTreeMap<String, String>, CoreError> {
     let ok = match entry.get("ok") {
         None | Some(Value::Null) => return Ok(BTreeMap::new()),
         Some(Value::Object(ok)) => ok,
         Some(_) => return Err(bad(id, "`ok` is not an object")),
     };
-    Ok(ok
+    let mut models: BTreeMap<String, String> = ok
         .iter()
         .filter_map(|(service, value)| {
             let model = value.get("model")?.as_str()?;
             Some((service.clone(), model.to_string()))
         })
-        .collect())
+        .collect();
+    if ok.get(QWEN) == Some(&Value::Bool(true)) {
+        if let Some(model) = &fleet.qwen {
+            models
+                .entry(QWEN.to_string())
+                .or_insert_with(|| model.clone());
+        }
+    }
+    if entry.get(CLAUDE_API) == Some(&Value::Bool(true)) {
+        let tier = ok.get("claude").and_then(Value::as_str);
+        if let Some(model) = tier.and_then(|tier| fleet.claudeapi.get(tier)) {
+            models
+                .entry(CLAUDE_API.to_string())
+                .or_insert_with(|| model.clone());
+        }
+    }
+    Ok(models)
 }
+
+/// The service whose `ok` flag `true` means "this machine's Qwen" (`FleetModels::qwen`).
+const QWEN: &str = "qwen";
+
+/// The service a top-level `claudeapi: true` turns on (`FleetModels::claudeapi`).
+const CLAUDE_API: &str = "claudeapi";
 
 fn field_str(entry: &Map<String, Value>, id: &str, key: &str) -> Result<String, CoreError> {
     match entry.get(key) {

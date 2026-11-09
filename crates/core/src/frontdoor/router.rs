@@ -58,7 +58,9 @@ pub trait BudgetGate {
 /// pass two walks it again over the paid pools (`deepseek`, `claudeapi`). In each pass a
 /// service that is braked, or that has no model row in the index, is skipped; `claude` under
 /// budget is the handoff. With nothing taken: `waiting for Claude's budget` when `first` lists
-/// `claude`, else `waiting for budget: <kind>`. Reads no clock and no file.
+/// `claude`, else `waiting for budget: <kind>`. Reads no clock and no file: the model rows,
+/// including qwen's and the Claude API's from the fleet config, are the index's
+/// (`AbilitiesIndex::load_with`).
 pub fn pick_for_kind(index: &AbilitiesIndex, kind: &str, budget: &dyn BudgetGate) -> Pick {
     let Some(ability) = index.get(kind).filter(|a| a.request) else {
         return Pick::Wait(format!("unknown request kind {kind}"));

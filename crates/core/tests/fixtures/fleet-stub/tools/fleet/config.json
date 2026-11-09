@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "note": "A cut of the pipeline's tools/fleet/config.json for the core tests: the keys FD-3 derives a model from (claudeapi_models, machines.<machine>.qwen_model), in the real shape. Next to the stub fleet.py, where budget::config_path finds it.",
+  "claudeapi_models": {
+    "haiku": "claude-haiku-5-5",
+    "sonnet": "claude-sonnet-5-5",
+    "opus": "claude-opus-5-5"
+  },
+  "machines": {
+    "strix-halo": {
+      "token": "strix-halo",
+      "os": "steamos",
+      "qwen_capable": true,
+      "qwen_model": "qwen3.8-27b",
+      "qwen_variant": "qwen3.8-27b@UD-Q4_K_XL+MTP",
+      "qwen_context_tokens": 131072
+    },
+    "desktop-3090ti": {
+      "token": "desktop-3090ti",
+      "os": "windows",
+      "qwen_capable": true,
+      "qwen_model": "qwen3-coder-30b-a3b-instruct",
+      "qwen_variant": "qwen3-coder-30b-a3b@Q4_K_M",
+      "qwen_context_tokens": 32768
+    },
+    "amd-handheld": {
+      "token": "amd-handheld",
+      "os": "steamos",
+      "qwen_capable": false
+    }
+  }
+}
