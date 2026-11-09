@@ -7,8 +7,10 @@
 use std::time::Duration;
 use switchboard_core::autopilot::{driver, may_spend};
 use switchboard_core::budget::{RefreshTimer, REFRESH_EVERY_SECS};
-use switchboard_core::clock::SystemClock;
+use switchboard_core::clock::{Clock, SystemClock};
 use switchboard_core::github::live;
+use switchboard_core::it::SystemProbeRunner;
+use switchboard_core::platform::{current_os, loadout_probes};
 use switchboard_core::CoreError;
 use tauri::{Emitter, Manager};
 
@@ -115,6 +117,19 @@ fn main() {
                     }
                     std::thread::sleep(Duration::from_secs(live::TICK_EVERY_SECS));
                 }
+            });
+            // IT-1: read the loadout now, then every minute, and push each read to the panel.
+            let handle = app.handle().clone();
+            std::thread::spawn(move || loop {
+                let state = handle.state::<commands::AppState>();
+                let loadout = commands::read_and_store(
+                    &state,
+                    loadout_probes(current_os()),
+                    &SystemProbeRunner,
+                    SystemClock.now(),
+                );
+                let _ = handle.emit(commands::LOADOUT_EVENT, loadout);
+                std::thread::sleep(Duration::from_secs(commands::LOADOUT_EVERY_SECS));
             });
             Ok(())
         })
