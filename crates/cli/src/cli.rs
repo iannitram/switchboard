@@ -1,6 +1,7 @@
 //! CLI-1: `switchboard sky | waiting | reports | budget | loadout | star <repo>#<n>`, as text or
 //! `--json`, printing what the GUI shows.
-//! CLI-2: `switchboard refresh | backup <repo> | backup --all`, the GUI buttons.
+//! CLI-2: `switchboard refresh | backup <repo> | backup --all`, the GUI buttons: the core's
+//! refresh and backup entries, one line per repo.
 //! CLI-3: a repo delete or a restore over a live repo is refused and becomes a Waiting on you
 //! item; `--role <role> merge <repo>#<pr>` goes through CORE-3; inside a job worktree no role
 //! gives write actions.
@@ -13,12 +14,14 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use serde_json::{json, Value};
+use switchboard_core::backup_run::{self, BackupRow};
 use switchboard_core::budget::{self, PoolRow};
-use switchboard_core::clock::{Clock, SystemClock, UnixSeconds};
+use switchboard_core::clock::{Clock, FixedClock, SystemClock, UnixSeconds};
 use switchboard_core::error::CoreError;
 use switchboard_core::fleet::FleetBridge;
+use switchboard_core::github::live;
 use switchboard_core::github::merge::{self as gh_merge, MergeJob};
-use switchboard_core::github::poll::Poller;
+use switchboard_core::github::poll::{self, Poller};
 use switchboard_core::github::snapshot::SnapshotStore;
 use switchboard_core::github::transport::{GitHubTransport, HttpTransport};
 use switchboard_core::github::RepoSnapshot;
@@ -27,6 +30,7 @@ use switchboard_core::joblog::{self, NOT_RECORDED};
 use switchboard_core::platform::{current_os, default_dev_root, GhAuthToken, Os};
 use switchboard_core::reports::{self, Filter, Report};
 use switchboard_core::rules::{self, Caller, Face, GuardedAction, Role, Verdict};
+use switchboard_core::settings;
 use switchboard_core::sky;
 use switchboard_core::waiting::{self, guarded_item, Item, LocalItems};
 
@@ -44,6 +48,8 @@ pub const DEV_ROOT_ENV: &str = "SWITCHBOARD_DEV_ROOT";
 
 /// The app data folder's name: the desktop app's identifier.
 const APP_DIR: &str = "app.switchboard.desktop";
+/// CORE-5: the settings file, in the app data folder.
+const SETTINGS_FILE: &str = "settings.json";
 /// The line `waiting` and `reports` print when nothing is waiting.
 const NOTHING_WAITING: &str = "nothing waiting on you";
 /// The line `reports` prints when there are no reports.
@@ -54,16 +60,45 @@ const NO_SNAPSHOT: &str = "switchboard: no snapshot yet; run switchboard refresh
 const USAGE: &str = "usage: switchboard [--json] [--role <role>] \
                      [--project <repo>] [--outcome <o>] [--pool <p>] \
                      <sky | waiting | reports | budget | loadout | star <repo>#<n> | \
+                     refresh | backup <repo> | backup --all | \
                      delete <repo> | restore <repo> | merge <repo>#<pr> | mcp>";
 
-/// The writes a CLI command can reach (CLI-3). The real ones are `CliWrites`; the tests pass
-/// fakes.
+/// CLI-2: one repo's refresh: read again, or skipped because GitHub said it is unchanged (GH-2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refreshed {
+    Read,
+    Unchanged,
+}
+
+/// CLI-2: `refresh`'s answer, one `(repo, outcome)` per repo in the Refresh button's order.
+pub type RefreshRows = Vec<(String, Result<Refreshed, String>)>;
+
+/// The writes a CLI command can reach (CLI-2, CLI-3). The real ones are `CliWrites`; the tests
+/// pass fakes. The CLI-2 writes answer "not offered" unless the implementor fills them in.
 pub trait Writes {
     /// GH-5: merge only with a PASS on the head and CI green, through `merge_pr.py`. An error
     /// is the refusal text.
     fn merge(&self, repo: &str, pr: u64) -> Result<(), String>;
     /// WAIT-1: add one Waiting on you item.
     fn waiting(&self, item: &Item) -> Result<(), String>;
+    /// CLI-2: refresh every repo the Refresh button reads, in its order, each read stamped
+    /// `now`: one `(repo, outcome)` per repo, an `Err` being that repo's failure text. The
+    /// outer `Err` is a failure before any repo was tried.
+    fn refresh(&self, now: UnixSeconds) -> Result<RefreshRows, String> {
+        let _ = now;
+        Err("refresh: not offered".to_string())
+    }
+    /// CLI-2, BAK-1: back up one repo as the Back up button does; the row says written or
+    /// refused (BAK-2, with its Waiting on you item added by the core).
+    fn backup(&self, repo: &str, now: UnixSeconds) -> Result<BackupRow, String> {
+        let _ = now;
+        Err(format!("backup {repo}: not offered"))
+    }
+    /// CLI-2, BAK-1: back up every repo as the Back up all button does, one row each.
+    fn backup_all(&self, now: UnixSeconds) -> Result<Vec<BackupRow>, String> {
+        let _ = now;
+        Err("backup --all: not offered".to_string())
+    }
 }
 
 /// The real writes (CLI-3): a merge through GH-5 from the stored snapshot, and the Waiting on
@@ -168,10 +203,102 @@ impl CliWrites {
     }
 }
 
+impl CliWrites {
+    /// The app data folder, or the text that says which variable names it.
+    fn data(&self, command: &str) -> Result<&Path, String> {
+        self.data
+            .as_deref()
+            .ok_or_else(|| format!("{command}: set {DATA_ENV} to the app data folder"))
+    }
+
+    /// CORE-5: the settings file in the app data folder, read for `command`.
+    fn settings(&self, command: &str) -> Result<settings::Settings, String> {
+        let data = self.data(command)?;
+        settings::load(&data.join(SETTINGS_FILE)).map_err(|e| format!("{command}: {e}"))
+    }
+}
+
+/// The error text the backup commands print: a refusal's reason alone, else the error.
+fn backup_error(repo: &str, e: CoreError) -> String {
+    match e {
+        CoreError::Refused(why) => format!("backup {repo}: {why}"),
+        other => format!("backup {repo}: {other}"),
+    }
+}
+
 impl Writes for CliWrites {
     fn merge(&self, repo: &str, pr: u64) -> Result<(), String> {
         self.try_merge(repo, pr)
             .map_err(|why| format!("merge {repo}#{pr}: {why}"))
+    }
+
+    /// CLI-2: the Refresh button's repos (`live::repos`), each through the core's two seams:
+    /// GH-2's ETag check (`poll::unchanged`) when a snapshot is stored, then GH-3's re-read
+    /// (`Poller::after_write`) unless GitHub answered 304, in which case the stored snapshot
+    /// is stamped `now` with the ETag it answered, as a poll tick does.
+    fn refresh(&self, now: UnixSeconds) -> Result<RefreshRows, String> {
+        let data = self.data("refresh")?;
+        let repos = live::repos(data).map_err(|e| format!("refresh: {e}"))?;
+        if repos.is_empty() {
+            return Err(NO_SNAPSHOT.to_string());
+        }
+        let live_http: Box<dyn GitHubTransport>;
+        let transport: &dyn GitHubTransport = match &self.transport {
+            Some(transport) => &**transport,
+            None => {
+                live_http = live_transport();
+                &*live_http
+            }
+        };
+        let store = SnapshotStore::new(data);
+        let clock = FixedClock::at(now);
+        let one = |repo: &str| -> Result<Refreshed, CoreError> {
+            let poller = Poller {
+                transport,
+                store: &store,
+                clock: &clock,
+                repos: vec![repo.to_string()],
+            };
+            let Some(old) = store.load(repo)? else {
+                poller.after_write(repo)?;
+                return Ok(Refreshed::Read);
+            };
+            match poll::unchanged(transport, repo, old.etag.as_deref())? {
+                (true, etag) => {
+                    let mut snap = old;
+                    snap.read_at = now;
+                    snap.etag = etag;
+                    store.save(&snap)?;
+                    Ok(Refreshed::Unchanged)
+                }
+                (false, _) => {
+                    poller.after_write(repo)?;
+                    Ok(Refreshed::Read)
+                }
+            }
+        };
+        Ok(repos
+            .into_iter()
+            .map(|repo| {
+                let outcome = one(&repo).map_err(|e| e.to_string());
+                (repo, outcome)
+            })
+            .collect())
+    }
+
+    /// CLI-2: the same core entry the Back up button calls (`backup_run::run_one`).
+    fn backup(&self, repo: &str, now: UnixSeconds) -> Result<BackupRow, String> {
+        let command = format!("backup {repo}");
+        let settings = self.settings(&command)?;
+        backup_run::run_one(&settings, self.data(&command)?, repo, now)
+            .map_err(|e| backup_error(repo, e))
+    }
+
+    /// CLI-2: the same core entry the Back up all button calls (`backup_run::run_all`).
+    fn backup_all(&self, now: UnixSeconds) -> Result<Vec<BackupRow>, String> {
+        let settings = self.settings("backup --all")?;
+        backup_run::run_all(&settings, self.data("backup --all")?, now)
+            .map_err(|e| backup_error("--all", e))
     }
 
     /// WAIT-1: the item goes into the local items; asking twice keeps one (same `source`).
@@ -229,7 +356,8 @@ pub fn run(argv: &[String]) -> ExitCode {
     )
 }
 
-/// `run` with its seams passed in: the working directory, the time, the writes and stderr.
+/// `run` with its seams passed in: the working directory, the time, the writes and stderr;
+/// stdout is the process's.
 pub fn run_with(
     argv: &[String],
     cwd: &Path,
@@ -237,7 +365,20 @@ pub fn run_with(
     writes: &dyn Writes,
     err: &mut dyn Write,
 ) -> ExitCode {
-    let (filter, argv) = match take_filter(argv) {
+    run_io(argv, cwd, now, writes, &mut std::io::stdout(), err)
+}
+
+/// `run_with` with stdout passed in too; CLI-2's commands write their lines to `out`.
+pub fn run_io(
+    argv: &[String],
+    cwd: &Path,
+    now: UnixSeconds,
+    writes: &dyn Writes,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> ExitCode {
+    let (all, argv) = take_all(argv);
+    let (filter, argv) = match take_filter(&argv) {
         Ok(taken) => taken,
         Err(e) => {
             eprintln!("switchboard: {e}");
@@ -264,8 +405,23 @@ pub fn run_with(
         eprintln!("switchboard: --project, --outcome and --pool are for reports");
         return ExitCode::from(2);
     }
+    if command != Some("backup") && all {
+        let _ = writeln!(err, "switchboard: --all is for backup");
+        let _ = writeln!(err, "{USAGE}");
+        return ExitCode::from(2);
+    }
     match command {
         Some("delete" | "restore" | "merge") => write_command(&args, cwd, now, writes, err),
+        Some("refresh") => run_refresh(writes, now, args.json, out, err),
+        Some("backup") => match (all, args.command.get(1..)) {
+            (false, Some([repo])) => run_backup(writes, now, Some(repo.as_str()), out, err),
+            (true, Some([])) => run_backup(writes, now, None, out, err),
+            _ => {
+                let _ = writeln!(err, "switchboard: backup needs one <repo> or --all");
+                let _ = writeln!(err, "{USAGE}");
+                ExitCode::from(2)
+            }
+        },
         Some("budget") => budget(args.json),
         Some("sky") => sky_command(args.json),
         Some("star") => match args.command.get(1..) {
@@ -293,6 +449,111 @@ pub fn run_with(
             ExitCode::from(2)
         }
     }
+}
+
+/// CLI-2: `switchboard refresh`: one line per repo, `<repo>: refreshed` or `<repo>: unchanged`
+/// on `out` (or the rows as a JSON array with `--json`); a repo that failed gives
+/// `<repo>: failed: <error>` on `err`, and the exit code is 1 after every repo was tried.
+fn run_refresh(
+    writes: &dyn Writes,
+    now: UnixSeconds,
+    json: bool,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> ExitCode {
+    let rows = match writes.refresh(now) {
+        Ok(rows) => rows,
+        Err(text) => return refuse(err, &text),
+    };
+    let mut failed = false;
+    if json {
+        let rows: Vec<Value> = rows
+            .iter()
+            .map(|(repo, outcome)| match outcome {
+                Ok(Refreshed::Read) => json!({"repo": repo, "outcome": "refreshed"}),
+                Ok(Refreshed::Unchanged) => json!({"repo": repo, "outcome": "unchanged"}),
+                Err(text) => {
+                    failed = true;
+                    json!({"repo": repo, "outcome": "failed", "error": text})
+                }
+            })
+            .collect();
+        let text = match serde_json::to_string_pretty(&Value::Array(rows)) {
+            Ok(text) => text,
+            Err(e) => return refuse(err, &format!("switchboard refresh: {e}")),
+        };
+        let _ = writeln!(out, "{text}");
+    } else {
+        for (repo, outcome) in &rows {
+            match outcome {
+                Ok(Refreshed::Read) => {
+                    let _ = writeln!(out, "{repo}: refreshed");
+                }
+                Ok(Refreshed::Unchanged) => {
+                    let _ = writeln!(out, "{repo}: unchanged");
+                }
+                Err(text) => {
+                    failed = true;
+                    let _ = writeln!(err, "{repo}: failed: {text}");
+                }
+            }
+        }
+    }
+    if failed {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+/// CLI-2: `switchboard backup <repo>` (`Some`) or `backup --all` (`None`): one line per repo,
+/// `<repo>: backed up to <path>` on `out`; a backup BAK-2 refused gives `<repo>: refused:
+/// <reason>` on `err` (its Waiting on you item is the core's) and the exit code is 1 after
+/// every repo was tried. An error before the rows is printed as it comes, exit 1.
+fn run_backup(
+    writes: &dyn Writes,
+    now: UnixSeconds,
+    repo: Option<&str>,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> ExitCode {
+    let rows = match repo {
+        Some(repo) => writes.backup(repo, now).map(|row| vec![row]),
+        None => writes.backup_all(now),
+    };
+    let rows = match rows {
+        Ok(rows) => rows,
+        Err(text) => return refuse(err, &text),
+    };
+    let mut refused = false;
+    for row in &rows {
+        match &row.reason {
+            None => {
+                let _ = writeln!(out, "{}: backed up to {}", row.repo, row.folder);
+            }
+            Some(reason) => {
+                refused = true;
+                let _ = writeln!(err, "{}: refused: {reason}", row.repo);
+            }
+        }
+    }
+    if refused {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+/// `--all` (CLI-2's `backup --all`) taken out of `argv`, the other words kept in order;
+/// `parse_args` does not know it.
+fn take_all(argv: &[String]) -> (bool, Vec<String>) {
+    let all = argv.iter().any(|word| word == "--all");
+    let rest = argv
+        .iter()
+        .filter(|word| *word != "--all")
+        .cloned()
+        .collect();
+    (all, rest)
 }
 
 /// CLI-3: `delete <repo>`, `restore <repo>` and `merge <repo>#<pr>` through `rules::guard`. A
