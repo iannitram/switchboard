@@ -12,7 +12,18 @@ use crate::fleet::FleetBridge;
 use crate::CoreError;
 
 /// AUTO-1: ask `fleet budget allow <lane>` before anything spends a pool; `false` (exit 75)
-/// means not now.
+/// means not now. An empty lane is refused without a call; any other exit is the bridge's
+/// `FleetError`, never `true`.
 pub fn may_spend(fleet: &FleetBridge, lane: &str) -> Result<bool, CoreError> {
-    todo!("AUTO-1")
+    if lane.is_empty() {
+        return Err(CoreError::Refused("budget: no lane to ask about".into()));
+    }
+    let code = fleet
+        .run_status(&["budget", "allow", lane])
+        .map_err(CoreError::Fleet)?;
+    match code {
+        0 => Ok(true),
+        75 => Ok(false),
+        other => Err(CoreError::Refused(format!("budget allow {lane}: exit {other}"))),
+    }
 }
