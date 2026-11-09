@@ -24,6 +24,8 @@ pub fn may_spend(fleet: &FleetBridge, lane: &str) -> Result<bool, CoreError> {
     match code {
         0 => Ok(true),
         75 => Ok(false),
-        other => Err(CoreError::Refused(format!("budget allow {lane}: exit {other}"))),
+        other => Err(CoreError::Refused(format!(
+            "budget allow {lane}: exit {other}"
+        ))),
     }
 }
