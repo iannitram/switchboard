@@ -88,6 +88,43 @@ pub fn write_json(
     Ok(manifest)
 }
 
+/// BAK-1: a release file of this many bytes or more is listed but not fetched.
+pub const RELEASE_FILE_LIMIT: u64 = 1_000_000_000;
+
+/// BAK-1: the releases as `releases.json`, every asset of 1 GB or more marked skipped; sets
+/// `manifest.releases`. Written to `releases.json.new` first and renamed into place; a failed
+/// write removes the `.new` file and leaves the old file and `manifest` as they were.
+pub fn write_release_list(
+    releases: &[Value],
+    out_dir: &Path,
+    manifest: &mut Manifest,
+) -> Result<(), CoreError> {
+    let mut list = releases.to_vec();
+    for release in &mut list {
+        let Some(assets) = release.get_mut("assets").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for asset in assets {
+            if asset["size"].as_u64().is_some_and(|s| s >= RELEASE_FILE_LIMIT) {
+                asset["skipped"] = Value::from("over 1 GB");
+            }
+        }
+    }
+    let text = pretty(&list)?;
+    std::fs::create_dir_all(out_dir).map_err(|e| io_error(out_dir, e))?;
+    let tmp = out_dir.join("releases.json.new");
+    if let Err(e) = std::fs::write(&tmp, &text) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(io_error(&tmp, e));
+    }
+    if let Err(e) = std::fs::rename(&tmp, out_dir.join("releases.json")) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(io_error(&tmp, e));
+    }
+    manifest.releases = releases.len() as u64;
+    Ok(())
+}
+
 /// The counts for `answers`. `refs`, `releases` and `wiki` are left at their defaults.
 fn manifest_for(answers: &RecordedAnswers, taken_at: &str) -> Manifest {
     let closed_by_merged_pr: HashSet<u64> = answers
