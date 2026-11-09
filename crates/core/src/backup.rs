@@ -1,7 +1,9 @@
 //! `backup`: one latest backup of each repo in `Backups/github/<repo>/` in NextCloud (BAK-1),
 //! guarded against a bad pass overwriting the last good copy (BAK-2), restorable to a new
-//! private repo (BAK-3).
+//! private repo (BAK-3: history, labels and milestones in `restore_history`).
 
+use crate::fleet::FleetBridge;
+use crate::github::queue::{self, Create, QueueStatus};
 use crate::github::transport::{GitHubTransport, HttpTransport};
 use crate::settings::Settings;
 use crate::CoreError;
@@ -800,6 +802,208 @@ fn rfc3339(secs: i64) -> String {
         rest % 3600 / 60,
         rest % 60
     )
+}
+
+/// BAK-3: what `restore_history` put back.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RestoreReport {
+    /// Refs pushed from the bundle.
+    pub refs: u64,
+    /// Labels sent through the create queue.
+    pub labels: u64,
+    /// Milestones sent through the create queue.
+    pub milestones: u64,
+}
+
+/// BAK-3: restore the history, labels and milestones of the backup in `backup_dir` to the new
+/// private repo `new_repo` (`owner/name`) on GitHub, as `restore_history_from` does. Git pushes
+/// use `gh` as the credential helper and the API uses `gh auth token`.
+pub fn restore_history(
+    fleet: &FleetBridge,
+    backup_dir: &Path,
+    new_repo: &str,
+) -> Result<RestoreReport, CoreError> {
+    let api = HttpTransport::new(&crate::platform::GhAuthToken::default())?;
+    restore_history_from(fleet, backup_dir, new_repo, &github_remote(&api))
+}
+
+/// `restore_history` against `remote`.
+///
+/// Reads and checks the whole backup first (the manifest, `labels.json` and `milestones.json`
+/// with the manifest's counts, and `repo.bundle`, cloned into a temp mirror). Then asks the API for
+/// `/repos/<new_repo>`: a repo that is there is `Refused` with nothing written. Otherwise the
+/// repo is created private through the create queue (an `exists` answer is `Refused` too), the
+/// API must then show it private, every ref in the bundle is pushed to
+/// `<git_base>/<new_repo>.git`, and the labels and milestones go through the queue in one batch.
+/// `refs/pull/*` are not pushed: GitHub keeps them read-only, and they come back with the PRs.
+/// Never restores over a live repo; that needs `rules::guard` (#101).
+pub fn restore_history_from(
+    fleet: &FleetBridge,
+    backup_dir: &Path,
+    new_repo: &str,
+    remote: &Remote<'_>,
+) -> Result<RestoreReport, CoreError> {
+    let (owner, name) = split_repo(new_repo)?;
+    let manifest = read_manifest(backup_dir)?.ok_or_else(|| {
+        CoreError::Io(format!(
+            "{}: no manifest.json, not a backup",
+            backup_dir.display()
+        ))
+    })?;
+    let labels = names_in(backup_dir, "labels.json", "name", manifest.labels)?;
+    let milestones = names_in(backup_dir, "milestones.json", "title", manifest.milestones)?;
+    let bundle =
+        std::path::absolute(backup_dir.join("repo.bundle")).map_err(|e| io_error(backup_dir, e))?;
+    // Cloning the bundle checks it before anything is written.
+    let work = work_dir(owner, name);
+    let restored = clone_mirror(remote, &bundle.to_string_lossy(), &work)
+        .and_then(|()| restore_into(fleet, &work, new_repo, remote, &labels, &milestones));
+    let _ = std::fs::remove_dir_all(&work);
+    restored
+}
+
+/// The writes of `restore_history_from`, the bundle already cloned into `work`.
+fn restore_into(
+    fleet: &FleetBridge,
+    work: &Path,
+    new_repo: &str,
+    remote: &Remote<'_>,
+    labels: &[String],
+    milestones: &[String],
+) -> Result<RestoreReport, CoreError> {
+    let taken = format!("{new_repo} already exists; restore goes to a new repo only");
+    let path = format!("/repos/{new_repo}");
+    match remote.api.rest_get(&path, None)?.status {
+        404 => {}
+        200 => return Err(CoreError::Refused(taken)),
+        other => return Err(CoreError::GitHub(format!("GET {path}: status {other}"))),
+    }
+    let before = queue_counts(fleet)?;
+    let made = queue::send(
+        fleet,
+        &[Create::Repo {
+            repo: new_repo.to_string(),
+            private: true,
+        }],
+    )?;
+    if made.exists > before.exists {
+        return Err(CoreError::Refused(taken));
+    }
+    if made.failed > before.failed || made.pending > before.pending {
+        return Err(CoreError::GitHub(format!(
+            "{new_repo}: the create queue did not create the repo (pending {}, failed {})",
+            made.pending, made.failed
+        )));
+    }
+    let answer = remote.api.rest_get(&path, None)?;
+    if answer.status != 200 || answer.body["private"] != Value::Bool(true) {
+        return Err(CoreError::GitHub(format!(
+            "{new_repo}: not there as a private repo after the create (status {})",
+            answer.status
+        )));
+    }
+
+    let refs = push_refs(remote, work, new_repo).map_err(|e| about(new_repo, e))?;
+
+    let creates: Vec<Create> = labels
+        .iter()
+        .map(|name| Create::Label {
+            repo: new_repo.to_string(),
+            name: name.clone(),
+        })
+        .chain(milestones.iter().map(|title| Create::Milestone {
+            repo: new_repo.to_string(),
+            title: title.clone(),
+        }))
+        .collect();
+    let sent = queue::send(fleet, &creates)?;
+    if sent.failed > made.failed {
+        return Err(CoreError::GitHub(format!(
+            "{new_repo}: {} label or milestone creates failed in the queue",
+            sent.failed - made.failed
+        )));
+    }
+    Ok(RestoreReport {
+        refs,
+        labels: labels.len() as u64,
+        milestones: milestones.len() as u64,
+    })
+}
+
+/// The `key` string of each item in the JSON array `<dir>/<file>`; an error when there are not
+/// `expected` of them, as the manifest says.
+fn names_in(dir: &Path, file: &str, key: &str, expected: u64) -> Result<Vec<String>, CoreError> {
+    let path = dir.join(file);
+    let text = std::fs::read_to_string(&path).map_err(|e| io_error(&path, e))?;
+    let items: Vec<Value> = serde_json::from_str(&text)
+        .map_err(|e| CoreError::Parse(format!("{}: {e}", path.display())))?;
+    let names: Vec<String> = items
+        .iter()
+        .map(|item| {
+            item[key].as_str().map(String::from).ok_or_else(|| {
+                CoreError::Parse(format!("{}: an item with no {key}", path.display()))
+            })
+        })
+        .collect::<Result<_, _>>()?;
+    if names.len() as u64 != expected {
+        return Err(CoreError::Parse(format!(
+            "{}: {} items, the manifest says {expected}",
+            path.display(),
+            names.len()
+        )));
+    }
+    Ok(names)
+}
+
+/// The queue's counts now (`fleet ghq status`).
+fn queue_counts(fleet: &FleetBridge) -> Result<QueueStatus, CoreError> {
+    let answer = fleet
+        .run_json(&["ghq", "status"])
+        .map_err(CoreError::Fleet)?;
+    let count = |name: &str| answer["counts"][name].as_u64().unwrap_or(0);
+    Ok(QueueStatus {
+        pending: count("pending"),
+        done: count("done"),
+        exists: count("exists"),
+        failed: count("failed"),
+    })
+}
+
+/// Pushes each ref of the mirror `work` but `refs/pull/*` to `<git_base>/<repo>.git`; returns
+/// how many it pushed.
+fn push_refs(remote: &Remote<'_>, work: &Path, repo: &str) -> Result<u64, CoreError> {
+    let url = format!("{}/{repo}.git", remote.git_base);
+    let listed = git(work, &["for-each-ref", "--format=%(refname)"])?;
+    let refspecs: Vec<String> = listed
+        .lines()
+        .map(str::trim)
+        .filter(|r| !r.is_empty() && !r.starts_with("refs/pull/"))
+        .map(|r| format!("+{r}:{r}"))
+        .collect();
+    if refspecs.is_empty() {
+        return Err(CoreError::Io(
+            "the bundle holds no refs to push".to_string(),
+        ));
+    }
+    let mut cmd = Command::new("git");
+    for config in &remote.git_config {
+        cmd.arg("-c").arg(config);
+    }
+    let out = cmd
+        .arg("-C")
+        .arg(work)
+        .args(["push", "-q", "--atomic", &url])
+        .args(&refspecs)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .map_err(|e| CoreError::Io(format!("git push {url}: {e}")))?;
+    if !out.status.success() {
+        return Err(CoreError::Io(format!(
+            "git push {url}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    Ok(refspecs.len() as u64)
 }
 
 #[cfg(test)]
