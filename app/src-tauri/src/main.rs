@@ -107,7 +107,6 @@ fn autopilot_after_poll(
                 starter: &mut starter,
             });
         // AUTO-4: then merge what passed, each merge followed by a read of its repo (GH-3).
-        // AUTO-4: then merge what passed, each merge followed by a read of its repo (GH-3).
         let store = switchboard_core::github::snapshot::SnapshotStore::new(data);
         let poller = switchboard_core::github::poll::Poller {
             transport,
