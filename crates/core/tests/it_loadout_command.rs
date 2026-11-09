@@ -232,7 +232,7 @@ fn the_loadout_command_runs_off_the_main_thread_and_calls_the_core() {
         .find("\n}\n")
         .map_or(commands.len(), |i| at + i);
     let body = &commands[at..body_end];
-    assert!(body.contains("read_this_machine("), "{body}");
+    assert!(body.contains("current_loadout("), "{body}");
     assert!(body.contains("SystemProbeRunner"), "{body}");
     assert!(body.contains("SystemClock"), "{body}");
 }
