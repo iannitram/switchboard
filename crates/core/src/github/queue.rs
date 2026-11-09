@@ -49,12 +49,16 @@ pub fn send(fleet: &FleetBridge, creates: &[Create]) -> Result<QueueStatus, Core
     if creates.is_empty() {
         return Ok(QueueStatus::default());
     }
+    // The counter keeps two sends in one process apart when the clock does not tick
+    // between them (macOS reads it in whole microseconds).
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
     let file = std::env::temp_dir().join(format!(
-        "switchboard-ghq-{}-{nanos}.json",
+        "switchboard-ghq-{}-{nanos}-{seq}.json",
         std::process::id()
     ));
     let io = |e: String| CoreError::Io(format!("{}: {e}", file.display()));
