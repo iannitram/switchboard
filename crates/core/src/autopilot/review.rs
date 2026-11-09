@@ -98,3 +98,37 @@ pub fn first_rung(size: &str) -> Rung {
         _ => Rung::Hard,
     }
 }
+
+/// The lane/size word a rung runs at: easy, medium, hard, opus, fable.
+pub fn rung_label(rung: Rung) -> &'static str {
+    match rung {
+        Rung::Easy => "easy",
+        Rung::Medium => "medium",
+        Rung::Hard => "hard",
+        Rung::Opus => "opus",
+        Rung::Fable => "fable",
+    }
+}
+
+/// AUTO-3: the fleet job that runs one review try of `pr` at `rung`. The reviewer runs on a
+/// service other than the builder's (R25), and its brief is the PR diff and the issue. The
+/// caller starts it with `step`.
+pub fn review_job(
+    repo: &str,
+    pr: u64,
+    issue: u64,
+    rung: Rung,
+    try_n: u8,
+    builder_service: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "review",
+        "repo": repo,
+        "pr": pr,
+        "issue": issue,
+        "rung": rung_label(rung),
+        "try": try_n,
+        "not_service": builder_service,
+        "brief": ["diff", "issue"],
+    })
+}

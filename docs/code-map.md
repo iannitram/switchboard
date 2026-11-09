@@ -164,6 +164,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - AUTO-9 classify (`classify`, `from_json`): present.
 - AUTO-5 weekly due check (`weekly_due`): present.
 - AUTO-3 review (`step`, `first_rung`): present.
+- AUTO-3 review job (`review_job`): present.
 - AUTO-8 drifted copies (`drifted`): present.
 
 ### it
