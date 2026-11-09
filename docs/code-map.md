@@ -159,6 +159,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 `crates/core/src/autopilot/` · AUTO-1 to AUTO-9 · planned. `may_spend` (budget allow), `review` (R25's ladder as a state machine), `driver` (script loops, Qwen plus one), `instructions` (untracked instruction files; drift of copies), `classify` (by the card, through `fleet errors classify`), `weekly` (Sunday 6am, ROADMAP changes).
 - AUTO-9 classify (`classify`, `from_json`): present.
 - AUTO-5 weekly due check (`weekly_due`): present.
+- AUTO-2 roadmap_changed: present.
 - AUTO-3 review (`step`, `first_rung`): present.
 - AUTO-8 drifted copies (`drifted`): present.
 

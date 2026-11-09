@@ -30,5 +30,23 @@ pub fn roadmap_changed(
     previous: &[(String, Option<String>)],
     next: &[(String, Option<String>)],
 ) -> Vec<String> {
-    todo!("AUTO-2")
+    let mut seen: Vec<&str> = Vec::new();
+    let mut changed = Vec::new();
+    for (repo, text) in next {
+        // Only the first entry for a repo counts, even when that entry has no text.
+        if seen.contains(&repo.as_str()) {
+            continue;
+        }
+        seen.push(repo);
+        let Some(text) = text else { continue };
+        // Missing entry, or an entry of `None`, both read as "no text before".
+        let before = previous
+            .iter()
+            .find(|(name, _)| name == repo)
+            .and_then(|(_, before)| before.as_deref());
+        if before != Some(text.as_str()) {
+            changed.push(repo.clone());
+        }
+    }
+    changed
 }
