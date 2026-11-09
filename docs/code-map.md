@@ -162,6 +162,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 
 - BAK-1 JSON of issues, PRs, comments, labels, milestones (`write_json`): present.
 - BAK-1 git bundle (`bundle`): present.
+- BAK-1 releases.json (`write_release_list`, `RELEASE_FILE_LIMIT`): present.
 - BAK-1 wiki mirror (`copy_wiki`): present.
 - BAK-1 back up one repo or all (`backup_repo`, `backup_all`, `BackupOutcome`; the Sky's back up buttons): present.
 
@@ -208,7 +209,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 
 ### cli
 `crates/cli/src/main.rs`, `cli.rs` · CLI-1, CLI-2, CLI-3 · CLI-1 and CLI-3 present; CLI-2 planned. Text or `--json`; the same numbers as the GUI; role-flagged writes through `rules::guard`.
-- CLI-1 parse arguments, budget, sky, star: present; waiting, reports, loadout: planned. `sky` and `star` read the stored snapshot in the app data folder (`SWITCHBOARD_DATA`, else the desktop app's) and never call GitHub; `star` reads its running job from the job log when `SWITCHBOARD_PIPELINE` is set.
+- CLI-1 parse arguments, budget, sky, star, waiting, reports: present; loadout: planned. `sky` and `star` read the stored snapshot in the app data folder (`SWITCHBOARD_DATA`, else the desktop app's) and never call GitHub; `star` reads its running job from the job log when `SWITCHBOARD_PIPELINE` is set.
 - CLI-3 delete and restore refused to Waiting on you, `--role` merge through the guard, none inside a job worktree: present; the real merge and Waiting write are not wired yet (stubs, as in `mcp.rs`).
 
 ### mcp
