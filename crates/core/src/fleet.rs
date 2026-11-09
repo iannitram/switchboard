@@ -6,6 +6,7 @@
 use crate::platform::{current_os, python_launcher};
 use serde_json::Value;
 use std::ffi::OsStr;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -119,26 +120,54 @@ impl FleetBridge {
     }
 
     /// The child for `command` (program first): `FLEET_ROOT` set to the root, then the
-    /// `with_env` pairs, stdin null, stdout and stderr captured.
-    fn spawn(&self, command: &[String]) -> std::io::Result<std::process::Output> {
+    /// `with_env` pairs, stdout and stderr captured. Stdin is null, or `input` when given (written
+    /// from a thread while the output is read, so a large input cannot deadlock on a full pipe).
+    fn spawn(
+        &self,
+        command: &[String],
+        input: Option<&[u8]>,
+    ) -> std::io::Result<std::process::Output> {
         let mut child = Command::new(&command[0]);
         child.args(&command[1..]);
         child.env(FLEET_ROOT_ENV, self.root.as_os_str());
         for (key, value) in &self.env {
             child.env(key, value);
         }
-        child.stdin(Stdio::null());
+        child.stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        });
         child.stdout(Stdio::piped());
         child.stderr(Stdio::piped());
-        child.output()
+        let mut proc = child.spawn()?;
+        let writer = match (input, proc.stdin.take()) {
+            (Some(bytes), Some(mut stdin)) => {
+                let bytes = bytes.to_vec();
+                // A child that exits without reading gives a broken pipe: its exit code says why.
+                Some(std::thread::spawn(move || {
+                    let _ = stdin.write_all(&bytes);
+                }))
+            }
+            _ => None,
+        };
+        let output = proc.wait_with_output();
+        if let Some(writer) = writer {
+            let _ = writer.join();
+        }
+        output
     }
 
     /// Run the command line for `args` and wait. A failed spawn is a `FleetError` with
     /// reason `Spawn`; otherwise the command line, the exit code (`None` when the process
     /// was killed), stdout and stderr, each lossy UTF-8.
-    fn run(&self, args: &[&str]) -> Result<(Vec<String>, Option<i32>, String, String), FleetError> {
+    fn run(
+        &self,
+        args: &[&str],
+        input: Option<&[u8]>,
+    ) -> Result<(Vec<String>, Option<i32>, String, String), FleetError> {
         let command = self.command_line(args);
-        let output = match self.spawn(&command) {
+        let output = match self.spawn(&command, input) {
             Ok(output) => output,
             Err(err) => {
                 return Err(FleetError {
@@ -158,7 +187,7 @@ impl FleetBridge {
     /// stdout. A failed spawn, a non-zero exit or stdout that is not JSON is a
     /// `FleetError`, never a guessed value.
     pub fn run_json(&self, args: &[&str]) -> Result<Value, FleetError> {
-        let (command, code, stdout, stderr) = self.run(args)?;
+        let (command, code, stdout, stderr) = self.run(args, None)?;
         match code {
             Some(0) => serde_json::from_str(&stdout).map_err(|err| FleetError {
                 command,
@@ -178,7 +207,19 @@ impl FleetBridge {
     /// Run a fleet command whose answer is its exit code (`budget allow <lane>`: 0 go,
     /// 75 not now). Any other code is a `FleetError`.
     pub fn run_status(&self, args: &[&str]) -> Result<i32, FleetError> {
-        let (command, code, _stdout, stderr) = self.run(args)?;
+        Self::status(self.run(args, None)?)
+    }
+
+    /// `run_status` with `input` on the child's stdin (IT-2: `errors file --records -` reads
+    /// the records there, so nothing is written to a temp file).
+    pub fn run_status_with_input(&self, args: &[&str], input: &str) -> Result<i32, FleetError> {
+        Self::status(self.run(args, Some(input.as_bytes()))?)
+    }
+
+    /// 0 and 75 are answers; any other code is a `FleetError`.
+    fn status(
+        (command, code, _stdout, stderr): (Vec<String>, Option<i32>, String, String),
+    ) -> Result<i32, FleetError> {
         match code {
             Some(code) if code == 0 || code == 75 => Ok(code),
             code => Err(FleetError {
