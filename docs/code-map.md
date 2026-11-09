@@ -170,6 +170,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 `crates/core/src/frontdoor/` · FD-1 to FD-13 · planned. `router` (the four steps, the `first` list against budget, the learned pick), `labeller` (rules, then a small model, U8), `adapters` (one per service; none for the Claude subscription), `packet` (summary, last 6 turns, links; the summary check), `sticky` (what moves a chat; implicit signals), `thread` (one JSON Lines file per thread). Face: `app/src/views/Chat.tsx` with BroCrew's composer and messages ported; the "Open in Claude" button (FD-8).
 - FD-6 packet (`build`): present.
 - FD-7 summary check (`missing_from_summary`, `checked_summary`): present.
+- FD-9 thumbs rating log (`thumbs_from_name`, `rating_entry`, `log_rating`, `chat_rate`): present.
 - FD-2 rules labeller (`by_rules`, `label`): present.
 - FD-2 small labeller (`LlamaLabeller`): present.
 - FD-13 thread store: present.
@@ -177,6 +178,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - FD-11 Qwen adapter (`QwenAdapter`): present.
 - FD-11 DeepSeek adapter (`DeepSeekAdapter`, `post_json_headers`): present.
 - FD-11 ChatGPT adapter (`ChatGptAdapter`): present.
+- FD-11 Gemini adapter (`GeminiAdapter`): present.
 - FD-9 rating and implicit rows (`rating_row`, `implicit_row`): present.
 - FD-9 implicit signal log (`implicit_from_name`, `log_implicit`, `chat_implicit`): present.
 - FD-10 separate move field (`with_move`, `thumbs_down_counts`): present.
@@ -203,10 +205,12 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - IT-3 triage job (`triage_job`): present.
 - FD-12 unmet needs (`unmet`, `held_job`): present.
 - IT-4 ladder-out bug (`ladder_out_bug`): present.
+- IT-W loadout command (`SystemProbeRunner`, `read_this_machine`, `loadout`): present.
 
 ### cli
-`crates/cli/src/main.rs`, `cli.rs` · CLI-1, CLI-2, CLI-3 · planned. Text or `--json`; the same numbers as the GUI; role-flagged writes through `rules::guard`.
-- CLI-1 parse arguments, budget: present; sky, waiting, reports, star, loadout: planned.
+`crates/cli/src/main.rs`, `cli.rs` · CLI-1, CLI-2, CLI-3 · CLI-1 and CLI-3 present; CLI-2 planned. Text or `--json`; the same numbers as the GUI; role-flagged writes through `rules::guard`.
+- CLI-1 parse arguments, budget, waiting, reports: present; sky, star, loadout: planned.
+- CLI-3 delete and restore refused to Waiting on you, `--role` merge through the guard, none inside a job worktree: present; the real merge and Waiting write are not wired yet (stubs, as in `mcp.rs`).
 
 ### mcp
 `crates/cli/src/mcp.rs` · MCP-1 and MCP-2 present; MCP-3 planned. JSON-RPC over stdio; six read tools; role write tools; none inside a job worktree.
