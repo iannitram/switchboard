@@ -202,6 +202,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - IT-3 triage job (`triage_job`): present.
 - FD-12 unmet needs (`unmet`, `held_job`): present.
 - IT-4 ladder-out bug (`ladder_out_bug`): present.
+- IT-W loadout command (`SystemProbeRunner`, `read_this_machine`, `loadout`): present.
 
 ### cli
 `crates/cli/src/main.rs`, `cli.rs` · CLI-1, CLI-2, CLI-3 · CLI-1 and CLI-3 present; CLI-2 planned. Text or `--json`; the same numbers as the GUI; role-flagged writes through `rules::guard`.

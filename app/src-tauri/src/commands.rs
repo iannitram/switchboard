@@ -178,6 +178,16 @@ pub fn budget_refresh(state: tauri::State<'_, AppState>) -> Result<Vec<PoolRow>,
         })
 }
 
+/// IT-W: this machine's loadout, read now through this OS's probe list (the Loadout panel).
+/// It runs off the main thread: the probes start ten programs.
+#[tauri::command(async)]
+pub fn loadout() -> switchboard_core::it::Loadout {
+    switchboard_core::it::read_this_machine(
+        &switchboard_core::it::SystemProbeRunner,
+        switchboard_core::clock::Clock::now(&SystemClock),
+    )
+}
+
 /// WAIT-W: the Waiting on you items, newest first: the snapshot's and the local ones.
 #[tauri::command]
 pub fn waiting(app: tauri::AppHandle) -> Result<Vec<switchboard_core::waiting::Item>, FaceError> {
