@@ -23,7 +23,11 @@ fn logging_root(name: &str) -> PathBuf {
     let root = std::env::temp_dir().join(format!("sb-auto1-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(root.join("tools").join("fleet")).unwrap();
-    std::fs::write(root.join("tools").join("fleet").join("fleet.py"), LOGGING_FLEET).unwrap();
+    std::fs::write(
+        root.join("tools").join("fleet").join("fleet.py"),
+        LOGGING_FLEET,
+    )
+    .unwrap();
     root
 }
 
@@ -68,7 +72,10 @@ fn an_empty_lane_is_an_error_and_the_stub_is_not_called() {
 #[test]
 fn the_lane_is_passed_to_budget_allow() {
     let root = logging_root("lane");
-    assert_eq!(may_spend(&FleetBridge::with_root(&root), "claude"), Ok(true));
+    assert_eq!(
+        may_spend(&FleetBridge::with_root(&root), "claude"),
+        Ok(true)
+    );
     let calls = std::fs::read_to_string(root.join("calls.log")).unwrap();
     assert!(calls.contains("budget allow claude"), "{calls}");
 }
