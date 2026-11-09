@@ -136,6 +136,8 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - REP-2 moves (`moves`): present.
 - REP-2 work tree (`WorkTree`): present.
 - REP-1 view (`ReportEntry`, `ReportList`, `Reports`): present.
+- REP-3 filter (`filter`, `Filter`): present.
+- REP-3 filter bar (`FilterBar`, `Reports`): present.
 
 ### budget
 `crates/core/src/budget.rs`, `app/src/views/Budget.tsx` · BUD-1 to BUD-4 · planned. Rows from `fleet budget --json`, edits to `config.json` with a ledger row (U5: landed through review), refresh on a timer, Claude's pool as reading plus a labelled estimate from local session logs.

@@ -3,7 +3,7 @@
 
 use crate::clock::UnixSeconds;
 use crate::joblog::{JobRow, NOT_RECORDED};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -305,7 +305,7 @@ pub fn moves(rows: &[JobRow]) -> Vec<Move> {
         .collect()
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Filter {
     pub project: Option<String>,
     pub outcome: Option<String>,
@@ -314,7 +314,14 @@ pub struct Filter {
 
 /// REP-3: the reports that match every set field of the filter, order kept.
 pub fn filter<'a>(reports: &'a [Report], f: &Filter) -> Vec<&'a Report> {
-    todo!("REP-3")
+    reports
+        .iter()
+        .filter(|r| {
+            (f.project.is_none() || r.project == f.project)
+                && (f.outcome.is_none() || f.outcome.as_ref() == Some(&r.outcome))
+                && (f.pool.is_none() || r.cost.pool == f.pool)
+        })
+        .collect()
 }
 
 /// The reports with a time first, newest first; the reports without one after them, in the
