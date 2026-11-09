@@ -100,6 +100,19 @@ pub trait ChatTransport: Send + Sync {
         url: &str,
         body: &serde_json::Value,
     ) -> Result<serde_json::Value, CoreError>;
+
+    /// As `post_json`, with extra request headers (the key-in-header services need this). A
+    /// transport that does not override it refuses the call.
+    fn post_json_headers(
+        &self,
+        _url: &str,
+        _headers: &[(String, String)],
+        _body: &serde_json::Value,
+    ) -> Result<serde_json::Value, CoreError> {
+        Err(CoreError::Refused(
+            "this transport sends no headers".to_string(),
+        ))
+    }
 }
 
 /// The real transport: a JSON POST over HTTP with the same client the github module uses.
@@ -132,6 +145,23 @@ impl ChatTransport for HttpChatTransport {
     ) -> Result<serde_json::Value, CoreError> {
         self.agent
             .post(url)
+            .send_json(body.clone())
+            .map_err(|e| CoreError::Refused(format!("POST {url}: {e}")))?
+            .into_json()
+            .map_err(|e| CoreError::Refused(format!("POST {url}: {e}")))
+    }
+
+    fn post_json_headers(
+        &self,
+        url: &str,
+        headers: &[(String, String)],
+        body: &serde_json::Value,
+    ) -> Result<serde_json::Value, CoreError> {
+        let mut request = self.agent.post(url);
+        for (name, value) in headers {
+            request = request.set(name, value);
+        }
+        request
             .send_json(body.clone())
             .map_err(|e| CoreError::Refused(format!("POST {url}: {e}")))?
             .into_json()
@@ -185,6 +215,165 @@ impl ChatAdapter for QwenAdapter {
             tokens_in: reply["usage"]["prompt_tokens"].as_u64(),
             tokens_out: reply["usage"]["completion_tokens"].as_u64(),
             cost_usd: Some(0.0),
+            handoff,
+        })
+    }
+}
+
+/// FD-11: DeepSeek through its OpenAI-style endpoint, with the user's key in the
+/// `Authorization` header. DeepSeek is a paid pool: the cost is the token counts priced at the
+/// USD-per-million rates given to `new`, and None when the reply carries no token counts.
+pub struct DeepSeekAdapter {
+    base_url: String,
+    api_key: String,
+    usd_per_million_in: f64,
+    usd_per_million_out: f64,
+    transport: Box<dyn ChatTransport>,
+}
+
+impl DeepSeekAdapter {
+    /// An adapter posting to `<base_url>/chat/completions` (a trailing `/` is dropped).
+    pub fn new(
+        base_url: &str,
+        api_key: &str,
+        usd_per_million_in: f64,
+        usd_per_million_out: f64,
+        transport: Box<dyn ChatTransport>,
+    ) -> Self {
+        Self {
+            base_url: base_url.trim_end_matches('/').to_string(),
+            api_key: api_key.to_string(),
+            usd_per_million_in,
+            usd_per_million_out,
+            transport,
+        }
+    }
+
+    /// The text with the api key taken out, so no error reason carries it.
+    fn redact(&self, text: &str) -> String {
+        if self.api_key.is_empty() {
+            text.to_string()
+        } else {
+            text.replace(&self.api_key, "[key]")
+        }
+    }
+}
+
+impl ChatAdapter for DeepSeekAdapter {
+    fn service(&self) -> &'static str {
+        "deepseek"
+    }
+
+    fn send(&self, model: &str, system: &str, turns: &[Turn]) -> Result<Answer, CoreError> {
+        let mut messages = vec![serde_json::json!({"role": "system", "content": system})];
+        for turn in turns {
+            messages.push(serde_json::json!({"role": turn.role, "content": turn.text}));
+        }
+        let body = serde_json::json!({"model": model, "messages": messages});
+        let url = format!("{}/chat/completions", self.base_url);
+        let headers = [(
+            "Authorization".to_string(),
+            format!("Bearer {}", self.api_key),
+        )];
+        let reply = self
+            .transport
+            .post_json_headers(&url, &headers, &body)
+            .map_err(|e| match e {
+                CoreError::Refused(why) => CoreError::Refused(self.redact(&why)),
+                other => CoreError::Refused(self.redact(&other.to_string())),
+            })?;
+        let Some(content) = reply["choices"][0]["message"]["content"].as_str() else {
+            return Err(CoreError::Refused(format!(
+                "deepseek: no reply content from {url}"
+            )));
+        };
+        let (text, handoff) = split_handoff(content);
+        let tokens_in = reply["usage"]["prompt_tokens"].as_u64();
+        let tokens_out = reply["usage"]["completion_tokens"].as_u64();
+        let cost_usd = match (tokens_in, tokens_out) {
+            (Some(input), Some(output)) => Some(
+                input as f64 / 1e6 * self.usd_per_million_in
+                    + output as f64 / 1e6 * self.usd_per_million_out,
+            ),
+            _ => None,
+        };
+        Ok(Answer {
+            text,
+            service: self.service().to_string(),
+            model: model.to_string(),
+            tokens_in,
+            tokens_out,
+            cost_usd,
+            handoff,
+        })
+    }
+}
+
+/// FD-11: ChatGPT through its OpenAI-style endpoint, with the user's key in the `Authorization`
+/// header. ChatGPT is a quota that resets, not a pool priced per token, so the cost is None
+/// ("not recorded"), never 0.0.
+pub struct ChatGptAdapter {
+    base_url: String,
+    api_key: String,
+    transport: Box<dyn ChatTransport>,
+}
+
+impl ChatGptAdapter {
+    /// An adapter posting to `<base_url>/v1/chat/completions` (a trailing `/` is dropped).
+    pub fn new(base_url: &str, api_key: &str, transport: Box<dyn ChatTransport>) -> Self {
+        Self {
+            base_url: base_url.trim_end_matches('/').to_string(),
+            api_key: api_key.to_string(),
+            transport,
+        }
+    }
+
+    /// The text with the api key taken out, so no error reason carries it.
+    fn redact(&self, text: &str) -> String {
+        if self.api_key.is_empty() {
+            text.to_string()
+        } else {
+            text.replace(&self.api_key, "[key]")
+        }
+    }
+}
+
+impl ChatAdapter for ChatGptAdapter {
+    fn service(&self) -> &'static str {
+        "chatgpt"
+    }
+
+    fn send(&self, model: &str, system: &str, turns: &[Turn]) -> Result<Answer, CoreError> {
+        let mut messages = vec![serde_json::json!({"role": "system", "content": system})];
+        for turn in turns {
+            messages.push(serde_json::json!({"role": turn.role, "content": turn.text}));
+        }
+        let body = serde_json::json!({"model": model, "messages": messages});
+        let url = format!("{}/v1/chat/completions", self.base_url);
+        let headers = [(
+            "Authorization".to_string(),
+            format!("Bearer {}", self.api_key),
+        )];
+        let reply = self
+            .transport
+            .post_json_headers(&url, &headers, &body)
+            .map_err(|e| match e {
+                CoreError::Refused(why) => CoreError::Refused(self.redact(&why)),
+                other => CoreError::Refused(self.redact(&other.to_string())),
+            })?;
+        let Some(content) = reply["choices"][0]["message"]["content"].as_str() else {
+            return Err(CoreError::Refused(format!(
+                "chatgpt: no reply content from {url}"
+            )));
+        };
+        let (text, handoff) = split_handoff(content);
+        Ok(Answer {
+            text,
+            service: self.service().to_string(),
+            model: model.to_string(),
+            tokens_in: reply["usage"]["prompt_tokens"].as_u64(),
+            tokens_out: reply["usage"]["completion_tokens"].as_u64(),
+            cost_usd: None,
             handoff,
         })
     }

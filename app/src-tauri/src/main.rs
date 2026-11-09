@@ -47,12 +47,16 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             commands::views,
             commands::settings_missing,
+            commands::settings_get,
+            commands::settings_save,
             commands::fleet_errors,
             commands::budget_rows,
             commands::budget_refresh,
             commands::budget_save_edit,
             commands::waiting,
             commands::sky,
+            commands::chat_rate,
+            commands::loadout,
             commands::chat_implicit,
         ])
         .run(tauri::generate_context!())
