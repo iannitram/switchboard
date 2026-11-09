@@ -164,6 +164,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 `crates/core/src/frontdoor/` · FD-1 to FD-13 · planned. `router` (the four steps, the `first` list against budget, the learned pick), `labeller` (rules, then a small model, U8), `adapters` (one per service; none for the Claude subscription), `packet` (summary, last 6 turns, links; the summary check), `sticky` (what moves a chat; implicit signals), `thread` (one JSON Lines file per thread). Face: `app/src/views/Chat.tsx` with BroCrew's composer and messages ported; the "Open in Claude" button (FD-8).
 - FD-6 packet (`build`): present.
 - FD-7 summary check (`missing_from_summary`, `checked_summary`): present.
+- FD-2 rules labeller (`by_rules`, `label`): present.
 - FD-13 thread store: present.
 - FD-11 adapter interface (`split_handoff`, `log_row`): present.
 - FD-9 rating and implicit rows (`rating_row`, `implicit_row`): present.
