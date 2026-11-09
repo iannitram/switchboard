@@ -165,6 +165,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - FD-9 rating and implicit rows (`rating_row`, `implicit_row`): present.
 - FD-10 separate move field (`with_move`, `thumbs_down_counts`): present.
 - FD-8 Open in Claude (`as_prompt`): present.
+- FD-4 learned pick (`sample_size`, `learned_pick`): present.
 
 ### autopilot
 `crates/core/src/autopilot/` · AUTO-1 to AUTO-9 · planned. `may_spend` (budget allow), `review` (R25's ladder as a state machine), `driver` (script loops, Qwen plus one), `instructions` (untracked instruction files; drift of copies), `classify` (by the card, through `fleet errors classify`), `weekly` (Sunday 6am, ROADMAP changes).
