@@ -5,7 +5,10 @@
 
 use super::review::{first_rung, review_job, Rung};
 use crate::fleet::{FleetBridge, FLEET_ROOT_ENV};
+use crate::github::merge::merge_passed;
+use crate::github::poll::Poller;
 use crate::github::snapshot::{RepoSnapshot, SnapshotStore};
+use crate::rules::{Caller, Face, Role};
 use crate::CoreError;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -255,6 +258,51 @@ fn run_passes(
         started.extend(review_pass(snaps, machine, state, starter)?);
     }
     Ok(started)
+}
+
+/// One repo's merges in a `merge_pass`: the repo, the PRs merged, the issues they close.
+pub type Merged = (String, Vec<u64>, Vec<u64>);
+
+/// The caller of the autopilot's merges: the app, as the Project Manager (R32).
+pub fn autopilot_caller() -> Caller {
+    Caller {
+        face: Face::Gui,
+        role: Some(Role::ProjectManager),
+        in_job_worktree: false,
+        confirmed_in_app: false,
+    }
+}
+
+/// AUTO-4: merge every passed PR of each repo that has a clone beside the pipeline repo, in the
+/// order given. Archived repos and repos with no clone are skipped. A refused merge returns at once.
+pub fn merge_pass(
+    snaps: &[RepoSnapshot],
+    poller: &Poller<'_>,
+    pipeline_root: &Path,
+    dev_root: &Path,
+) -> Result<Vec<Merged>, CoreError> {
+    let caller = autopilot_caller();
+    let mut out = Vec::new();
+    for snap in snaps.iter().filter(|s| !s.archived) {
+        let name = snap.repo.rsplit('/').next().unwrap_or(&snap.repo);
+        let clone = dev_root.join(name);
+        if !clone.is_dir() {
+            continue;
+        }
+        let (merged, closed) = merge_passed(
+            &caller,
+            &clone,
+            pipeline_root,
+            &snap.repo,
+            &snap.pulls,
+            &|_| false,
+            poller,
+        )?;
+        if !merged.is_empty() {
+            out.push((snap.repo.clone(), merged, closed));
+        }
+    }
+    Ok(out)
 }
 
 /// Write `job` and its brief for `fleet run`: the brief to `<jobs_dir>/<id>.md`, the job to
