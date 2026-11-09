@@ -7,6 +7,7 @@
 use std::time::Duration;
 use switchboard_core::budget::{RefreshTimer, REFRESH_EVERY_SECS};
 use switchboard_core::clock::SystemClock;
+use switchboard_core::github::live;
 use switchboard_core::CoreError;
 use tauri::{Emitter, Manager};
 
@@ -42,6 +43,31 @@ fn main() {
                     std::thread::sleep(TICK_EVERY);
                 }
             });
+            let poll = app.handle().clone();
+            std::thread::spawn(move || {
+                let mut transport = None;
+                loop {
+                    let state = poll.state::<commands::AppState>();
+                    if transport.is_none() {
+                        match commands::github_transport() {
+                            Ok(t) => transport = Some(t),
+                            Err(e) => eprintln!("github poll: {e}"),
+                        }
+                    }
+                    if let (Some(t), Ok(data)) = (&transport, poll.path().app_data_dir()) {
+                        let read = {
+                            let _held = state.github.lock().unwrap_or_else(|p| p.into_inner());
+                            live::tick(t, &data, &SystemClock)
+                        };
+                        let read = read.unwrap_or_else(|e| {
+                            eprintln!("github poll: {e}");
+                            Vec::new()
+                        });
+                        let _ = poll.emit(live::SNAPSHOT_EVENT, read);
+                    }
+                    std::thread::sleep(Duration::from_secs(live::TICK_EVERY_SECS));
+                }
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -58,6 +84,7 @@ fn main() {
             commands::chat_rate,
             commands::loadout,
             commands::chat_implicit,
+            commands::refresh_all,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Switchboard");

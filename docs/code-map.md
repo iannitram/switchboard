@@ -89,7 +89,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 `crates/core/src/github/transport.rs` · present. `GitHubTransport`: GraphQL and REST GET with `If-None-Match`; `Recorded` replays answers in tests. Token from `platform::TokenStore`.
 
 ### github-poll
-`crates/core/src/github/poll.rs` · GH-1, GH-2, GH-3 · planned. The 10-minute poll (`Poller::tick`), the Refresh button (`refresh_all`), the ETag skip (`unchanged`), refresh-on-action (`after_write`).
+`crates/core/src/github/poll.rs`, `crates/core/src/github/live.rs` · GH-1, GH-2, GH-3 · present. The 10-minute poll (`Poller::tick`), the Refresh button (`refresh_all`), the ETag skip (`unchanged`), refresh-on-action (`after_write`). In the app (`live.rs`, #240): the repos it reads (the priority copy's order, then the rest of the snapshot store, by name); a thread in `app/src-tauri/src/main.rs` that ticks every minute and sends `snapshot`; the `refresh_all` command the Sky's Refresh button calls.
 
 ### github-queue
 `crates/core/src/github/queue.rs` · GH-4 · present. `send(fleet, creates)`: one `fleet ghq add-batch` then `fleet ghq run`; a stop on a rate limit leaves items queued, never a failure.
