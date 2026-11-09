@@ -53,7 +53,43 @@ pub trait BudgetGate {
 /// The `claude` subscription is never called: under budget it is a `ClaudeHandoff`; braked, the
 /// kind's next service; none left, `Wait`.
 pub fn pick_for_kind(index: &AbilitiesIndex, kind: &str, budget: &dyn BudgetGate) -> Pick {
-    todo!("FD-3")
+    let Some(ability) = index.get(kind).filter(|a| a.request) else {
+        return Pick::Wait(format!("unknown request kind {kind}"));
+    };
+
+    // Pass one: the resetting or free services; pass two: the paid pools, as overflow.
+    for paid in [false, true] {
+        for service in &ability.first {
+            if is_paid(service) != paid || !budget.allows(service) {
+                continue;
+            }
+            if service == CLAUDE_SUBSCRIPTION {
+                return Pick::ClaudeHandoff(format!(
+                    "{kind}: the Claude subscription is under budget; open it in Claude"
+                ));
+            }
+            if let Some(model) = ability.models.get(service) {
+                return Pick::Service {
+                    service: service.clone(),
+                    model: model.clone(),
+                };
+            }
+        }
+    }
+
+    if ability.first.iter().any(|s| s == CLAUDE_SUBSCRIPTION) {
+        Pick::Wait("waiting for Claude's budget".to_string())
+    } else {
+        Pick::Wait(format!("waiting for budget: {kind}"))
+    }
+}
+
+/// The Claude subscription lane: never called by the core, only handed off (FD-8).
+const CLAUDE_SUBSCRIPTION: &str = "claude";
+
+/// The paid pools FD-3 uses only as overflow.
+fn is_paid(service: &str) -> bool {
+    matches!(service, "deepseek" | "claudeapi")
 }
 
 /// FD-4: the sample size: N starts at 6 and rises by 1 for every 20 rows the kind has logged,

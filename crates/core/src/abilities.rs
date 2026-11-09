@@ -21,6 +21,8 @@ pub struct Ability {
     /// The services to try, in order (`first`); empty when the entry has none.
     pub first: Vec<String>,
     pub writes: bool,
+    /// `ok.<service>.model` for each service whose `ok` entry is an object with a string `model`; a service whose entry is null, false or a bare string has no row.
+    pub models: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -88,7 +90,30 @@ fn parse_entry(id: &str, entry: &Value) -> Result<Ability, CoreError> {
         request: field_bool(entry, id, "request", false)?,
         first: field_strs(entry, id, "first")?,
         writes: field_bool(entry, id, "writes", false)?,
+        models: field_models(entry, id)?,
     })
+}
+
+/// `ok`: one row per service whose entry is an object holding a string `model`. Any other
+/// entry (null, a bool, a bare string, an object without a string `model`) has no row; an
+/// absent or null `ok` gives no rows, and an `ok` that is not an object is a parse error.
+fn field_models(
+    entry: &Map<String, Value>,
+    id: &str,
+) -> Result<std::collections::BTreeMap<String, String>, CoreError> {
+    let mut models = std::collections::BTreeMap::new();
+    match entry.get("ok") {
+        None | Some(Value::Null) => {}
+        Some(Value::Object(ok)) => {
+            for (service, value) in ok {
+                if let Some(model) = value.get("model").and_then(Value::as_str) {
+                    models.insert(service.clone(), model.to_string());
+                }
+            }
+        }
+        Some(_) => return Err(bad(id, "`ok` is not an object")),
+    }
+    Ok(models)
 }
 
 fn field_str(entry: &Map<String, Value>, id: &str, key: &str) -> Result<String, CoreError> {

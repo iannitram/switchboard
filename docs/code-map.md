@@ -166,6 +166,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - FD-7 summary check (`missing_from_summary`, `checked_summary`): present.
 - FD-2 rules labeller (`by_rules`, `label`): present.
 - FD-13 thread store: present.
+- FD-3 pick for a kind (`pick_for_kind`): present.
 - FD-11 adapter interface (`split_handoff`, `log_row`): present.
 - FD-9 rating and implicit rows (`rating_row`, `implicit_row`): present.
 - FD-9 implicit signal log (`implicit_from_name`, `log_implicit`, `chat_implicit`): present.
