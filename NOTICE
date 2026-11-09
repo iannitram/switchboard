@@ -10,3 +10,4 @@ Files lifted from BroCrew, each with its notice and a line saying what was chang
 - app/src/brocrew/message-links.ts
 - app/src/brocrew/message-paths.ts
 - app/src/brocrew/ReportEntry.tsx
+- app/src/brocrew/WaitingItem.tsx

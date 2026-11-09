@@ -130,6 +130,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 
 - WAIT-1 snapshot items (`from_snapshots`): present.
 - WAIT-1 CalDAV items (`caldav_items`, `from_caldav`): present.
+- WAIT-1 view (`WaitingItem`, `WaitingList`, `Waiting`): present.
 - WAIT-2 tick a CalDAV task (`tick_caldav`): present.
 - WAIT-3 carry between reads (`carry`): present.
 - WAIT-1 local items and the merge (`LocalItems`, `merge`): present.
@@ -162,6 +163,8 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - BAK-1 JSON of issues, PRs, comments, labels, milestones (`write_json`): present.
 - BAK-1 git bundle (`bundle`): present.
 - BAK-1 releases.json (`write_release_list`, `RELEASE_FILE_LIMIT`): present.
+- BAK-1 wiki mirror (`copy_wiki`): present.
+- BAK-1 back up one repo or all (`backup_repo`, `backup_all`, `BackupOutcome`; the Sky's back up buttons): present.
 
 ### frontdoor
 `crates/core/src/frontdoor/` · FD-1 to FD-13 · planned. `router` (the four steps, the `first` list against budget, the learned pick), `labeller` (rules, then a small model, U8), `adapters` (one per service; none for the Claude subscription), `packet` (summary, last 6 turns, links; the summary check), `sticky` (what moves a chat; implicit signals), `thread` (one JSON Lines file per thread). Face: `app/src/views/Chat.tsx` with BroCrew's composer and messages ported; the "Open in Claude" button (FD-8).
@@ -203,6 +206,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 
 ### cli
 `crates/cli/src/main.rs`, `cli.rs` · CLI-1, CLI-2, CLI-3 · planned. Text or `--json`; the same numbers as the GUI; role-flagged writes through `rules::guard`.
+- CLI-1 parse arguments, budget: present; sky, waiting, reports, star, loadout: planned.
 
 ### mcp
 `crates/cli/src/mcp.rs` · MCP-1 and MCP-2 present; MCP-3 planned. JSON-RPC over stdio; six read tools; role write tools; none inside a job worktree.
