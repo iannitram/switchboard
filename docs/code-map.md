@@ -145,6 +145,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - BUD-3 refresh (`refresh`, `RefreshTimer`, `budget_rows`, `budget_refresh`): present.
 - BUD-1 panel (`BudgetPanel`, `Budget`): present.
 - BUD-2 save (`save_edit`, `parse_reset`, `budget_save_edit`): present.
+- BUD-2 editor (`PoolEditor`): present.
 
 ### backup
 `crates/core/src/backup.rs` · BAK-1, BAK-2, BAK-3 · planned. A git bundle of every ref plus JSON of issues, PRs, comments, labels, milestones, releases (under 1 GB) and the wiki, with a manifest, in `<NextCloud backups>/github/<repo>/`; the overwrite guard; restore to a new private repo (issues through the create queue), over a live repo only after `rules::guard`.
