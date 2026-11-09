@@ -45,15 +45,34 @@ pub fn ticket_title(signature: &str) -> String {
     format!("IT: {signature}")
 }
 
+/// IT-2: the log's errors as the records `fleet errors file --records` reads: a JSON list of
+/// `{command, exit_code, stderr}`, oldest first, each as it was recorded.
+fn error_records(log: &FleetErrorLog) -> serde_json::Value {
+    serde_json::Value::Array(
+        log.errors
+            .iter()
+            .map(|e| {
+                serde_json::json!({
+                    "command": e.command,
+                    "exit_code": e.exit_code,
+                    "stderr": e.stderr,
+                })
+            })
+            .collect(),
+    )
+}
+
 /// IT-2: hand each recorded fleet error to `fleet errors file`; returns how many it handed over.
-/// `fleet errors file` owns the signature, the `IT: <signature>` title and the repeat comment,
-/// so the core runs it once and passes nothing the log does not hold. An empty log runs
+/// `fleet errors file --records -` owns the signature (built from each record's command and
+/// stderr), the `IT: <signature>` title and the repeat comment, so the core runs it once with
+/// the log's records on stdin and passes nothing the log does not hold. An empty log runs
 /// nothing. A failing run is its `FleetError`; the log is only read, never changed.
 pub fn file_error_tickets(bridge: &FleetBridge, log: &FleetErrorLog) -> Result<usize, FleetError> {
     if log.errors.is_empty() {
         return Ok(0);
     }
-    bridge.run_status(&["errors", "file"])?;
+    let records = error_records(log).to_string();
+    bridge.run_status_with_input(&["errors", "file", "--records", "-"], &records)?;
     Ok(log.errors.len())
 }
 
