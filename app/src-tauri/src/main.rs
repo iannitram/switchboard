@@ -55,6 +55,8 @@ fn main() {
             commands::budget_save_edit,
             commands::waiting,
             commands::sky,
+            commands::chat_rate,
+            commands::loadout,
             commands::chat_implicit,
         ])
         .run(tauri::generate_context!())

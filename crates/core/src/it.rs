@@ -3,10 +3,11 @@
 
 use crate::clock::UnixSeconds;
 use crate::fleet::{FleetBridge, FleetError, FleetErrorLog};
-use crate::platform::Probe;
+use crate::platform::{current_os, loadout_probes, Probe};
+use serde::Serialize;
 
 /// IT-1: what this machine can do right now.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Loadout {
     pub read_at: UnixSeconds,
     /// CLI name and whether it is signed in.
@@ -90,6 +91,37 @@ fn last_errors(out: &str) -> Vec<String> {
         .collect();
     let skip = lines.len().saturating_sub(RECENT_ERRORS);
     lines.into_iter().skip(skip).collect()
+}
+
+/// IT-W: the real probe runner. It runs the probe's program with its args, stdin and stderr
+/// closed, and keeps the exit code and stdout; a program that cannot start has no exit code.
+pub struct SystemProbeRunner;
+
+impl ProbeRunner for SystemProbeRunner {
+    fn run(&self, probe: &Probe) -> ProbeResult {
+        let output = std::process::Command::new(probe.program)
+            .args(probe.args)
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output();
+        match output {
+            Ok(out) => ProbeResult {
+                name: probe.name.to_string(),
+                exit_code: out.status.code(),
+                stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            },
+            Err(_) => ProbeResult {
+                name: probe.name.to_string(),
+                exit_code: None,
+                stdout: String::new(),
+            },
+        }
+    }
+}
+
+/// IT-W: this machine's loadout: `read_loadout` over this OS's probe list.
+pub fn read_this_machine(runner: &dyn ProbeRunner, now: UnixSeconds) -> Loadout {
+    read_loadout(loadout_probes(current_os()), runner, now)
 }
 
 /// FD-12: the `needs` tags the loadout can't meet (empty when it meets them all).
