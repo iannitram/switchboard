@@ -162,6 +162,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - FD-6 packet (`build`): present.
 - FD-7 summary check (`missing_from_summary`, `checked_summary`): present.
 - FD-11 adapter interface (`split_handoff`, `log_row`): present.
+- FD-9 rating and implicit rows (`rating_row`, `implicit_row`): present.
 
 ### autopilot
 `crates/core/src/autopilot/` · AUTO-1 to AUTO-9 · planned. `may_spend` (budget allow), `review` (R25's ladder as a state machine), `driver` (script loops, Qwen plus one), `instructions` (untracked instruction files; drift of copies), `classify` (by the card, through `fleet errors classify`), `weekly` (Sunday 6am, ROADMAP changes).
