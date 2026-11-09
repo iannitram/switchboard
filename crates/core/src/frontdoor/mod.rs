@@ -4,6 +4,7 @@
 pub mod adapters;
 pub mod labeller;
 pub mod packet;
+pub mod rating_log;
 pub mod router;
 pub mod sticky;
 pub mod thread;
