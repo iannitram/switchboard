@@ -31,8 +31,65 @@ pub trait ProbeRunner: Send + Sync {
 }
 
 /// IT-1: read the loadout from the platform's probe list.
+/// It runs each probe once and never fails: a CLI is listed as not signed in, a toolchain is
+/// left out, llama-swap gives no models and `fleet status` is not busy when its probe fails.
 pub fn read_loadout(probes: &[Probe], runner: &dyn ProbeRunner, now: UnixSeconds) -> Loadout {
-    todo!("IT-1")
+    let mut loadout = Loadout {
+        read_at: now,
+        ..Loadout::default()
+    };
+    for probe in probes {
+        let result = runner.run(probe);
+        let ok = result.exit_code == Some(0);
+        match probe.name {
+            name if LOADOUT_CLIS.contains(&name) => loadout.clis.push((name.to_string(), ok)),
+            name if ok && LOADOUT_TOOLCHAINS.contains(&name) => {
+                loadout.toolchains.push(name.to_string());
+            }
+            "llama-swap" if ok => loadout.models_loaded = running_models(&result.stdout),
+            "fleet status" => loadout.busy = ok && result.stdout.contains("DOING"),
+            "fleet errors" if ok => loadout.recent_errors = last_errors(&result.stdout),
+            _ => {}
+        }
+    }
+    loadout
+}
+
+/// IT-1: the CLI probes (signed in when the probe exits 0).
+const LOADOUT_CLIS: [&str; 4] = ["claude", "codex", "gemini", "gh"];
+
+/// IT-1: the toolchain probes (present when `--version` exits 0).
+const LOADOUT_TOOLCHAINS: [&str; 3] = ["cargo", "node", "python3"];
+
+/// IT-1: how many recent errors the loadout keeps.
+const RECENT_ERRORS: usize = 5;
+
+/// IT-1: the models in llama-swap's `{"running":[{"model":..}]}`; none when it is unreadable.
+fn running_models(body: &str) -> Vec<String> {
+    let Ok(answer) = serde_json::from_str::<serde_json::Value>(body) else {
+        return Vec::new();
+    };
+    answer["running"]
+        .as_array()
+        .map(|running| {
+            running
+                .iter()
+                .filter_map(|m| m["model"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// IT-1: the last `RECENT_ERRORS` non-blank lines, in the order they were printed.
+fn last_errors(out: &str) -> Vec<String> {
+    let lines: Vec<String> = out
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect();
+    let skip = lines.len().saturating_sub(RECENT_ERRORS);
+    lines.into_iter().skip(skip).collect()
 }
 
 /// FD-12: the `needs` tags the loadout can't meet (empty when it meets them all).
