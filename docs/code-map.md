@@ -145,6 +145,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - REP-1 view (`ReportEntry`, `ReportList`, `Reports`): present.
 - REP-3 filter (`filter`, `Filter`): present.
 - REP-3 filter bar (`FilterBar`, `Reports`): present.
+- REP-W command (`state_dir_from`, `read_done_cards`, `assemble`, `load`, `reports`): present.
 
 ### budget
 `crates/core/src/budget.rs`, `app/src/views/Budget.tsx` · BUD-1 to BUD-4 · planned. Rows from `fleet budget --json`, edits to `config.json` with a ledger row (U5: landed through review), refresh on a timer, Claude's pool as reading plus a labelled estimate from local session logs.
@@ -163,8 +164,10 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - BAK-1 JSON of issues, PRs, comments, labels, milestones (`write_json`): present.
 - BAK-1 git bundle (`bundle`): present.
 - BAK-1 releases.json (`write_release_list`, `RELEASE_FILE_LIMIT`): present.
+- BAK-1 release files under 1 GB (`fetch_release_files`, `write_releases`): present.
 - BAK-1 wiki mirror (`copy_wiki`): present.
 - BAK-1 back up one repo or all (`backup_repo`, `backup_all`, `BackupOutcome`; the Sky's back up buttons): present.
+- BAK-W back up from the app (`backup_run`: `folder`, `repos`, `record`, `run_one`, `run_all`; commands `backup_repo`, `backup_all`): present.
 
 ### frontdoor
 `crates/core/src/frontdoor/` · FD-1 to FD-13 · planned. `router` (the four steps, the `first` list against budget, the learned pick), `labeller` (rules, then a small model, U8), `adapters` (one per service; none for the Claude subscription), `packet` (summary, last 6 turns, links; the summary check), `sticky` (what moves a chat; implicit signals), `thread` (one JSON Lines file per thread). Face: `app/src/views/Chat.tsx` with BroCrew's composer and messages ported; the "Open in Claude" button (FD-8).
