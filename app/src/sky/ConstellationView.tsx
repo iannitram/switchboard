@@ -1,6 +1,7 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import type { Constellation, Star } from "./model";
 import { layoutConstellation, RINGS, VIEW } from "./geometry";
+import { highlightChain } from "./chain";
 
 // SKY-3: one constellation zoomed in. A cluster per feature on its milestone's ring, a star per
 // issue, a dim dark star for a feature with no issue, a line per `Blocked by #N`. The face holds
@@ -22,12 +23,17 @@ export function ConstellationView({
     return () => window.removeEventListener("keydown", onKey);
   }, [onBack]);
 
+  // SKY-7: the star under the mouse, and the set its chain lights.
+  const [focus, setFocus] = useState<number | null>(null);
+  const lit = focus === null ? null : highlightChain(c.edges, focus);
+
   const at = layoutConstellation(c);
 
   return (
     <section aria-label={`Constellation ${c.repo}`}>
       <button onClick={onBack}>Back to the sky</button>
       <h2>{c.repo}</h2>
+      {c.chain.length > 0 && <p data-testid="chain-count">Longest chain: {c.chain.length} stars</p>}
       <svg viewBox={`0 0 ${VIEW} ${VIEW}`} role="img" aria-label={c.repo}>
         <circle data-testid="ring" data-milestone="1.0" cx={VIEW / 2} cy={VIEW / 2} r={RINGS["1.0"]} fill="none" stroke="currentColor" strokeOpacity={0.3} />
         <circle data-testid="ring" data-milestone="After 1.0" cx={VIEW / 2} cy={VIEW / 2} r={RINGS["after-1.0"]} fill="none" stroke="currentColor" strokeOpacity={0.3} />
@@ -75,12 +81,16 @@ export function ConstellationView({
                       key={s.number}
                       data-testid="star"
                       data-number={s.number}
+                      data-highlight={lit?.has(s.number) ? "true" : undefined}
+                      data-chain={c.chain.includes(s.number) ? "true" : undefined}
                       cx={q.x}
                       cy={q.y}
                       r={10}
                       fill="currentColor"
                       role="button"
                       aria-label={`#${s.number} ${s.title}`}
+                      onMouseEnter={() => setFocus(s.number)}
+                      onMouseLeave={() => setFocus(null)}
                       onClick={() => onStar?.(s)}
                     />
                   );
