@@ -68,16 +68,24 @@ fn satellite_loop(handle: tauri::AppHandle, config_dir: std::path::PathBuf) {
 /// GitHub lock so no poll writes a snapshot while they read. Jobs go to
 /// `<data>/autopilot/jobs/`; clones are found beside the pipeline repo. A setting that is not
 /// set starts nothing; no machine name starts no review.
-fn autopilot_after_poll(handle: &tauri::AppHandle, data: &std::path::Path) {
+fn autopilot_after_poll(
+    handle: &tauri::AppHandle,
+    data: &std::path::Path,
+    transport: &dyn switchboard_core::github::transport::GitHubTransport,
+) {
     let state = handle.state::<commands::AppState>();
     let settings = match switchboard_core::settings::load(&state.settings_path) {
         Ok(settings) => settings,
         Err(e) => return eprintln!("autopilot: {e}"),
     };
-    let dev_root = match settings.pipeline_repo() {
-        Ok(repo) => repo.parent().unwrap_or(repo).to_path_buf(),
+    let pipeline_root = match settings.pipeline_repo() {
+        Ok(repo) => repo.to_path_buf(),
         Err(_) => return,
     };
+    let dev_root = pipeline_root
+        .parent()
+        .unwrap_or(&pipeline_root)
+        .to_path_buf();
     let fleet = match commands::bridge(&state.settings_path) {
         Ok(fleet) => fleet,
         Err(e) => return eprintln!("autopilot: {e}"),
@@ -92,11 +100,32 @@ fn autopilot_after_poll(handle: &tauri::AppHandle, data: &std::path::Path) {
     };
     let result = {
         let _held = state.github.lock().unwrap_or_else(|p| p.into_inner());
-        switchboard_core::autopilot::after_poll(&mut switchboard_core::autopilot::AfterPoll {
-            data_dir: data,
-            machine: machine.as_deref(),
-            starter: &mut starter,
-        })
+        let started =
+            switchboard_core::autopilot::after_poll(&mut switchboard_core::autopilot::AfterPoll {
+                data_dir: data,
+                machine: machine.as_deref(),
+                starter: &mut starter,
+            });
+        // AUTO-4: then merge what passed, each merge followed by a read of its repo (GH-3).
+        let store = switchboard_core::github::snapshot::SnapshotStore::new(data);
+        let poller = switchboard_core::github::poll::Poller {
+            transport,
+            store: &store,
+            clock: &SystemClock,
+            repos: Vec::new(),
+        };
+        let merged = store.load_all().and_then(|snaps| {
+            passes::merge_pass(&snaps, &poller, &pipeline_root, &starter.dev_root)
+        });
+        match merged {
+            Ok(merged) => {
+                for (repo, prs, issues) in merged {
+                    eprintln!("autopilot: merged {repo} {prs:?}, closing {issues:?}");
+                }
+            }
+            Err(e) => eprintln!("autopilot: merge: {e}"),
+        }
+        started
     };
     match result {
         Ok(ids) => {
@@ -161,7 +190,7 @@ fn main() {
                             Vec::new()
                         });
                         let _ = poll.emit(live::SNAPSHOT_EVENT, read);
-                        autopilot_after_poll(&poll, &data);
+                        autopilot_after_poll(&poll, &data, t);
                     }
                     std::thread::sleep(Duration::from_secs(live::TICK_EVERY_SECS));
                 }
