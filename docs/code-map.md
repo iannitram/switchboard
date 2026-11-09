@@ -194,6 +194,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - FD-1 router (`route`): present.
 - FD-1 Chat composer (`PromptComposer`): present.
 - FD-1 Chat messages (`UserMessage`, `AssistantMessage`): present.
+- FD-9 thumbs (Chat view): present.
 
 ### autopilot
 `crates/core/src/autopilot/` · AUTO-1 to AUTO-9 · planned. `may_spend` (budget allow), `review` (R25's ladder as a state machine), `driver` (script loops, Qwen plus one), `instructions` (untracked instruction files; drift of copies), `classify` (by the card, through `fleet errors classify`), `weekly` (Sunday 6am, ROADMAP changes).
@@ -202,6 +203,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - AUTO-6 loop driver (`may_start`, `next_command`): present.
 - AUTO-6 satellite loop (`tick`, `ChildRunner`, `classify_failed`; the app's satellite thread, switched on by `satellite.json`): present.
 - AUTO-5 weekly due check (`weekly_due`): present.
+- AUTO-5 weekly run (`weekly_run`, `drift_pass` in `passes.rs`; the drift clear and the backup after Sunday 6am, from the app's poll thread): present.
 - AUTO-7 place: present.
 - AUTO-3 review (`step`, `first_rung`): present.
 - AUTO-3 review job (`review_job`): present.
