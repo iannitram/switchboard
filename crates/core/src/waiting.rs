@@ -10,6 +10,11 @@ use crate::rules::GuardedAction;
 use crate::sky::priority::{self, PriorityCopy, STALE_DAYS};
 use crate::CoreError;
 
+/// The label that marks an issue or PR as needing me.
+pub const NEEDS_ME_LABEL: &str = "needs-ian";
+/// The label AUTO-3 puts on a PR when the review ladder reaches Fable.
+pub const AT_FABLE_LABEL: &str = "review:fable";
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Source {
     CalDavTask {
@@ -69,7 +74,80 @@ pub struct Item {
 /// WAIT-1: the items GitHub's snapshot gives (needing-me labels, review FAILs without a fix,
 /// ladders at Fable), for every repo.
 pub fn from_snapshots(snaps: &[RepoSnapshot]) -> Vec<Item> {
-    todo!("WAIT-1")
+    let mut items = Vec::new();
+    for snap in snaps {
+        if snap.archived {
+            continue;
+        }
+        let repo = &snap.repo;
+        for issue in &snap.issues {
+            if issue.state == "open" && issue.labels.iter().any(|l| l == NEEDS_ME_LABEL) {
+                items.push(Item {
+                    what: format!("{}#{}: {}", repo, issue.number, issue.title),
+                    why: "Labelled needs-ian.".to_string(),
+                    source: Source::NeedsMe {
+                        repo: repo.clone(),
+                        number: issue.number,
+                    },
+                    link: format!("https://github.com/{repo}/issues/{}", issue.number),
+                    action: "Open issue".to_string(),
+                    since: snap.read_at,
+                });
+            }
+        }
+        for pr in &snap.pulls {
+            if pr.state != "open" {
+                continue;
+            }
+            let what = format!("{}#{}: {}", repo, pr.number, pr.title);
+            let link = format!("https://github.com/{repo}/pull/{}", pr.number);
+            if pr.labels.iter().any(|l| l == NEEDS_ME_LABEL) {
+                items.push(Item {
+                    what: what.clone(),
+                    why: "Labelled needs-ian.".to_string(),
+                    source: Source::NeedsMe {
+                        repo: repo.clone(),
+                        number: pr.number,
+                    },
+                    link: link.clone(),
+                    action: "Open PR".to_string(),
+                    since: snap.read_at,
+                });
+            }
+            if pr
+                .verdicts
+                .last()
+                .is_some_and(|v| v.verdict == "FAIL" && v.needs_me)
+            {
+                items.push(Item {
+                    what: what.clone(),
+                    why: "The review posted a FAIL without a fix: a design question or a decision of mine."
+                        .to_string(),
+                    source: Source::ReviewFail {
+                        repo: repo.clone(),
+                        pr: pr.number,
+                    },
+                    link: link.clone(),
+                    action: "Open PR".to_string(),
+                    since: snap.read_at,
+                });
+            }
+            if pr.labels.iter().any(|l| l == AT_FABLE_LABEL) {
+                items.push(Item {
+                    what,
+                    why: "The review ladder reached Fable.".to_string(),
+                    source: Source::LadderAtFable {
+                        repo: repo.clone(),
+                        pr: pr.number,
+                    },
+                    link,
+                    action: "Open PR".to_string(),
+                    since: snap.read_at,
+                });
+            }
+        }
+    }
+    items
 }
 
 /// WAIT-1, FD-8: a Claude handoff not yet opened; `summary` is the chat's one-line ask.

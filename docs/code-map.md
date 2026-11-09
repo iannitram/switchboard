@@ -129,6 +129,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - WAIT-2 tick a CalDAV task (`tick_caldav`): present.
 - WAIT-3 carry between reads (`carry`): present.
 - WAIT-1 local items and the merge (`LocalItems`, `merge`): present.
+- WAIT-1 snapshot items (`from_snapshots`): present.
 
 ### reports
 `crates/core/src/reports.rs`, `app/src/views/Reports.tsx` · REP-1, REP-2, REP-3 · planned. The five-part fixed report from a done card or a thread, its work tree of moves, filters. The report entry is ported from BroCrew.
