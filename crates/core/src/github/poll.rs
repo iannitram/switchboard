@@ -346,6 +346,7 @@ impl Poller<'_> {
 
     /// GH-3: re-read one repo right after a write to it.
     pub fn after_write(&self, repo: &str) -> Result<(), CoreError> {
-        todo!("GH-3")
+        let etag = self.store.load(repo).ok().flatten().and_then(|s| s.etag);
+        self.read_one(repo, etag)
     }
 }

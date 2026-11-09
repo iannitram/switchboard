@@ -36,7 +36,40 @@ pub fn read_loadout(probes: &[Probe], runner: &dyn ProbeRunner, now: UnixSeconds
 
 /// FD-12: the `needs` tags the loadout can't meet (empty when it meets them all).
 pub fn unmet(needs: &[String], loadout: &Loadout) -> Vec<String> {
-    todo!("FD-12")
+    needs
+        .iter()
+        .filter(|need| !is_met(need, loadout))
+        .cloned()
+        .collect()
+}
+
+/// FD-12: a need is met by a signed-in CLI of that name, a loaded model, or a toolchain.
+fn is_met(need: &str, loadout: &Loadout) -> bool {
+    loadout
+        .clis
+        .iter()
+        .any(|(name, signed_in)| *signed_in && name == need)
+        || loadout.models_loaded.iter().any(|m| m == need)
+        || loadout.toolchains.iter().any(|t| t == need)
+}
+
+/// FD-12: the fleet job another machine pulls for a request this machine cannot serve.
+/// None when `unmet` is empty (nothing to hold).
+pub fn held_job(
+    kind: &str,
+    request: &str,
+    unmet: &[String],
+    this_machine: &str,
+) -> Option<serde_json::Value> {
+    if unmet.is_empty() {
+        return None;
+    }
+    Some(serde_json::json!({
+        "kind": kind,
+        "request": request,
+        "needs": unmet,
+        "never_on": [this_machine],
+    }))
 }
 
 /// IT-2: one ticket per error signature; the repeat comments on it (`fleet errors file`).

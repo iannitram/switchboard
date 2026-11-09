@@ -1,0 +1,7 @@
+[
+  {"number": 1, "title": "Open, two labels", "state": "open", "labels": [{"name": "bug"}, {"name": "size:easy"}]},
+  {"number": 2, "title": "Open, no labels", "state": "open", "labels": []},
+  {"number": 3, "title": "Closed by a merged PR", "state": "closed", "labels": [{"name": "bug"}]},
+  {"number": 4, "title": "Closed by hand", "state": "closed", "labels": [{"name": "feature:github"}, {"name": "size:easy"}]},
+  {"number": 5, "title": "Closed, its Fixes PR is still open", "state": "closed", "labels": []}
+]

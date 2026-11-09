@@ -92,10 +92,10 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 `crates/core/src/github/poll.rs` · GH-1, GH-2, GH-3 · planned. The 10-minute poll (`Poller::tick`), the Refresh button (`refresh_all`), the ETag skip (`unchanged`), refresh-on-action (`after_write`).
 
 ### github-queue
-`crates/core/src/github/queue.rs` · GH-4 · planned. `send(fleet, creates)`: one `fleet ghq add-batch` then `fleet ghq run`; a stop on a rate limit leaves items queued, never a failure.
+`crates/core/src/github/queue.rs` · GH-4 · present. `send(fleet, creates)`: one `fleet ghq add-batch` then `fleet ghq run`; a stop on a rate limit leaves items queued, never a failure.
 
 ### github-merge
-`crates/core/src/github/merge.rs` · GH-5 · planned. `eligibility(pr, carried_over)` (PASS on head or carried by patch-id, CI green on head) and `merge` through `merge_pr.py` (dry run, then push) after `rules::guard`. Never `gh pr merge` or the merge API.
+`crates/core/src/github/merge.rs` · GH-5 · present. `eligibility(pr, carried_over)` (PASS on head or carried by patch-id, CI green on head) and `merge` through `merge_pr.py` (dry run, then push) after `rules::guard`. Never `gh pr merge` or the merge API.
 
 ### sky-features
 `crates/core/src/sky/features.rs` · SKY-2, SKY-3, SKY-5 · present. Parses ROADMAP.md's `Updated:` and `features:` block (format in `ROADMAP.md`).
@@ -110,10 +110,10 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 `crates/core/src/sky/chain.rs` · SKY-3, SKY-7 · present. `Blocked by #N` edges and the longest open chain.
 
 ### sky-codemap
-`crates/core/src/sky/codemap.rs` · SKY-6 · planned. This file's `reuses:` block; a reuse of a Parked or archived repo is a warning.
+`crates/core/src/sky/codemap.rs` · SKY-6 · present. This file's `reuses:` block; a reuse of a Parked or archived repo is a warning.
 
 ### sky-priority
-`crates/core/src/sky/priority.rs` · SKY-9 · planned. The priority copy in fleet-state (U4's default), its age, stale after 7 days.
+`crates/core/src/sky/priority.rs` · SKY-9 · present. The priority copy in fleet-state (U4's default), its age, stale after 7 days.
 
 ### sky-labels
 `crates/core/src/sky/labels.rs` · SKY-10 · present. The `feature:` label for a design-pass issue and an automatic bug.
@@ -127,12 +127,17 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - WAIT-1 CalDAV items (`caldav_items`, `from_caldav`): present.
 - WAIT-2 tick a CalDAV task (`tick_caldav`): present.
 - WAIT-3 carry between reads (`carry`): present.
+- WAIT-1 local items and the merge (`LocalItems`, `merge`): present.
 
 ### reports
 `crates/core/src/reports.rs`, `app/src/views/Reports.tsx` · REP-1, REP-2, REP-3 · planned. The five-part fixed report from a done card or a thread, its work tree of moves, filters. The report entry is ported from BroCrew.
 
 - REP-1 reports (`from_card`, `from_thread`, `newest_first`, `parse_time`, `project_of`): present.
+- REP-2 moves (`moves`): present.
+- REP-2 work tree (`WorkTree`): present.
 - REP-1 view (`ReportEntry`, `ReportList`, `Reports`): present.
+- REP-3 filter (`filter`, `Filter`): present.
+- REP-3 filter bar (`FilterBar`, `Reports`): present.
 
 ### budget
 `crates/core/src/budget.rs`, `app/src/views/Budget.tsx` · BUD-1 to BUD-4 · planned. Rows from `fleet budget --json`, edits to `config.json` with a ledger row (U5: landed through review), refresh on a timer, Claude's pool as reading plus a labelled estimate from local session logs.
@@ -140,20 +145,33 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - BUD-1 rows (`rows_from_json`, `read`): present.
 - BUD-4 Claude pool (`claude_pool`, `session_log_paths`, `parse_utc`): present.
 - BUD-3 refresh (`refresh`, `RefreshTimer`, `budget_rows`, `budget_refresh`): present.
+- BUD-1 panel (`BudgetPanel`, `Budget`): present.
+- BUD-2 save (`save_edit`, `parse_reset`, `budget_save_edit`): present.
+- BUD-2 editor (`PoolEditor`): present.
 
 ### backup
 `crates/core/src/backup.rs` · BAK-1, BAK-2, BAK-3 · planned. A git bundle of every ref plus JSON of issues, PRs, comments, labels, milestones, releases (under 1 GB) and the wiki, with a manifest, in `<NextCloud backups>/github/<repo>/`; the overwrite guard; restore to a new private repo (issues through the create queue), over a live repo only after `rules::guard`.
 - BAK-2 overwrite guard (`refuse_reason`): present.
 
+- BAK-1 JSON of issues, PRs, comments, labels, milestones (`write_json`): present.
+
 ### frontdoor
 `crates/core/src/frontdoor/` · FD-1 to FD-13 · planned. `router` (the four steps, the `first` list against budget, the learned pick), `labeller` (rules, then a small model, U8), `adapters` (one per service; none for the Claude subscription), `packet` (summary, last 6 turns, links; the summary check), `sticky` (what moves a chat; implicit signals), `thread` (one JSON Lines file per thread). Face: `app/src/views/Chat.tsx` with BroCrew's composer and messages ported; the "Open in Claude" button (FD-8).
+- FD-6 packet (`build`): present.
 
 ### autopilot
 `crates/core/src/autopilot/` · AUTO-1 to AUTO-9 · planned. `may_spend` (budget allow), `review` (R25's ladder as a state machine), `driver` (script loops, Qwen plus one), `instructions` (untracked instruction files; drift of copies), `classify` (by the card, through `fleet errors classify`), `weekly` (Sunday 6am, ROADMAP changes).
+- AUTO-1 may_spend: present.
+- AUTO-9 classify (`classify`, `from_json`): present.
+- AUTO-5 weekly due check (`weekly_due`): present.
+- AUTO-3 review (`step`, `first_rung`): present.
+- AUTO-3 review job (`review_job`): present.
+- AUTO-8 drifted copies (`drifted`): present.
 
 ### it
 `crates/core/src/it.rs` · IT-1 to IT-4, FD-12 · planned. The loadout from the platform's probe list, unmet `needs`, IT tickets through `fleet errors file`, `it-triage` jobs with `never_on` (waits for U9), ladder-out bugs with the star's `feature:` label.
 - IT-3 triage job (`triage_job`): present.
+- FD-12 unmet needs (`unmet`, `held_job`): present.
 
 ### cli
 `crates/cli/src/main.rs`, `cli.rs` · CLI-1, CLI-2, CLI-3 · planned. Text or `--json`; the same numbers as the GUI; role-flagged writes through `rules::guard`.

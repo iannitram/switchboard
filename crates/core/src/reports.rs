@@ -3,7 +3,7 @@
 
 use crate::clock::UnixSeconds;
 use crate::joblog::{JobRow, NOT_RECORDED};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -182,6 +182,16 @@ pub fn from_card(card: &Value, rows: &[JobRow]) -> Report {
             .find(|r| r.id.as_deref() == Some(id.as_str()))
     });
 
+    // The rows of this job only; a card without an id has none.
+    let own: Vec<JobRow> = match &id {
+        Some(id) => rows
+            .iter()
+            .filter(|r| r.id.as_deref() == Some(id.as_str()))
+            .cloned()
+            .collect(),
+        None => Vec::new(),
+    };
+
     let checks: Vec<&Value> = card
         .get("checks")
         .and_then(Value::as_array)
@@ -237,7 +247,7 @@ pub fn from_card(card: &Value, rows: &[JobRow]) -> Report {
                 .and_then(Value::as_f64)
                 .or_else(|| row.and_then(|r| r.seconds)),
         },
-        moves: Vec::new(),
+        moves: moves(&own),
     }
 }
 
@@ -264,17 +274,38 @@ pub fn from_thread(thread_id: &str, rows: &[JobRow]) -> Report {
             usd: total(kept.iter().filter_map(|r| r.cost_usd).collect()),
             seconds: total(kept.iter().filter_map(|r| r.seconds).collect()),
         },
-        moves: Vec::new(),
+        moves: moves(rows),
     }
 }
 
 /// REP-2: the moves of a thread, oldest first: one per change of service or model between
-/// consecutive rows, with the `why` the later row carries.
+/// consecutive rows (implicit rows left out), with the earlier row's outcome as the `why`.
 pub fn moves(rows: &[JobRow]) -> Vec<Move> {
-    todo!("REP-2")
+    let kept: Vec<&JobRow> = rows.iter().filter(|r| !r.implicit).collect();
+    let place = |r: &JobRow| (r.lane.clone(), r.model.clone());
+    kept.windows(2)
+        .filter(|w| place(w[0]) != place(w[1]))
+        .map(|w| {
+            let (from, to) = (w[0], w[1]);
+            let or_not = |v: &Option<String>| v.clone().unwrap_or_else(|| NOT_RECORDED.to_string());
+            let why = match (&from.outcome, &from.failure_mode) {
+                (Some(o), Some(m)) => format!("{o} ({m})"),
+                (Some(o), None) => o.clone(),
+                (None, Some(m)) => m.clone(),
+                (None, None) => NOT_RECORDED.to_string(),
+            };
+            Move {
+                from_service: or_not(&from.lane),
+                from_model: or_not(&from.model),
+                to_service: or_not(&to.lane),
+                to_model: or_not(&to.model),
+                why,
+            }
+        })
+        .collect()
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Filter {
     pub project: Option<String>,
     pub outcome: Option<String>,
@@ -283,7 +314,14 @@ pub struct Filter {
 
 /// REP-3: the reports that match every set field of the filter, order kept.
 pub fn filter<'a>(reports: &'a [Report], f: &Filter) -> Vec<&'a Report> {
-    todo!("REP-3")
+    reports
+        .iter()
+        .filter(|r| {
+            (f.project.is_none() || r.project == f.project)
+                && (f.outcome.is_none() || f.outcome.as_ref() == Some(&r.outcome))
+                && (f.pool.is_none() || r.cost.pool == f.pool)
+        })
+        .collect()
 }
 
 /// The reports with a time first, newest first; the reports without one after them, in the

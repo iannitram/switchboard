@@ -1,12 +1,16 @@
 import { useEffect, useState } from "react";
 import { call, type CoreResult } from "../core";
 import { Empty } from "./Empty";
+import { ConstellationView } from "../sky/ConstellationView";
 import { SkyMap } from "../sky/SkyMap";
-import type { SkyModel } from "../sky/model";
+import { StarPanel } from "../sky/StarPanel";
+import type { SkyModel, Star } from "../sky/model";
 
 // The Sky view (feature:sky, SPEC.md). Asks the core for the sky and paints what it answers.
 export function Sky() {
   const [answer, setAnswer] = useState<CoreResult<SkyModel> | null>(null);
+  const [open, setOpen] = useState<string | null>(null);
+  const [picked, setPicked] = useState<Star | null>(null);
 
   useEffect(() => {
     let live = true;
@@ -35,9 +39,26 @@ export function Sky() {
     return <Empty view="Sky" />;
   }
 
+  const zoomed = open === null ? undefined : sky.constellations.find((c) => c.repo === open);
+  if (zoomed) {
+    return (
+      <>
+        <ConstellationView
+          c={zoomed}
+          onBack={() => {
+            setOpen(null);
+            setPicked(null);
+          }}
+          onStar={setPicked}
+        />
+        {picked && <StarPanel star={picked} onClose={() => setPicked(null)} />}
+      </>
+    );
+  }
+
   return (
     <section aria-label="Sky">
-      <SkyMap sky={sky} />
+      <SkyMap sky={sky} onOpen={setOpen} />
     </section>
   );
 }
