@@ -471,3 +471,108 @@ impl ChatAdapter for GeminiAdapter {
         })
     }
 }
+
+/// FD-11: the Claude API through the Messages endpoint, with the user's key in the `x-api-key`
+/// header. This is the paid `claudeapi` pool, not the Claude subscription (no adapter reaches
+/// that; it is FD-8). The cost is the token counts priced at the USD-per-million rates given to
+/// `new`, and None when the reply carries no token counts.
+pub struct ClaudeApiAdapter {
+    base_url: String,
+    api_key: String,
+    usd_per_million_in: f64,
+    usd_per_million_out: f64,
+    transport: Box<dyn ChatTransport>,
+}
+
+impl ClaudeApiAdapter {
+    /// An adapter posting to `<base_url>/v1/messages` (a trailing `/` is dropped).
+    pub fn new(
+        base_url: &str,
+        api_key: &str,
+        usd_per_million_in: f64,
+        usd_per_million_out: f64,
+        transport: Box<dyn ChatTransport>,
+    ) -> Self {
+        Self {
+            base_url: base_url.trim_end_matches('/').to_string(),
+            api_key: api_key.to_string(),
+            usd_per_million_in,
+            usd_per_million_out,
+            transport,
+        }
+    }
+
+    /// The text with the api key taken out, so no error reason carries it.
+    fn redact(&self, text: &str) -> String {
+        if self.api_key.is_empty() {
+            text.to_string()
+        } else {
+            text.replace(&self.api_key, "[key]")
+        }
+    }
+}
+
+impl ChatAdapter for ClaudeApiAdapter {
+    fn service(&self) -> &'static str {
+        "claudeapi"
+    }
+
+    fn send(&self, model: &str, system: &str, turns: &[Turn]) -> Result<Answer, CoreError> {
+        let messages: Vec<serde_json::Value> = turns
+            .iter()
+            .map(|turn| serde_json::json!({"role": turn.role, "content": turn.text}))
+            .collect();
+        let body = serde_json::json!({
+            "model": model,
+            "max_tokens": 4096,
+            "system": system,
+            "messages": messages,
+        });
+        let url = format!("{}/v1/messages", self.base_url);
+        let headers = [
+            ("x-api-key".to_string(), self.api_key.clone()),
+            ("anthropic-version".to_string(), "2023-06-01".to_string()),
+        ];
+        let reply = self
+            .transport
+            .post_json_headers(&url, &headers, &body)
+            .map_err(|e| match e {
+                CoreError::Refused(why) => CoreError::Refused(self.redact(&why)),
+                other => CoreError::Refused(self.redact(&other.to_string())),
+            })?;
+        let texts: Vec<&str> = reply["content"]
+            .as_array()
+            .map(|blocks| {
+                blocks
+                    .iter()
+                    .filter(|block| block["type"].as_str() == Some("text"))
+                    .filter_map(|block| block["text"].as_str())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if texts.is_empty() {
+            return Err(CoreError::Refused(format!(
+                "claudeapi: no reply text for model {model}"
+            )));
+        }
+        let (text, handoff) = split_handoff(&texts.concat());
+        let tokens_in = reply["usage"]["input_tokens"].as_u64();
+        let tokens_out = reply["usage"]["output_tokens"].as_u64();
+        let cost_usd = match (tokens_in, tokens_out) {
+            (Some(input), Some(output)) => Some(
+                input as f64 / 1e6 * self.usd_per_million_in
+                    + output as f64 / 1e6 * self.usd_per_million_out,
+            ),
+            _ => None,
+        };
+        Ok(Answer {
+            text,
+            service: self.service().to_string(),
+            model: model.to_string(),
+            tokens_in,
+            tokens_out,
+            cost_usd,
+            handoff,
+        })
+    }
+}
