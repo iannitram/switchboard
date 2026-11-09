@@ -172,12 +172,149 @@ pub fn learned_pick(kind: &str, rows: &[JobRow]) -> Option<(String, String)> {
         .map(|(_, model, lane)| (lane, model))
 }
 
-/// FD-1: route one message, stopping at the first step that matches.
+/// The agents whose names are built in and go to Claude (FD-8).
+const CLAUDE_AGENTS: [&str; 2] = ["harmon", "therapist"];
+
+/// Services from cheapest to dearest: the budget rule's `Small` takes the first one in budget.
+const CHEAPEST_FIRST: [&str; 5] = ["qwen", "gemini", "chatgpt", "deepseek", "claudeapi"];
+
+/// `text` as lowercase words joined by single spaces, padded so `contains` matches whole words.
+fn padded(text: &str) -> String {
+    let words: Vec<String> = text
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_lowercase)
+        .collect();
+    format!(" {} ", words.join(" "))
+}
+
+fn wait_claude() -> Pick {
+    Pick::Wait("waiting for Claude's budget".to_string())
+}
+
+/// A model any request kind gives `service`, in id order, optionally one whose name has `part`.
+fn any_model(index: &AbilitiesIndex, service: &str, part: &str) -> Option<String> {
+    index
+        .models
+        .values()
+        .filter_map(|rows| rows.get(service))
+        .find(|model| model.contains(part))
+        .cloned()
+}
+
+/// FD-1 step 1: the agent named in the message, if any (index agents first, then the built-in
+/// two), and where it goes.
+fn trigger(message: &str, index: &AbilitiesIndex, budget: &dyn BudgetGate) -> Option<Route> {
+    let haystack = padded(message);
+    let named = |name: &str| haystack.contains(&padded(name));
+    let (agent, pick) =
+        if let Some((name, (service, model))) = index.agents.iter().find(|(name, _)| named(name)) {
+            let pick = if budget.allows(service) {
+                Pick::Service {
+                    service: service.clone(),
+                    model: model.clone(),
+                }
+            } else {
+                Pick::Wait(format!("waiting for budget: {name}"))
+            };
+            (name.clone(), pick)
+        } else {
+            let name = CLAUDE_AGENTS.iter().find(|name| named(name))?;
+            let pick = if budget.allows(CLAUDE_SUBSCRIPTION) {
+                Pick::ClaudeHandoff(format!("{name}: a built-in agent goes to Claude"))
+            } else {
+                wait_claude()
+            };
+            (name.to_string(), pick)
+        };
+    Some(Route {
+        step: Step::Trigger { agent },
+        kind: None,
+        pick,
+    })
+}
+
+/// FD-1 step 2: an ask phrase in the message whose `needs` tag some request kind carries.
+fn explicit_ask(message: &str, index: &AbilitiesIndex, budget: &dyn BudgetGate) -> Option<Route> {
+    let haystack = padded(message);
+    index
+        .asks
+        .iter()
+        .filter(|(phrase, _)| haystack.contains(&padded(phrase)))
+        .find_map(|(_, need)| {
+            let kind = index.kinds_needing(need).first()?.id.clone();
+            Some(Route {
+                step: Step::ExplicitAsk { need: need.clone() },
+                pick: pick_for_kind(index, &kind, budget),
+                kind: Some(kind),
+            })
+        })
+}
+
+/// FD-1 step 4: the budget and complexity rule.
+fn budget_rule(index: &AbilitiesIndex, budget: &dyn BudgetGate, complexity: Complexity) -> Pick {
+    match complexity {
+        Complexity::Small => CHEAPEST_FIRST
+            .iter()
+            .filter(|service| budget.allows(service))
+            .find_map(|service| {
+                Some(Pick::Service {
+                    service: service.to_string(),
+                    model: any_model(index, service, "")?,
+                })
+            })
+            .unwrap_or_else(|| Pick::Wait("waiting for budget".to_string())),
+        Complexity::BigNoTools => {
+            if !budget.allows("claudeapi") {
+                Pick::Wait("waiting for budget: claudeapi".to_string())
+            } else {
+                match any_model(index, "claudeapi", "sonnet") {
+                    Some(model) => Pick::Service {
+                        service: "claudeapi".to_string(),
+                        model,
+                    },
+                    None => Pick::Wait("waiting for budget: no claudeapi Sonnet".to_string()),
+                }
+            }
+        }
+        Complexity::BigWithTools => {
+            if budget.allows(CLAUDE_SUBSCRIPTION) {
+                Pick::ClaudeHandoff("big with tools: the Claude subscription".to_string())
+            } else {
+                wait_claude()
+            }
+        }
+    }
+}
+
+/// FD-1: route one message, stopping at the first step that matches: a trigger word (an
+/// agent's name, whole word, case-insensitive), an explicit ask, the labeller (rules only, no
+/// small model), then the budget and complexity rule. A braked pool is skipped, never called,
+/// and the `Pick::Wait` says why. An ask whose `needs` tag no request kind carries falls
+/// through to the next step.
 pub fn route(
     message: &str,
     index: &AbilitiesIndex,
     budget: &dyn BudgetGate,
     complexity: Complexity,
 ) -> Route {
-    todo!("FD-1")
+    if let Some(route) = trigger(message, index, budget) {
+        return route;
+    }
+    if let Some(route) = explicit_ask(message, index, budget) {
+        return route;
+    }
+    let kinds: Vec<String> = index.request_kinds().iter().map(|a| a.id.clone()).collect();
+    if let Some(kind) = super::labeller::label(message, &kinds, None) {
+        return Route {
+            step: Step::Labeller { kind: kind.clone() },
+            pick: pick_for_kind(index, &kind, budget),
+            kind: Some(kind),
+        };
+    }
+    Route {
+        step: Step::BudgetRule,
+        kind: None,
+        pick: budget_rule(index, budget, complexity),
+    }
 }

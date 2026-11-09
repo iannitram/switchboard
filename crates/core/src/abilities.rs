@@ -148,6 +148,14 @@ pub struct AbilitiesIndex {
     /// has a map, empty when nothing gives it a row. Kept off `Ability` so an `Ability` literal
     /// still names only its six fields.
     pub models: BTreeMap<String, BTreeMap<String, String>>,
+    /// FD-1's trigger list: an agent's name (lowercase) and the (service, model) it is bound
+    /// to. Empty from JSON; `with_agent` adds one. Harmon and the Therapist are built into the
+    /// router (FD-8), not listed here.
+    pub agents: BTreeMap<String, (String, String)>,
+    /// FD-1's ask table: a lowercase phrase and the `needs` tag it asks for. `from_json_with`
+    /// seeds "search the web" -> `web` and "write code" -> `code`; `with_ask` adds one (a skill
+    /// name).
+    pub asks: Vec<(String, String)>,
 }
 
 impl AbilitiesIndex {
@@ -173,7 +181,15 @@ impl AbilitiesIndex {
             models.insert(id.clone(), parse_models(id, entry, fleet)?);
         }
         entries.sort_by(|a, b| a.id.cmp(&b.id));
-        Ok(AbilitiesIndex { entries, models })
+        Ok(AbilitiesIndex {
+            entries,
+            models,
+            agents: BTreeMap::new(),
+            asks: DEFAULT_ASKS
+                .iter()
+                .map(|(phrase, need)| (phrase.to_string(), need.to_string()))
+                .collect(),
+        })
     }
 
     /// Read it through the fleet bridge (`fleet actions --json`); a failed command is a
@@ -194,6 +210,21 @@ impl AbilitiesIndex {
         let value = fleet.run_json(&["actions"]).map_err(CoreError::Fleet)?;
         let models = FleetModels::read(fleet, machine).unwrap_or_default();
         Self::from_json_with(&value, &models)
+    }
+
+    /// FD-1: bind an agent's trigger word (case-insensitive) to a service and model.
+    pub fn with_agent(mut self, name: &str, service: &str, model: &str) -> AbilitiesIndex {
+        self.agents.insert(
+            name.to_lowercase(),
+            (service.to_string(), model.to_string()),
+        );
+        self
+    }
+
+    /// FD-1: add an explicit-ask phrase (a skill name, say) that asks for `need`.
+    pub fn with_ask(mut self, phrase: &str, need: &str) -> AbilitiesIndex {
+        self.asks.push((phrase.to_lowercase(), need.to_string()));
+        self
     }
 
     /// The request kinds only, in id order.
@@ -279,6 +310,9 @@ fn parse_models(
     }
     Ok(models)
 }
+
+/// FD-1's built-in ask phrases and the `needs` tag each asks for.
+const DEFAULT_ASKS: &[(&str, &str)] = &[("search the web", "web"), ("write code", "code")];
 
 /// The service whose `ok` flag `true` means "this machine's Qwen" (`FleetModels::qwen`).
 const QWEN: &str = "qwen";
