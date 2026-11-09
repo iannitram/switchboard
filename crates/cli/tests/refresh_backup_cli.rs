@@ -97,6 +97,9 @@ fn refresh_prints_one_line_per_repo_and_exits_0() {
     let kept = SnapshotStore::new(&data).load("a/same").unwrap().unwrap();
     assert_eq!(kept.read_at, NOW);
     assert_eq!(kept.etag.as_deref(), Some("\"new\""));
+    // The refreshed repo stored the new ETag, so the next refresh can skip it (GH-2).
+    let read = SnapshotStore::new(&data).load("a/moved").unwrap().unwrap();
+    assert_eq!(read.etag.as_deref(), Some("\"new\""));
 }
 
 #[test]

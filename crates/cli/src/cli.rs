@@ -402,15 +402,14 @@ fn refresh_one(
     clock: &dyn Clock,
     repo: &str,
 ) -> Result<&'static str, CoreError> {
-    if let Some(old) = store.load(repo).ok().flatten() {
-        let (same, etag) = poll::unchanged(transport, repo, old.etag.as_deref())?;
-        if same {
-            let mut snap = old;
-            snap.read_at = clock.now();
-            snap.etag = etag;
-            store.save(&snap)?;
-            return Ok("unchanged");
-        }
+    let old = store.load(repo).ok().flatten();
+    let old_etag = old.as_ref().and_then(|snap| snap.etag.as_deref());
+    let (same, etag) = poll::unchanged(transport, repo, old_etag)?;
+    if let (true, Some(mut snap)) = (same, old) {
+        snap.read_at = clock.now();
+        snap.etag = etag;
+        store.save(&snap)?;
+        return Ok("unchanged");
     }
     Poller {
         transport,
@@ -419,6 +418,11 @@ fn refresh_one(
         repos: vec![repo.to_string()],
     }
     .refresh_all()?;
+    // Keep the ETag this check answered, so the next refresh can say `unchanged` (GH-2).
+    if let Some(mut snap) = store.load(repo)? {
+        snap.etag = etag;
+        store.save(&snap)?;
+    }
     Ok("refreshed")
 }
 
