@@ -73,7 +73,7 @@ pub fn read(fleet: &FleetBridge) -> Result<Vec<PoolRow>, CoreError> {
 }
 
 /// BUD-2: the fields I can edit in place.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize)]
 pub struct PoolEdit {
     pub pool: String,
     pub plan: Option<String>,
@@ -83,11 +83,204 @@ pub struct PoolEdit {
     pub cost_usd: Option<f64>,
 }
 
-/// BUD-2: save the edit to the pipeline clone's `tools/fleet/config.json` and write a ledger
-/// row, then re-read `budget`. U5: the edit stays local; a Waiting on you item asks for it to be
-/// landed through review.
-pub fn save_edit(fleet: &FleetBridge, edit: &PoolEdit) -> Result<Vec<PoolRow>, CoreError> {
-    todo!("BUD-2")
+/// BUD-2: what a save gives back.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EditSaved {
+    /// `fleet budget --json` read again after the save.
+    pub rows: Vec<PoolRow>,
+    /// The line appended to the pool-edit ledger.
+    pub ledger_row: Value,
+    /// The Waiting on you item asking for the edit to be landed through review (U5).
+    pub waiting: crate::waiting::Item,
+}
+
+/// BUD-2: `<root>/tools/fleet/config.json` (next to `fleet.script()`).
+pub fn config_path(fleet: &FleetBridge) -> std::path::PathBuf {
+    fleet.script().with_file_name("config.json")
+}
+
+const WEEKDAYS: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+
+/// `1` to `12` from one or two ASCII digits.
+fn clock_hour(s: &str) -> Option<u32> {
+    if s.is_empty() || s.len() > 2 || !s.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let h: u32 = s.parse().ok()?;
+    (1..=12).contains(&h).then_some(h)
+}
+
+/// `00` to `59`, exactly two ASCII digits.
+fn clock_minute(s: &str) -> Option<u32> {
+    if s.len() != 2 || !s.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let m: u32 = s.parse().ok()?;
+    (m <= 59).then_some(m)
+}
+
+fn reset_parts(s: &str) -> Option<(String, u32, u32)> {
+    let parts: Vec<&str> = s.split_whitespace().collect();
+    let [day, time] = parts.as_slice() else {
+        return None;
+    };
+    let day = day.to_lowercase();
+    if !WEEKDAYS.contains(&day.as_str()) {
+        return None;
+    }
+    let time = time.to_lowercase();
+    let (clock, pm) = if let Some(clock) = time.strip_suffix("am") {
+        (clock, false)
+    } else {
+        (time.strip_suffix("pm")?, true)
+    };
+    let (hour, minute) = match clock.split_once(':') {
+        Some((h, m)) => (clock_hour(h)?, clock_minute(m)?),
+        None => (clock_hour(clock)?, 0),
+    };
+    let hour = match (hour, pm) {
+        (12, false) => 0,
+        (12, true) => 12,
+        (h, true) => h + 12,
+        (h, false) => h,
+    };
+    Some((day, hour, minute))
+}
+
+/// BUD-2: `Sun 6:00am` to (`sun`, 6, 0).
+pub fn parse_reset(s: &str) -> Result<(String, u32, u32), CoreError> {
+    reset_parts(s)
+        .ok_or_else(|| CoreError::Parse(format!("reset must look like Sun 6:00am, got {s}")))
+}
+
+/// A number 0 or more and finite, as config.json holds it.
+fn non_negative(value: Option<f64>, name: &str) -> Result<Option<Value>, CoreError> {
+    match value {
+        None => Ok(None),
+        Some(v) if v.is_finite() && v >= 0.0 => Ok(Some(Value::from(v))),
+        Some(_) => Err(CoreError::Parse(format!(
+            "{name} must be a number 0 or more"
+        ))),
+    }
+}
+
+/// BUD-2: save the edit to the pipeline clone's `tools/fleet/config.json` and append a row to
+/// `edits_log`, then re-read `budget`. U5: the edit stays local; the Waiting on you item it
+/// gives back asks for it to be landed through review. A refusal writes nothing.
+pub fn save_edit(
+    fleet: &FleetBridge,
+    edit: &PoolEdit,
+    edits_log: &std::path::Path,
+    clock: &dyn Clock,
+) -> Result<EditSaved, CoreError> {
+    let pool = edit.pool.as_str();
+    if edit.plan.is_none() && edit.cap.is_none() && edit.reset.is_none() && edit.cost_usd.is_none()
+    {
+        return Err(CoreError::Parse(format!(
+            "pool edit for {pool} changes nothing"
+        )));
+    }
+    let cap = non_negative(edit.cap, "cap")?;
+    let cost = non_negative(edit.cost_usd, "cost_usd")?;
+    let reset = edit.reset.as_deref().map(parse_reset).transpose()?;
+
+    let path = config_path(fleet);
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| CoreError::Io(format!("{}: {e}", path.display())))?;
+    let mut config: Value = serde_json::from_str(&text)
+        .map_err(|e| CoreError::Parse(format!("{}: {e}", path.display())))?;
+    let entry = config
+        .get_mut("pools")
+        .and_then(|pools| pools.get_mut(pool))
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| CoreError::Parse(format!("no pool {pool} in config.json")))?;
+
+    let mut set = serde_json::Map::new();
+    let mut before = serde_json::Map::new();
+    let mut put =
+        |entry: &mut serde_json::Map<String, Value>, key: &str, ledger_key: &str, v: Value| {
+            let old = entry.insert(key.to_string(), Value::clone(&v));
+            before.insert(ledger_key.to_string(), old.unwrap_or(Value::Null));
+            set.insert(ledger_key.to_string(), v);
+        };
+    if let Some(plan) = &edit.plan {
+        put(entry, "plan", "plan", Value::from(plan.as_str()));
+    }
+    if let Some(cap) = cap {
+        put(entry, "cap_usd", "cap_usd", cap);
+    }
+    if let Some(cost) = cost {
+        put(entry, "cost_usd", "cost_usd", cost);
+    }
+    if let Some((day, hour, minute)) = reset {
+        let pace = entry
+            .entry("pace")
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        if !pace.is_object() {
+            *pace = Value::Object(serde_json::Map::new());
+        }
+        let pace = pace.as_object_mut().expect("pace is an object");
+        put(
+            pace,
+            "reset_weekday",
+            "pace.reset_weekday",
+            Value::from(day),
+        );
+        put(pace, "reset_hour", "pace.reset_hour", Value::from(hour));
+        put(
+            pace,
+            "reset_minute",
+            "pace.reset_minute",
+            Value::from(minute),
+        );
+    }
+
+    let mut out = serde_json::to_string_pretty(&config)
+        .map_err(|e| CoreError::Parse(format!("{}: {e}", path.display())))?;
+    out.push('\n');
+    std::fs::write(&path, out).map_err(|e| CoreError::Io(format!("{}: {e}", path.display())))?;
+
+    let now = clock.now();
+    let ledger_row = serde_json::json!({
+        "at": now,
+        "pool": pool,
+        "set": Value::Object(set),
+        "before": Value::Object(before),
+    });
+    append_line(edits_log, &ledger_row)?;
+
+    let rows = read(fleet)?;
+    let waiting = crate::waiting::Item {
+        what: format!("Land the {pool} pool edit"),
+        why: "A pool edit is saved in the local pipeline clone only; it lands through review (U5)."
+            .to_string(),
+        source: crate::waiting::Source::PoolEdit {
+            pool: pool.to_string(),
+        },
+        link: path.display().to_string(),
+        action: "Open config.json".to_string(),
+        since: now,
+    };
+    Ok(EditSaved {
+        rows,
+        ledger_row,
+        waiting,
+    })
+}
+
+/// One JSON line appended to `log`, its parent folders created first.
+fn append_line(log: &std::path::Path, row: &Value) -> Result<(), CoreError> {
+    use std::io::Write;
+    let io = |e: std::io::Error| CoreError::Io(format!("{}: {e}", log.display()));
+    if let Some(dir) = log.parent() {
+        std::fs::create_dir_all(dir).map_err(io)?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log)
+        .map_err(io)?;
+    file.write_all(format!("{row}\n").as_bytes()).map_err(io)
 }
 
 /// BUD-3: refresh every pool that has a reader (`fleet budget --refresh --json`).

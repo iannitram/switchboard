@@ -51,6 +51,25 @@ pub enum RowSource {
     Chat,
 }
 
+/// `value` with every object's keys in sorted order, so two events that differ only in key
+/// order compare the same as text (serde_json keeps insertion order with `preserve_order`).
+fn key_sorted(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut entries: Vec<(&String, &Value)> = map.iter().collect();
+            entries.sort_by(|a, b| a.0.cmp(b.0));
+            Value::Object(
+                entries
+                    .into_iter()
+                    .map(|(k, v)| (k.clone(), key_sorted(v)))
+                    .collect(),
+            )
+        }
+        Value::Array(items) => Value::Array(items.iter().map(key_sorted).collect()),
+        other => other.clone(),
+    }
+}
+
 /// The text a view shows for a field a row lacks.
 pub const NOT_RECORDED: &str = "not recorded";
 
@@ -201,7 +220,7 @@ pub fn read_ledger(files: &[PathBuf]) -> Result<Vec<Value>, CoreError> {
             Err(e) => return Err(CoreError::Io(format!("{}: {e}", path.display()))),
         };
         for event in parse_jsonl(&text) {
-            if seen.insert(event.to_string()) {
+            if seen.insert(key_sorted(&event).to_string()) {
                 kept.push(event);
             }
         }

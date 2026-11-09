@@ -133,6 +133,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 `crates/core/src/reports.rs`, `app/src/views/Reports.tsx` · REP-1, REP-2, REP-3 · planned. The five-part fixed report from a done card or a thread, its work tree of moves, filters. The report entry is ported from BroCrew.
 
 - REP-1 reports (`from_card`, `from_thread`, `newest_first`, `parse_time`, `project_of`): present.
+- REP-2 moves (`moves`): present.
 - REP-1 view (`ReportEntry`, `ReportList`, `Reports`): present.
 
 ### budget
@@ -142,6 +143,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - BUD-4 Claude pool (`claude_pool`, `session_log_paths`, `parse_utc`): present.
 - BUD-3 refresh (`refresh`, `RefreshTimer`, `budget_rows`, `budget_refresh`): present.
 - BUD-1 panel (`BudgetPanel`, `Budget`): present.
+- BUD-2 save (`save_edit`, `parse_reset`, `budget_save_edit`): present.
 
 ### backup
 `crates/core/src/backup.rs` · BAK-1, BAK-2, BAK-3 · planned. A git bundle of every ref plus JSON of issues, PRs, comments, labels, milestones, releases (under 1 GB) and the wiki, with a manifest, in `<NextCloud backups>/github/<repo>/`; the overwrite guard; restore to a new private repo (issues through the create queue), over a live repo only after `rules::guard`.
@@ -153,6 +155,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 `crates/core/src/autopilot/` · AUTO-1 to AUTO-9 · planned. `may_spend` (budget allow), `review` (R25's ladder as a state machine), `driver` (script loops, Qwen plus one), `instructions` (untracked instruction files; drift of copies), `classify` (by the card, through `fleet errors classify`), `weekly` (Sunday 6am, ROADMAP changes).
 - AUTO-9 classify (`classify`, `from_json`): present.
 - AUTO-6 loop driver (`may_start`, `next_command`): present.
+- AUTO-5 weekly due check (`weekly_due`): present.
 
 ### it
 `crates/core/src/it.rs` · IT-1 to IT-4, FD-12 · planned. The loadout from the platform's probe list, unmet `needs`, IT tickets through `fleet errors file`, `it-triage` jobs with `never_on` (waits for U9), ladder-out bugs with the star's `feature:` label.
