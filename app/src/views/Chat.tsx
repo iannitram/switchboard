@@ -10,6 +10,8 @@ import { call, type CoreError, type CoreResult } from "../core";
 // The Chat view (feature:frontdoor, SPEC.md). FD-1: the composer sends a message to the core's
 // router and shows which step picked the model. FD-8: the "Open in Claude" button shows when the
 // route's pick is a Claude handoff; the press hands the packet's prompt to the shell's opener.
+// FD-9 (#179): each answer has a thumbs up and a thumbs down; a press calls `rate` (the core's
+// rating row) and marks the button; a failed call shows the banner and clears the mark.
 
 /** The router's pick, as the core names it (`Pick` in `router.rs`). */
 export type Pick =
@@ -72,17 +74,41 @@ export type ChatSend = (message: string) => Promise<CoreResult<ChatRoute>>;
 
 const defaultSend: ChatSend = (message) => call<ChatRoute>("chat_route", { message });
 
+/** Logs a thumbs press on the answer at `turnIndex` (FD-9). Default: the `chat_rate` command. */
+export type ChatRate = (turnIndex: number, rating: "up" | "down") => Promise<CoreResult<null>>;
+
+const defaultRate: ChatRate = (turnIndex, rating) => call<null>("chat_rate", { turnIndex, rating });
+
 export function Chat({
   handoff,
   send = defaultSend,
+  rate = defaultRate,
   resolveLink,
-}: { handoff?: ChatHandoffProps; send?: ChatSend; resolveLink?: ResolveMessageLink } = {}) {
+}: { handoff?: ChatHandoffProps; send?: ChatSend; rate?: ChatRate; resolveLink?: ResolveMessageLink } = {}) {
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [route, setRoute] = useState<ChatRoute | null>(null);
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [errors, setErrors] = useState<CoreError[]>([]);
+  // One rating per turn: the last press. Keyed by the turn's index in the thread.
+  const [ratings, setRatings] = useState<Record<number, "up" | "down">>({});
   const inFlight = useRef(false);
+
+  const onRate = async (turnIndex: number, rating: "up" | "down") => {
+    if (ratings[turnIndex] === rating) return;
+    setRatings((current) => ({ ...current, [turnIndex]: rating }));
+    const result = await rate(turnIndex, rating);
+    if ("error" in result) {
+      // The mark goes, unless a later press has already moved it.
+      setRatings((current) => {
+        if (current[turnIndex] !== rating) return current;
+        const next = { ...current };
+        delete next[turnIndex];
+        return next;
+      });
+      setErrors([result.error]);
+    }
+  };
 
   const onSend = async (message: string) => {
     if (inFlight.current) return;
@@ -135,6 +161,8 @@ export function Chat({
                 step={turn.step}
                 handoff={turn.handoff}
                 resolveLink={resolveLink}
+                rating={ratings[i]}
+                onRate={(rating) => void onRate(i, rating)}
               />
             ),
           )}
