@@ -211,7 +211,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 ### cli
 `crates/cli/src/main.rs`, `cli.rs` · CLI-1, CLI-2, CLI-3 · CLI-1 and CLI-3 present; CLI-2 planned. Text or `--json`; the same numbers as the GUI; role-flagged writes through `rules::guard`.
 - CLI-1 parse arguments, budget, sky, star, waiting, reports: present; loadout: planned. `sky` and `star` read the stored snapshot in the app data folder (`SWITCHBOARD_DATA`, else the desktop app's) and never call GitHub; `star` reads its running job from the job log when `SWITCHBOARD_PIPELINE` is set.
-- CLI-3 delete and restore refused to Waiting on you, `--role` merge through the guard, none inside a job worktree: present; the real merge and Waiting write are not wired yet (stubs, as in `mcp.rs`).
+- CLI-3 delete and restore refused to Waiting on you, `--role` merge through the guard and GH-5's merge (`CliWrites`), none inside a job worktree: present.
 
 ### mcp
 `crates/cli/src/mcp.rs` · MCP-1 and MCP-2 present; MCP-3 planned. JSON-RPC over stdio; six read tools; role write tools; none inside a job worktree.
