@@ -211,6 +211,7 @@ fn sky_feature(snap: &RepoSnapshot, feature: &Feature, jobs: &[StarJob]) -> SkyF
     let release = match feature.release {
         Release::V1 => "1.0",
         Release::After1 => "after-1.0",
+        Release::After2 => "after-2.0",
     };
     SkyFeature {
         id: feature.id.clone(),
