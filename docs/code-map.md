@@ -176,6 +176,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - IT-2 file error tickets (`file_error_tickets`): present.
 - IT-3 triage job (`triage_job`): present.
 - FD-12 unmet needs (`unmet`, `held_job`): present.
+- IT-4 ladder-out bug (`ladder_out_bug`): present.
 
 ### cli
 `crates/cli/src/main.rs`, `cli.rs` · CLI-1, CLI-2, CLI-3 · planned. Text or `--json`; the same numbers as the GUI; role-flagged writes through `rules::guard`.

@@ -78,6 +78,38 @@ pub fn ticket_title(signature: &str) -> String {
     format!("IT: {signature}")
 }
 
+/// IT-4: the `feature:` prefix of a star's label (SKY-10).
+const FEATURE_PREFIX: &str = "feature:";
+
+/// IT-4: the create-queue item for a bug in `repo` (a fleet-ghq issue item), labelled `bug` and the star's one `feature:` label.
+/// `star_labels` are the labels on the star's issue. None when the star has no `feature:` label or has more than one (an orphan star is drift, SKY-10): the caller says so, a bug is not filed without its feature.
+pub fn ladder_out_bug(
+    repo: &str,
+    star_issue: u64,
+    title: &str,
+    star_labels: &[String],
+) -> Option<serde_json::Value> {
+    let features: Vec<&str> = star_labels
+        .iter()
+        .filter_map(|label| label.strip_prefix(FEATURE_PREFIX))
+        .filter(|id| !id.is_empty())
+        .collect();
+    let [feature] = features.as_slice() else {
+        return None;
+    };
+    Some(serde_json::json!({
+        "kind": "issue",
+        "repo": repo,
+        "title": title,
+        "body": format!(
+            "The job for #{star_issue} ran out of ladder: a coding error (IT-4).\n\n\
+             Filed in this repo, not as an IT ticket. Feature: `{feature}`."
+        ),
+        "labels": ["bug", format!("feature:{feature}")],
+        "milestone": null,
+    }))
+}
+
 /// IT-2: the log's errors as the records `fleet errors file --records` reads: a JSON list of
 /// `{command, exit_code, stderr}`, oldest first, each as it was recorded.
 fn error_records(log: &FleetErrorLog) -> serde_json::Value {
