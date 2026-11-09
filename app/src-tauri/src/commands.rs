@@ -454,3 +454,23 @@ mod loadout_tests;
 #[cfg(test)]
 #[path = "commands_tests.rs"]
 mod tests;
+
+/// FD-1: route one Chat message (the composer's Send, #177) and say which step picked.
+#[tauri::command]
+pub fn chat_route(
+    state: tauri::State<'_, AppState>,
+    message: String,
+) -> Result<switchboard_core::frontdoor::chat::ChatRoute, FaceError> {
+    bridge(&state.settings_path)
+        .and_then(|fleet| {
+            switchboard_core::frontdoor::chat::route_message(
+                &fleet,
+                &message,
+                switchboard_core::frontdoor::chat::DEFAULT_COMPLEXITY,
+            )
+        })
+        .map_err(|e| {
+            record_fleet_error(&state, &e);
+            FaceError::new("chat_route", &e)
+        })
+}
