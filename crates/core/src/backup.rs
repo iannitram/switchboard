@@ -105,7 +105,10 @@ pub fn write_release_list(
             continue;
         };
         for asset in assets {
-            if asset["size"].as_u64().is_some_and(|s| s >= RELEASE_FILE_LIMIT) {
+            if asset["size"]
+                .as_u64()
+                .is_some_and(|s| s >= RELEASE_FILE_LIMIT)
+            {
                 asset["skipped"] = Value::from("over 1 GB");
             }
         }
