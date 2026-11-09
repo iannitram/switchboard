@@ -221,6 +221,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - IT-2 tickets for the app's fleet errors (`file_tickets`, `record_fleet_error`): present.
 - IT-3 triage job (`triage_job`): present.
 - FD-12 unmet needs (`unmet`, `held_job`): present.
+- FD-12 send a held request (`this_machine`, `send_held_job`, `chat_send_as_job`, `ChatHeld`): present.
 - IT-4 ladder-out bug (`ladder_out_bug`): present.
 - IT-W loadout command (`SystemProbeRunner`, `read_this_machine`, `loadout`): present.
 
