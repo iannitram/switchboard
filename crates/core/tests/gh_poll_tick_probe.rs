@@ -11,13 +11,19 @@ use switchboard_core::CoreError;
 
 const T0: i64 = 1_800_000_000;
 
+/// GH-2's ETag check (a due tick with a stored snapshot) answers 200 "changed" with the ETag it
+/// was sent, so the tick goes on to the GraphQL read this probe is about.
 struct Ok1;
 impl GitHubTransport for Ok1 {
     fn graphql(&self, _q: &str, _v: &Value) -> Result<Value, CoreError> {
         Ok(json!({ "repository": { "labels": { "nodes": [ { "name": "x" } ] } } }))
     }
-    fn rest_get(&self, _p: &str, _e: Option<&str>) -> Result<RestAnswer, CoreError> {
-        panic!("no REST in tick");
+    fn rest_get(&self, _p: &str, e: Option<&str>) -> Result<RestAnswer, CoreError> {
+        Ok(RestAnswer {
+            status: 200,
+            etag: e.map(String::from),
+            body: json!([]),
+        })
     }
 }
 
@@ -26,8 +32,14 @@ impl GitHubTransport for NoRepo {
     fn graphql(&self, _q: &str, _v: &Value) -> Result<Value, CoreError> {
         Ok(json!({ "repository": null }))
     }
+    /// GH-2's ETag check answers 200 "changed", so the tick still reaches the GraphQL answer
+    /// that does not parse. The Refresh button makes no REST check.
     fn rest_get(&self, _p: &str, _e: Option<&str>) -> Result<RestAnswer, CoreError> {
-        panic!("no REST");
+        Ok(RestAnswer {
+            status: 200,
+            etag: None,
+            body: json!([]),
+        })
     }
 }
 
@@ -79,6 +91,7 @@ fn a_due_tick_keeps_the_stored_etag() {
     let a = store.load("o/a").unwrap().unwrap();
     assert_eq!(a.etag.as_deref(), Some("\"e1\""));
     assert_eq!(a.read_at, T0);
+    assert_eq!(a.labels, vec!["x"], "the GraphQL read ran");
 }
 
 #[test]
