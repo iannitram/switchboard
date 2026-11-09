@@ -2,6 +2,8 @@
 //! guarded against a bad pass overwriting the last good copy (BAK-2), restorable to a new
 //! private repo (BAK-3).
 
+use crate::fleet::FleetBridge;
+use crate::github::queue::{self, Create};
 use crate::CoreError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -308,4 +310,236 @@ fn far(old: i128, by: i128) -> bool {
 /// The refusal in my words: "the new backup has 12 open issues, the last had 40".
 fn said(what: &str, new: i128, old: i128) -> String {
     format!("the new backup has {new} {what}, the last had {old}")
+}
+
+/// BAK-3: what `restore_history` put back.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RestoreReport {
+    /// Refs pushed to the new repo (every ref in the bundle but GitHub's own `refs/pull/`).
+    pub refs: u64,
+    /// Labels sent through the create queue.
+    pub labels: u64,
+    /// Milestones sent through the create queue.
+    pub milestones: u64,
+}
+
+/// BAK-3, first half: restore a backup (`repo.bundle`, `labels.json`, `milestones.json` and
+/// `manifest.json` in `backup_dir`) to the new private repo `new_repo` (`owner/name`).
+///
+/// GitHub is reached only through the fleet bridge. `fleet repo view <new_repo>` answers
+/// `{"exists": bool}`; a name that exists is refused (`CoreError::Refused`) before any write,
+/// since restoring over a live repo needs `rules::guard` first (#101). `fleet repo create
+/// <new_repo> --private --coordinator` answers `{"url": <push url>, "private": bool}`; an answer
+/// that is not private stops the restore before the push. Every ref in the bundle is pushed to
+/// that URL (but `refs/pull/`, which GitHub keeps for itself) and read back with `ls-remote`.
+/// The labels and milestones go through the create queue (`github::queue::send`), never `gh`.
+///
+/// Everything is read and checked first: a missing file, a malformed name, or a label or
+/// milestone count that differs from the manifest is an error with no write.
+pub fn restore_history(
+    fleet: &FleetBridge,
+    backup_dir: &Path,
+    new_repo: &str,
+) -> Result<RestoreReport, CoreError> {
+    if !is_owner_name(new_repo) {
+        return Err(CoreError::Refused(format!(
+            "the repo to restore to must be owner/name, got {new_repo:?}"
+        )));
+    }
+    let backup_dir = &std::path::absolute(backup_dir).map_err(|e| io_error(backup_dir, e))?;
+    let manifest: Manifest = read_json(&backup_dir.join("manifest.json"))?;
+    let labels = names_in(&backup_dir.join("labels.json"), "name")?;
+    let milestones = names_in(&backup_dir.join("milestones.json"), "title")?;
+    check_count("labels", labels.len(), manifest.labels)?;
+    check_count("milestones", milestones.len(), manifest.milestones)?;
+    let bundle = backup_dir.join("repo.bundle");
+    if !bundle.is_file() {
+        return Err(CoreError::Io(format!("{}: no bundle", bundle.display())));
+    }
+
+    let seen = fleet
+        .run_json(&["repo", "view", new_repo])
+        .map_err(CoreError::Fleet)?;
+    if seen["exists"].as_bool() != Some(false) {
+        return Err(CoreError::Refused(format!(
+            "{new_repo} already exists: a restore goes to a new private repo, and over a live \
+             repo only after I confirm in the app"
+        )));
+    }
+
+    let unpacked = scratch_dir()?;
+    let refs = unpack_refs(&bundle, &unpacked);
+    let refs = match refs {
+        Ok(refs) => refs,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&unpacked);
+            return Err(e);
+        }
+    };
+
+    let made = fleet
+        .run_json(&["repo", "create", new_repo, "--private", "--coordinator"])
+        .map_err(CoreError::Fleet);
+    let pushed = made.and_then(|made| push_to_new(&made, new_repo, &unpacked, &refs));
+    let _ = std::fs::remove_dir_all(&unpacked);
+    pushed?;
+
+    let creates: Vec<Create> = labels
+        .iter()
+        .map(|name| Create::Label {
+            repo: new_repo.to_string(),
+            name: name.clone(),
+        })
+        .chain(milestones.iter().map(|title| Create::Milestone {
+            repo: new_repo.to_string(),
+            title: title.clone(),
+        }))
+        .collect();
+    queue::send(fleet, &creates)?;
+
+    Ok(RestoreReport {
+        refs: refs.len() as u64,
+        labels: labels.len() as u64,
+        milestones: milestones.len() as u64,
+    })
+}
+
+/// `owner/name`: two non-empty parts of letters, digits, `-`, `_` and `.`.
+fn is_owner_name(repo: &str) -> bool {
+    let ok = |part: &str| {
+        !part.is_empty()
+            && part != "."
+            && part != ".."
+            && part
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    };
+    match repo.split_once('/') {
+        Some((owner, name)) => ok(owner) && ok(name),
+        None => false,
+    }
+}
+
+fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, CoreError> {
+    let text = std::fs::read_to_string(path).map_err(|e| io_error(path, e))?;
+    serde_json::from_str(&text).map_err(|e| CoreError::Parse(format!("{}: {e}", path.display())))
+}
+
+/// The `key` string of every item in the JSON array at `path`; an item without one is an error.
+fn names_in(path: &Path, key: &str) -> Result<Vec<String>, CoreError> {
+    let items: Vec<Value> = read_json(path)?;
+    items
+        .iter()
+        .map(|item| {
+            item[key].as_str().map(str::to_string).ok_or_else(|| {
+                CoreError::Parse(format!("{}: an item has no {key}", path.display()))
+            })
+        })
+        .collect()
+}
+
+fn check_count(what: &str, found: usize, manifest: u64) -> Result<(), CoreError> {
+    if found as u64 == manifest {
+        return Ok(());
+    }
+    Err(CoreError::Refused(format!(
+        "the backup holds {found} {what}, its manifest says {manifest}"
+    )))
+}
+
+/// A new, empty temp folder for the unpacked bundle.
+fn scratch_dir() -> Result<PathBuf, CoreError> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "switchboard-restore-{}-{nanos}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).map_err(|e| io_error(&dir, e))?;
+    Ok(dir)
+}
+
+/// Clone the bundle bare into `into/repo.git`; the refs it holds, sorted, but `refs/pull/`.
+fn unpack_refs(bundle: &Path, into: &Path) -> Result<Vec<String>, CoreError> {
+    let bare = into.join("repo.git");
+    git(
+        into,
+        &[
+            "clone",
+            "-q",
+            "--mirror",
+            &bundle.to_string_lossy(),
+            &bare.to_string_lossy(),
+        ],
+    )?;
+    let listed = git(&bare, &["for-each-ref", "--format=%(refname)"])?;
+    let refs = pushable(listed.lines());
+    if refs.is_empty() {
+        return Err(CoreError::Io(format!(
+            "{}: the bundle holds no refs to restore",
+            bundle.display()
+        )));
+    }
+    Ok(refs)
+}
+
+/// The ref names in `names`, sorted and deduplicated, without `HEAD` and GitHub's own
+/// `refs/pull/` (which a push may not write).
+fn pushable<'a>(names: impl Iterator<Item = &'a str>) -> Vec<String> {
+    let mut refs: Vec<String> = names
+        .map(str::trim)
+        .filter(|name| name.starts_with("refs/") && !name.starts_with("refs/pull/"))
+        .filter(|name| !name.ends_with("^{}"))
+        .map(str::to_string)
+        .collect();
+    refs.sort();
+    refs.dedup();
+    refs
+}
+
+/// Check the create answer, push every ref of the unpacked bundle to it, and read the refs back.
+fn push_to_new(
+    made: &Value,
+    new_repo: &str,
+    unpacked: &Path,
+    refs: &[String],
+) -> Result<(), CoreError> {
+    if made["private"].as_bool() != Some(true) {
+        return Err(CoreError::GitHub(format!(
+            "{new_repo} was not created private; nothing was pushed"
+        )));
+    }
+    let url = match made["url"].as_str() {
+        Some(url) if !url.is_empty() => url,
+        _ => {
+            return Err(CoreError::GitHub(format!(
+                "the create answer for {new_repo} has no url"
+            )))
+        }
+    };
+    let bare = unpacked.join("repo.git");
+    git(
+        &bare,
+        &[
+            "push",
+            "-q",
+            "--force",
+            url,
+            "refs/*:refs/*",
+            "^refs/pull/*",
+        ],
+    )?;
+    let remote = git(&bare, &["ls-remote", url])?;
+    let there = pushable(remote.lines().filter_map(|line| line.split('\t').nth(1)));
+    let missing: Vec<&String> = refs.iter().filter(|r| !there.contains(r)).collect();
+    if !missing.is_empty() {
+        return Err(CoreError::GitHub(format!(
+            "{new_repo} is missing {} of the bundle's refs after the push, first {}",
+            missing.len(),
+            missing[0]
+        )));
+    }
+    Ok(())
 }
