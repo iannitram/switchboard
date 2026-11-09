@@ -659,13 +659,18 @@ fn split_repo(repo: &str) -> Result<(&str, &str), CoreError> {
     }
 }
 
-/// A fresh temp folder for this backup's mirrors.
+/// A fresh temp folder for this backup's mirrors. The counter keeps two
+/// backups in one process apart when the clock does not tick between them
+/// (macOS reads it in whole microseconds).
 fn work_dir(owner: &str, name: &str) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let seq = NEXT.fetch_add(1, Ordering::Relaxed);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
     std::env::temp_dir().join(format!(
-        "switchboard-backup-{owner}-{name}-{}-{nanos}",
+        "switchboard-backup-{owner}-{name}-{}-{nanos}-{seq}",
         std::process::id()
     ))
 }
@@ -724,5 +729,12 @@ mod tests {
         for bad in ["name", "a/b/c", "../x", "a/..", "/x", "a/", "a b/c"] {
             assert!(split_repo(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn two_work_dirs_in_a_row_differ() {
+        let first = work_dir("owner", "demo");
+        let second = work_dir("owner", "demo");
+        assert_ne!(first, second);
     }
 }
