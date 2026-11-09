@@ -204,6 +204,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 `crates/core/src/it.rs` · IT-1 to IT-4, FD-12 · planned. The loadout from the platform's probe list, unmet `needs`, IT tickets through `fleet errors file`, `it-triage` jobs with `never_on` (waits for U9), ladder-out bugs with the star's `feature:` label.
 - IT-1 loadout read (`read_loadout`): present.
 - IT-2 file error tickets (`file_error_tickets`): present.
+- IT-2 tickets for the app's fleet errors (`file_tickets`, `record_fleet_error`): present.
 - IT-3 triage job (`triage_job`): present.
 - FD-12 unmet needs (`unmet`, `held_job`): present.
 - IT-4 ladder-out bug (`ladder_out_bug`): present.
