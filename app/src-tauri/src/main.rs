@@ -44,7 +44,9 @@ fn satellite_loop(handle: tauri::AppHandle, config_dir: std::path::PathBuf) {
                                     eprintln!("satellite {lane}: {id} {class:?}");
                                 }
                             }
-                            Err(e) => commands::record_fleet_error(&state, &e),
+                            Err(e) => {
+                                let _ = commands::record_fleet_error(&state, &e);
+                            }
                         }
                     }
                     let spend = |lane: &str| may_spend(&fleet, lane);
