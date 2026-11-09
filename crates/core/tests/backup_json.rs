@@ -69,6 +69,7 @@ fn manifest_counts_match_the_fixture() {
             open_issues: 2,
             pulls: 4,
             open_pulls: 1,
+            merged_pulls: 2,
             comments: 6,
             labels: 4,
             label_assignments: 5,

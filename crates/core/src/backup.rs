@@ -19,6 +19,9 @@ pub struct Manifest {
     pub open_issues: u64,
     pub pulls: u64,
     pub open_pulls: u64,
+    /// PRs merged, of `pulls`.
+    #[serde(default)]
+    pub merged_pulls: u64,
     pub comments: u64,
     pub labels: u64,
     /// Label assignments summed over every issue.
@@ -115,6 +118,11 @@ fn manifest_for(answers: &RecordedAnswers, taken_at: &str) -> Manifest {
             .iter()
             .filter(|p| has_state(p, "open"))
             .count() as u64,
+        merged_pulls: answers
+            .pulls
+            .iter()
+            .filter(|p| p["merged_at"].is_string())
+            .count() as u64,
         comments: answers.comments.len() as u64,
         labels: answers.labels.len() as u64,
         label_assignments: answers.issues.iter().map(label_count).sum(),
@@ -171,6 +179,63 @@ pub fn bundle(mirror: &Path, out_dir: &Path) -> Result<u64, CoreError> {
 /// "far" when it is more than 10% of the old backup's count, or more than 5 (SPEC.md BAK-2).
 /// Checked: fewer issues, PRs or labels in all; fewer open issues or open PRs; more closed
 /// issues no merged PR closed; fewer label assignments.
+///
+/// Merges are not losses (owner ruling on #92, 2026-11-08): open issues count only the ones
+/// lost to something other than a merged PR (issues newly closed and not added to
+/// `closed_without_pr` were closed by merged PRs), and open PRs count only the ones lost to
+/// something other than a merge (PRs newly merged left the open count by merging).
 pub fn refuse_reason(old: &Manifest, new: &Manifest) -> Option<String> {
-    todo!("BAK-2")
+    let all = |m: &Manifest| i128::from(m.issues) + i128::from(m.pulls) + i128::from(m.labels);
+    if far(all(old), all(old) - all(new)) {
+        return Some(said("issues, PRs and labels in all", all(new), all(old)));
+    }
+
+    let open = |m: &Manifest| i128::from(m.open_issues);
+    let closed = |m: &Manifest| i128::from(m.issues) - open(m);
+    let without_pr = |m: &Manifest| i128::from(m.closed_without_pr);
+    let closed_by_merged_pr =
+        ((closed(new) - closed(old)) - (without_pr(new) - without_pr(old))).max(0);
+    if far(open(old), open(old) - open(new) - closed_by_merged_pr) {
+        return Some(said("open issues", open(new), open(old)));
+    }
+
+    let open_pulls = |m: &Manifest| i128::from(m.open_pulls);
+    let merged = |m: &Manifest| i128::from(m.merged_pulls);
+    let newly_merged = (merged(new) - merged(old)).max(0);
+    if far(
+        open_pulls(old),
+        open_pulls(old) - open_pulls(new) - newly_merged,
+    ) {
+        return Some(said("open PRs", open_pulls(new), open_pulls(old)));
+    }
+
+    if far(without_pr(old), without_pr(new) - without_pr(old)) {
+        return Some(said(
+            "issues closed by no merged PR",
+            without_pr(new),
+            without_pr(old),
+        ));
+    }
+
+    let assignments = |m: &Manifest| i128::from(m.label_assignments);
+    if far(assignments(old), assignments(old) - assignments(new)) {
+        return Some(said(
+            "label assignments",
+            assignments(new),
+            assignments(old),
+        ));
+    }
+
+    None
+}
+
+/// A change of `by` (in the bad direction) on a count of `old` is far: more than 5, or more
+/// than 10% of `old`.
+fn far(old: i128, by: i128) -> bool {
+    by > 5 || by * 10 > old
+}
+
+/// The refusal in my words: "the new backup has 12 open issues, the last had 40".
+fn said(what: &str, new: i128, old: i128) -> String {
+    format!("the new backup has {new} {what}, the last had {old}")
 }

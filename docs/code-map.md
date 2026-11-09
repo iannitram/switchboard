@@ -152,6 +152,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 
 ### backup
 `crates/core/src/backup.rs` · BAK-1, BAK-2, BAK-3 · planned. A git bundle of every ref plus JSON of issues, PRs, comments, labels, milestones, releases (under 1 GB) and the wiki, with a manifest, in `<NextCloud backups>/github/<repo>/`; the overwrite guard; restore to a new private repo (issues through the create queue), over a live repo only after `rules::guard`.
+- BAK-2 overwrite guard (`refuse_reason`): present.
 
 - BAK-1 JSON of issues, PRs, comments, labels, milestones (`write_json`): present.
 
