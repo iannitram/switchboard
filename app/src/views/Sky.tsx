@@ -7,6 +7,91 @@ import { DriftList } from "../sky/DriftList";
 import { StarPanel } from "../sky/StarPanel";
 import type { SkyModel, Star } from "../sky/model";
 
+// BAK-1 as the `backup_repo` and `backup_all` commands answer it (#206).
+export type Manifest = {
+  repo: string;
+  taken_at: string;
+  refs: number;
+  issues: number;
+  open_issues: number;
+  pulls: number;
+  open_pulls: number;
+  merged_pulls: number;
+  comments: number;
+  labels: number;
+  label_assignments: number;
+  milestones: number;
+  releases: number;
+  closed_without_pr: number;
+  wiki: boolean;
+};
+export type BackupRow = {
+  repo: string;
+  outcome: "written" | "refused";
+  folder: string;
+  manifest: Manifest | null;
+  reason: string | null;
+};
+
+// "2026-11-09 4:45pm", in local time.
+function when(rfc3339: string): string {
+  const d = new Date(rfc3339);
+  if (Number.isNaN(d.getTime())) return rfc3339;
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const h = d.getHours() % 12 || 12;
+  const ampm = d.getHours() < 12 ? "am" : "pm";
+  const min = d.getMinutes() === 0 ? "" : `:${pad(d.getMinutes())}`;
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${h}${min}${ampm}`;
+}
+
+// One line per backup: what was written, or why the last backup was kept (BAK-2).
+export function backupLine(row: BackupRow): string {
+  const m = row.manifest;
+  if (row.outcome === "written" && m) {
+    const wiki = m.wiki ? ", the wiki" : "";
+    return `${row.repo} backed up at ${when(m.taken_at)}: ${m.refs} refs, ${m.issues} issues, ${m.pulls} PRs, ${m.comments} comments, ${m.labels} labels, ${m.milestones} milestones${wiki}, in ${row.folder}`;
+  }
+  return `${row.repo} not backed up, the last backup was kept: ${row.reason ?? "refused"}`;
+}
+
+// The back up buttons: one repo, or every repo in the sky. Shows each outcome, or the error.
+function BackUp({ repo }: { repo?: string }) {
+  const [busy, setBusy] = useState(false);
+  const [lines, setLines] = useState<string[]>([]);
+  const [failed, setFailed] = useState(false);
+
+  async function run() {
+    setBusy(true);
+    setLines([]);
+    const r = repo === undefined ? await call<BackupRow[]>("backup_all") : await call<BackupRow>("backup_repo", { repo });
+    setBusy(false);
+    if ("error" in r) {
+      setFailed(true);
+      setLines([`${r.error.command} failed: ${r.error.lines.join(" / ")}`]);
+      return;
+    }
+    setFailed(false);
+    const rows = Array.isArray(r.ok) ? r.ok : [r.ok];
+    setLines(rows.length ? rows.map(backupLine) : ["No repos to back up."]);
+  }
+
+  return (
+    <div data-testid="backup">
+      <button onClick={run} disabled={busy}>
+        {repo === undefined ? "Back up all" : "Back up"}
+      </button>
+      {busy && <p role="status">Backing up…</p>}
+      {lines.length > 0 && (
+        <ul role={failed ? "alert" : "status"} aria-label="Backup outcome">
+          {lines.map((line) => (
+            <li key={line}>{line}</li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 // The Sky view (feature:sky, SPEC.md). Asks the core for the sky and paints what it answers.
 export function Sky() {
   const [answer, setAnswer] = useState<CoreResult<SkyModel> | null>(null);
@@ -52,6 +137,7 @@ export function Sky() {
           }}
           onStar={setPicked}
         />
+        <BackUp key={zoomed.repo} repo={zoomed.repo} />
         {picked && <StarPanel star={picked} onClose={() => setPicked(null)} />}
       </>
     );
@@ -59,6 +145,7 @@ export function Sky() {
 
   return (
     <section aria-label="Sky">
+      <BackUp />
       <SkyMap sky={sky} onOpen={setOpen} />
       <DriftList drift={sky.constellations.flatMap((c) => c.drift.map((d) => ({ ...d, repo: c.repo })))} />
     </section>
