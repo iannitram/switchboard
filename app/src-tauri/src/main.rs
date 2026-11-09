@@ -23,7 +23,10 @@ const SATELLITE_EVERY: Duration = Duration::from_secs(60);
 /// AUTO-6: the satellite thread. Each pass reads `satellite.json` (off when missing), starts
 /// the lanes `driver::tick` allows, and classes the failed cards of loops that ended (AUTO-9).
 fn satellite_loop(handle: tauri::AppHandle, config_dir: std::path::PathBuf) {
-    let data = handle.path().app_data_dir().unwrap_or_else(|_| config_dir.clone());
+    let data = handle
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| config_dir.clone());
     let mut runner: Option<driver::ChildRunner> = None;
     loop {
         let state = handle.state::<commands::AppState>();

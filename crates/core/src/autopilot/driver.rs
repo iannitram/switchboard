@@ -65,7 +65,10 @@ pub fn may_start(running: &[String], lane: &str) -> bool {
 
 /// The arguments of a lane's loop: `run --next <lane>`.
 pub fn run_args(lane: &str) -> Vec<String> {
-    ["run", "--next", lane].iter().map(|s| s.to_string()).collect()
+    ["run", "--next", lane]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
 }
 
 /// The command a loop runs for a lane: `fleet run --next <lane>`.
