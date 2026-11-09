@@ -125,7 +125,11 @@ fn request_names_the_model_with_temperature_zero_and_lists_the_kinds() {
 #[test]
 fn combined_label_uses_the_small_model_when_rules_miss() {
     let (small, seen) = labeller(Ok(with_content("writing-editing")));
-    let got = label("Tell me a joke", &kinds(), Some(&small as &dyn SmallLabeller));
+    let got = label(
+        "Tell me a joke",
+        &kinds(),
+        Some(&small as &dyn SmallLabeller),
+    );
     assert_eq!(got, Some("writing-editing".to_string()));
     assert_eq!(seen.lock().unwrap().len(), 1);
 }
@@ -133,7 +137,11 @@ fn combined_label_uses_the_small_model_when_rules_miss() {
 #[test]
 fn combined_label_never_calls_the_small_model_when_a_rule_matches() {
     let (small, seen) = labeller(Ok(with_content("writing-editing")));
-    let got = label("What is a mutex?", &kinds(), Some(&small as &dyn SmallLabeller));
+    let got = label(
+        "What is a mutex?",
+        &kinds(),
+        Some(&small as &dyn SmallLabeller),
+    );
     assert_eq!(got, Some("quick-lookup".to_string()));
     assert!(seen.lock().unwrap().is_empty());
 }
