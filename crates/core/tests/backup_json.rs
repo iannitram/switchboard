@@ -69,6 +69,7 @@ fn manifest_counts_match_the_fixture() {
             open_issues: 2,
             pulls: 4,
             open_pulls: 1,
+            merged_pulls: 2,
             comments: 6,
             labels: 4,
             label_assignments: 5,
@@ -130,6 +131,29 @@ fn issue_closed_by_merged_pr_is_not_counted_and_closed_by_hand_is() {
     std::fs::remove_dir_all(&dir).ok();
 
     assert_eq!(manifest.closed_without_pr, 1);
+}
+
+#[test]
+fn merged_pulls_counts_pulls_with_merged_at_set() {
+    // Owner ruling on #92 (2026-11-08): the manifest carries the merged count BAK-2 discounts.
+    let dir = temp_dir("bak-merged");
+    let answers = RecordedAnswers {
+        pulls: vec![
+            json!({"number": 1, "state": "closed", "merged_at": "2026-11-01T10:00:00Z", "body": ""}),
+            json!({"number": 2, "state": "closed", "merged_at": null, "body": ""}),
+            json!({"number": 3, "state": "open", "merged_at": null, "body": ""}),
+            json!({"number": 4, "state": "closed", "merged_at": "2026-11-03T08:15:00Z", "body": ""}),
+            // No `merged_at` at all counts as not merged.
+            json!({"number": 5, "state": "closed", "body": ""}),
+        ],
+        ..empty()
+    };
+    let manifest = write_json(&answers, &dir, TAKEN_AT).unwrap();
+    std::fs::remove_dir_all(&dir).ok();
+
+    assert_eq!(manifest.merged_pulls, 2);
+    assert_eq!(manifest.pulls, 5);
+    assert_eq!(manifest.open_pulls, 1);
 }
 
 #[test]

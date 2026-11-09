@@ -118,6 +118,11 @@ fn manifest_for(answers: &RecordedAnswers, taken_at: &str) -> Manifest {
             .iter()
             .filter(|p| has_state(p, "open"))
             .count() as u64,
+        merged_pulls: answers
+            .pulls
+            .iter()
+            .filter(|p| p["merged_at"].is_string())
+            .count() as u64,
         comments: answers.comments.len() as u64,
         labels: answers.labels.len() as u64,
         label_assignments: answers.issues.iter().map(label_count).sum(),
