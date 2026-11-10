@@ -132,6 +132,11 @@ pub fn mcp_call(argv: &[String]) -> Option<Result<McpCall, String>> {
                 }
             },
             "--json" => {}
+            // The reports filters take a value, so a value such as `mcp` is not the command.
+            "--project" | "--outcome" | "--pool" => {
+                words.next();
+                error.get_or_insert_with(|| format!("{word} is for reports"));
+            }
             "--help" | "-h" => help = true,
             "--version" | "-V" => version = true,
             flag if flag.starts_with("--role=") => role = Some(&flag["--role=".len()..]),
@@ -216,6 +221,8 @@ fn main() -> ExitCode {
     };
     match mcp::serve(stdin.lock(), std::io::stdout().lock(), &core, role, &writes) {
         Ok(()) => ExitCode::SUCCESS,
+        // #334: the client closed its end of stdout; there is no one left to answer.
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("switchboard mcp: {e}");
             ExitCode::from(1)

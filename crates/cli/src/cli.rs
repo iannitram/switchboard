@@ -589,6 +589,13 @@ fn refresh_one(
 /// `--all`), the Back up buttons: the settings file in the app config folder and the real GitHub
 /// backup.
 fn run_backup(target: &[String]) -> ExitCode {
+    // A target that is not one repo or `--all` is the usage error before any folder or
+    // settings file is read.
+    if !matches!(target, [one] if one == "--all" || !one.starts_with("--")) {
+        eprintln!("switchboard: backup needs a repo or --all");
+        eprintln!("{USAGE}");
+        return ExitCode::from(2);
+    }
     let Some(data) = data_dir() else {
         eprintln!("switchboard: set {DATA_ENV} to the app data folder");
         return ExitCode::from(2);
@@ -1257,7 +1264,10 @@ fn sky_text(rows: &[SkyRow]) -> String {
         .map(|row| {
             format!(
                 "{}: brightness {:.2}, {} open, {} drifted\n",
-                row.repo, row.brightness, row.open, row.drifted
+                terminal_safe(&row.repo),
+                row.brightness,
+                row.open,
+                row.drifted
             )
         })
         .collect()
@@ -1503,11 +1513,8 @@ pub fn loadout_command(loadout: &Loadout, json: bool, out: &mut dyn Write) -> Ex
     } else {
         loadout_text(loadout)
     };
-    if let Err(e) = out.write_all(text.as_bytes()) {
-        eprintln!("switchboard loadout: {e}");
-        return ExitCode::from(1);
-    }
-    ExitCode::SUCCESS
+    // #334: a closed pipe is a quiet exit, like every other command.
+    emit_to(out, &text)
 }
 
 /// One line per probe, in the Loadout panel's order: `<name>  <state>`, then `  <detail>` when
@@ -1547,7 +1554,8 @@ pub fn loadout_text(loadout: &Loadout) -> String {
     } else {
         "no models loaded".to_string()
     };
-    let models = loadout.models_loaded.join(", ");
+    // #352: model names and fleet errors are outside text, escaped like the rest.
+    let models = terminal_safe(&loadout.models_loaded.join(", "));
     rows.push(row("llama-swap", &loaded_state, models));
     let status = if loadout.busy { "busy" } else { "idle" };
     rows.push(row("fleet status", status, String::new()));
@@ -1557,7 +1565,7 @@ pub fn loadout_text(loadout: &Loadout) -> String {
     } else {
         "none".to_string()
     };
-    let error_list = loadout.recent_errors.join("; ");
+    let error_list = terminal_safe(&loadout.recent_errors.join("; "));
     rows.push(row("fleet errors", &errors_state, error_list));
     rows.into_iter()
         .map(|(name, state, detail)| {

@@ -558,3 +558,128 @@ fn a_settings_file_that_does_not_parse_is_named() {
     assert_eq!(out.status.code(), Some(1));
     assert!(stderr(&out).contains("settings.json"), "{}", stderr(&out));
 }
+
+// Review of #389 (R25): the gaps the first pass left.
+
+#[test]
+fn terminal_safe_keeps_plain_non_ascii_text() {
+    let text = "Café naïve 日本語 🎉 Ünïcödé";
+    assert_eq!(cli::terminal_safe(text), text);
+    // C1 controls (CSI is U+009B) are escaped too.
+    assert_eq!(cli::terminal_safe("a\u{9b}31mb"), "a\\u{9b}31mb");
+}
+
+#[test]
+fn a_reports_filter_value_named_mcp_is_not_the_mcp_command() {
+    let words = |w: &[&str]| w.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    assert_eq!(app::mcp_call(&words(&["--pool", "mcp", "reports"])), None);
+    assert_eq!(
+        app::mcp_call(&words(&["--project", "mcp", "reports"])),
+        None
+    );
+    assert_eq!(
+        app::mcp_call(&words(&["--pool", "qwen", "mcp"])),
+        Some(Err("--pool is for reports".to_string()))
+    );
+    let dirs = Dirs::new("pool-mcp");
+    let out = dirs
+        .command(&["--pool", "mcp", "reports"])
+        .env("SWITCHBOARD_PIPELINE", fleet_stub())
+        .output()
+        .expect("run switchboard");
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+}
+
+#[test]
+fn loadout_is_a_quiet_exit_when_the_reader_closed_the_pipe() {
+    let loadout = switchboard_core::it::Loadout {
+        read_at: 0,
+        clis: vec![],
+        models_loaded: vec!["m".to_string()],
+        toolchains: vec![],
+        busy: false,
+        recent_errors: vec![],
+    };
+    let mut out = Failing(std::io::ErrorKind::BrokenPipe);
+    assert_eq!(
+        cli::loadout_command(&loadout, false, &mut out),
+        ExitCode::SUCCESS
+    );
+    let mut out = Failing(std::io::ErrorKind::StorageFull);
+    assert_eq!(
+        cli::loadout_command(&loadout, true, &mut out),
+        ExitCode::from(1)
+    );
+}
+
+#[test]
+fn loadout_text_escapes_model_names_and_fleet_errors() {
+    let loadout = switchboard_core::it::Loadout {
+        read_at: 0,
+        clis: vec![],
+        models_loaded: vec![EVIL.to_string()],
+        toolchains: vec![],
+        busy: false,
+        recent_errors: vec![EVIL.to_string()],
+    };
+    let text = cli::loadout_text(&loadout);
+    assert!(
+        !text.contains('\u{1b}') && !text.contains('\u{7}'),
+        "{text:?}"
+    );
+    assert!(
+        text.contains("evil\\u{1b}]0;PWNED\\u{7}\\nfake | line"),
+        "{text}"
+    );
+}
+
+#[test]
+fn sky_text_escapes_the_repo_name() {
+    let dirs = Dirs::new("evil-sky");
+    dirs.save("owner/al\u{1b}]0;X\u{7}pha", &[(1, "One", &[])]);
+    let out = dirs.run(&["sky"]);
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert!(
+        !out.stdout.iter().any(|b| *b == 0x1b || *b == 0x07),
+        "{:?}",
+        stdout(&out)
+    );
+    assert!(
+        stdout(&out).starts_with("owner/al\\u{1b}]0;X\\u{7}pha: "),
+        "{}",
+        stdout(&out)
+    );
+}
+
+#[test]
+fn mcp_is_a_quiet_exit_when_the_client_closed_stdout() {
+    let dirs = Dirs::new("mcp-pipe");
+    let mut child = dirs
+        .command(&["mcp"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn switchboard");
+    drop(child.stdout.take());
+    let mut stdin = child.stdin.take().expect("child stdin");
+    let _ = stdin.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n");
+    drop(stdin);
+    let out = child.wait_with_output().expect("wait");
+    no_panic(&out);
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert_eq!(stderr(&out), "");
+}
+
+#[test]
+fn backup_alone_is_the_usage_error_before_any_settings_file_is_read() {
+    let dirs = Dirs::new("backup-usage");
+    std::fs::write(dirs.config().join("settings.json"), "{not json").unwrap();
+    let out = dirs.run(&["backup"]);
+    assert_eq!(out.status.code(), Some(2), "stderr: {}", stderr(&out));
+    assert!(
+        stderr(&out).contains("usage: switchboard"),
+        "{}",
+        stderr(&out)
+    );
+}
