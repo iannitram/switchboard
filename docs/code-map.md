@@ -146,7 +146,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - REP-3 filter (`filter`, `Filter`): present.
 - REP-3 filter bar (`FilterBar`, `Reports`): present.
 - REP-W command (`state_dir_from`, `read_done_cards`, `assemble`, `load`, `reports`): present.
-- REP follow-up, chat threads in reports (`thread_rows` in `app/src-tauri/src/commands.rs`, read from the thread store in the app data folder): present.
+- REP follow-up, chat threads in reports (`reports::thread_rows`, read from the thread store in the app data folder; the CLI and MCP pass them too, #348): present. A done card or ledger file that is not UTF-8 is skipped, not fatal (#349).
 
 ### budget
 `crates/core/src/budget.rs`, `app/src/views/Budget.tsx` · BUD-1 to BUD-4 · planned. Rows from `fleet budget --json`, edits to `config.json` with a ledger row (U5: landed through review), refresh on a timer, Claude's pool as reading plus a labelled estimate from local session logs.
@@ -219,7 +219,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 
 ### it
 `crates/core/src/it.rs` · IT-1 to IT-4, FD-12 · planned. The loadout from the platform's probe list, unmet `needs`, IT tickets through `fleet errors file`, `it-triage` jobs with `never_on` (waits for U9), ladder-out bugs with the star's `feature:` label.
-- IT-1 loadout read (`read_loadout`): present.
+- IT-1 loadout read (`read_loadout`): present. `SystemProbeRunner` kills a probe after `PROBE_TIMEOUT` (5 s, `run_probe_within`); it then has no exit code (#339).
 - IT-1 loadout every minute (`read_and_store`, `latest_loadout`, `current_loadout`, the `loadout` event): present.
 - IT-2 file error tickets (`file_error_tickets`): present.
 - IT-2 tickets for the app's fleet errors (`file_tickets`, `record_fleet_error`): present.

@@ -910,7 +910,7 @@ fn reports(json: bool, filter: &Filter) -> ExitCode {
         Err(code) => return code,
     };
     let state = std::env::var_os(reports::FLEET_STATE_DIR_ENV);
-    let shown = match load_reports(&root, state.as_deref(), filter) {
+    let shown = match load_reports(&root, state.as_deref(), data_dir().as_deref(), filter) {
         Ok(shown) => shown,
         Err(e) => {
             eprintln!("switchboard reports: {e}");
@@ -930,9 +930,11 @@ fn reports(json: bool, filter: &Filter) -> ExitCode {
 fn load_reports(
     root: &Path,
     state: Option<&std::ffi::OsStr>,
+    data: Option<&Path>,
     filter: &Filter,
 ) -> Result<Vec<Report>, CoreError> {
-    reports::load(&FleetBridge::new(root), state, &[], Some(filter))
+    let threads = data.map(reports::thread_rows).unwrap_or_default();
+    reports::load(&FleetBridge::new(root), state, &threads, Some(filter))
 }
 
 /// One line per report, in list order: `<title> | <outcome> | <project>`; no reports gives the
@@ -1199,7 +1201,10 @@ pub(crate) fn star_answer(data: &Path, target: &str) -> Result<Value, Fail> {
 pub(crate) fn reports_answer() -> Result<Vec<Report>, Fail> {
     let root = pipeline_or_fail()?;
     let env = std::env::var_os(reports::FLEET_STATE_DIR_ENV);
-    reports::load(&FleetBridge::new(&root), env.as_deref(), &[], None)
+    let threads = data_dir()
+        .map(|d| reports::thread_rows(&d))
+        .unwrap_or_default();
+    reports::load(&FleetBridge::new(&root), env.as_deref(), &threads, None)
         .map_err(|e| fail(1, format!("switchboard reports: {e}")))
 }
 
@@ -1409,7 +1414,8 @@ mod load_reports_tests {
         )
         .unwrap();
 
-        let found = load_reports(&pipeline, Some(state.as_os_str()), &Filter::default()).unwrap();
+        let found =
+            load_reports(&pipeline, Some(state.as_os_str()), None, &Filter::default()).unwrap();
         let _ = std::fs::remove_dir_all(&base);
 
         assert_eq!(found.len(), 1);
