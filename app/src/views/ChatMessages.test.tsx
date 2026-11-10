@@ -28,7 +28,7 @@ function turns(container: HTMLElement): string[] {
 const ANSWER: ChatRoute = {
   step: "rules",
   kind: null,
-  pick: { Service: { service: "gemini", model: "flash" } },
+  pick: { to: "service", service: "gemini", model: "flash" },
   text: "Use the labeller's first list.",
   service: "gemini",
   model: "flash",
@@ -62,7 +62,7 @@ test("an answer with a handoff shows the reason it moved", async () => {
 });
 
 test("a line with an unknown service and model names only what it knows", async () => {
-  const send = vi.fn().mockResolvedValue({ ok: { step: "labeller", kind: null, pick: null, text: "ok" } });
+  const send = vi.fn().mockResolvedValue({ ok: { step: "labeller", kind: null, pick: { to: "service", service: "gemini", model: "flash" }, text: "ok" } });
   render(<Chat send={send} />);
   typeAndSend("hi");
   expect(await screen.findByText("picked by labeller")).toBeTruthy();

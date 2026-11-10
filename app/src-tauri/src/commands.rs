@@ -491,7 +491,7 @@ pub fn chat_route(
             switchboard_core::frontdoor::chat::route_message(
                 &fleet,
                 &message,
-                switchboard_core::frontdoor::chat::DEFAULT_COMPLEXITY,
+                switchboard_core::frontdoor::chat::estimate_complexity(&message),
             )
         })
         .map_err(|e| {

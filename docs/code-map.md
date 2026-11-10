@@ -188,7 +188,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - FD-10 separate move field (`with_move`, `thumbs_down_counts`): present.
 - FD-8 Open in Claude (`as_prompt`): present.
 - FD-4 learned pick (`sample_size`, `learned_pick`): present.
-- FD-1 chat_route command (`ChatRoute`, `FleetGate`, `route_message`, `chat_route`): present.
+- FD-1 chat_route command (`ChatRoute`, `FleetGate`, `route_message`, `estimate_complexity`, `chat_route`): present.
 - FD-5 sticky signals (`signals`): present.
 - FD-3 pick for a kind (`pick_for_kind`): present.
 - FD-1 router (`route`): present.
