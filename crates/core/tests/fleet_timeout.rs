@@ -77,3 +77,67 @@ fn a_program_that_cannot_start_says_so() {
     let text = CoreError::Fleet(bridge.run_json(&["budget"]).unwrap_err()).to_string();
     assert!(text.contains("could not start"), "{text}");
 }
+
+#[test]
+fn a_child_that_fills_both_pipes_and_exits_does_not_deadlock() {
+    // 4 MB each on stderr and stdout, far past a pipe's buffer; the call must finish and say
+    // the output is not JSON (the flood on stdout), not hang.
+    let bridge = FleetBridge::with_root(&stub())
+        .with_env("FLEET_STUB_FLOOD", "4000000")
+        .with_env("FLEET_STUB_FLOOD_STDOUT", "1")
+        .with_timeout(Duration::from_secs(60));
+    let started = Instant::now();
+    let err = bridge.run_json(&["budget"]).unwrap_err();
+    assert!(started.elapsed() < Duration::from_secs(30));
+    assert!(matches!(err.reason, FleetErrorReason::BadJson(_)), "{err}");
+}
+
+#[test]
+fn a_child_that_fills_the_pipe_and_then_hangs_is_killed_with_what_it_printed() {
+    let bridge = FleetBridge::with_root(&stub())
+        .with_env("FLEET_STUB_FLOOD", "4000000")
+        .with_env("FLEET_STUB_SLEEP", "30")
+        .with_timeout(Duration::from_millis(1500));
+    let started = Instant::now();
+    let err = bridge.run_json(&["budget"]).unwrap_err();
+    assert!(started.elapsed() < Duration::from_secs(10));
+    assert!(matches!(err.reason, FleetErrorReason::Timeout(_)), "{err}");
+    assert!(err.stderr.len() >= 3_000_000, "{}", err.stderr.len());
+}
+
+#[cfg(unix)]
+#[test]
+fn the_timeout_also_kills_what_the_child_started() {
+    let pidfile = std::env::temp_dir().join(format!("sb-fleet-grandchild-{}", std::process::id()));
+    let _ = std::fs::remove_file(&pidfile);
+    let bridge = FleetBridge::with_root(&stub())
+        .with_env("FLEET_STUB_GRANDCHILD", pidfile.to_str().unwrap())
+        .with_env("FLEET_STUB_SLEEP", "30")
+        .with_timeout(Duration::from_secs(2));
+    let err = bridge.run_json(&["budget"]).unwrap_err();
+    assert!(matches!(err.reason, FleetErrorReason::Timeout(_)), "{err}");
+    let pid = std::fs::read_to_string(&pidfile).unwrap();
+    let _ = std::fs::remove_file(&pidfile);
+    // Gone, or a zombie waiting for its parent (not running).
+    std::thread::sleep(Duration::from_millis(300));
+    let stat = std::fs::read_to_string(format!("/proc/{}/stat", pid.trim()));
+    let running = stat.map(|s| !s.contains(") Z")).unwrap_or(false);
+    assert!(!running, "the grandchild {pid} is still running");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_grandchild_holding_the_pipe_after_the_child_exits_does_not_hang_the_call() {
+    let pidfile = std::env::temp_dir().join(format!("sb-fleet-holder-{}", std::process::id()));
+    let _ = std::fs::remove_file(&pidfile);
+    let bridge = FleetBridge::with_root(&stub())
+        .with_env("FLEET_STUB_GRANDCHILD", pidfile.to_str().unwrap())
+        .with_timeout(Duration::from_secs(2));
+    let started = Instant::now();
+    let _ = bridge.run_json(&["budget"]);
+    assert!(started.elapsed() < Duration::from_secs(15));
+    if let Ok(pid) = std::fs::read_to_string(&pidfile) {
+        let _ = std::process::Command::new("kill").arg(pid.trim()).status();
+    }
+    let _ = std::fs::remove_file(&pidfile);
+}

@@ -4,7 +4,9 @@ FLEET_ROOT=crates/core/tests/fixtures/fleet-stub.
 It prints the fixture JSON for the command from ../../answers/<command>.json, where <command>
 is the first argument; with FLEET_STUB_EXIT=<n> it prints FLEET_STUB_STDERR to stderr and
 exits n; with FLEET_STUB_BADJSON=1 it prints text that is not JSON; with
-FLEET_STUB_SLEEP=<seconds> it sleeps that long first.
+FLEET_STUB_SLEEP=<seconds> it sleeps that long first; with FLEET_STUB_FLOOD=<bytes> it first
+writes that many bytes to stderr and stdout (a full pipe); with FLEET_STUB_GRANDCHILD=<file> it
+starts a long `sleep` child and writes its pid to that file.
 """
 import os
 import pathlib
@@ -16,6 +18,22 @@ ANSWERS = HERE.parent.parent / "answers"
 
 
 def main(argv):
+    flood = os.environ.get("FLEET_STUB_FLOOD")
+    if flood:
+        chunk = "x" * 1000 + "\n"
+        for _ in range(int(flood) // len(chunk)):
+            sys.stderr.write(chunk)
+        sys.stderr.flush()
+        if os.environ.get("FLEET_STUB_FLOOD_STDOUT"):
+            for _ in range(int(flood) // len(chunk)):
+                sys.stdout.write(chunk)
+            sys.stdout.flush()
+    pidfile = os.environ.get("FLEET_STUB_GRANDCHILD")
+    if pidfile:
+        import subprocess
+
+        child = subprocess.Popen(["sleep", "300"])
+        pathlib.Path(pidfile).write_text(str(child.pid))
     sleep = os.environ.get("FLEET_STUB_SLEEP")
     if sleep:
         time.sleep(float(sleep))

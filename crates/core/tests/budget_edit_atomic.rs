@@ -142,3 +142,29 @@ fn the_largest_cap_is_accepted() {
     .unwrap();
     assert_eq!(saved.ledger_row["set"], json!({"cap_usd": 100000.0}));
 }
+
+/// A failure in the undo is reported with the answer, not swallowed.
+#[cfg(unix)]
+#[test]
+fn an_undo_that_fails_is_reported() {
+    use std::os::unix::fs::PermissionsExt;
+    let r = root("undo-fails");
+    let log = r.join("pool-edits.jsonl");
+    std::fs::write(&log, "{\"old\":1}\n").unwrap();
+    // The re-read fails, and as it does the script makes the ledger read-only, so the ledger
+    // cannot be cut back.
+    std::fs::write(
+        r.join("tools/fleet/fleet.py"),
+        "import os, sys\nos.chmod(os.environ['LEDGER'], 0o444)\nsys.exit(1)\n",
+    )
+    .unwrap();
+    let bridge = FleetBridge::new(&r).with_env("LEDGER", log.to_str().unwrap());
+    let err = save_edit(&bridge, &cap("deepseek", 7.0), &log, &FixedClock::at(1)).unwrap_err();
+    let text = err.to_string();
+    assert!(text.contains("fleet error"), "{text}");
+    assert!(text.contains("could not be fully taken back"), "{text}");
+    assert!(text.contains("pool-edits.jsonl"), "{text}");
+    // The config was put back all the same.
+    assert_eq!(config_text(&r), CONFIG);
+    std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o644)).unwrap();
+}

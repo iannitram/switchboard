@@ -263,12 +263,12 @@ impl FleetBridge {
             }
             std::thread::sleep(Duration::from_millis(5));
         };
-        // After a kill, a grandchild that left the group can keep a pipe open: wait a moment,
-        // then take what was read rather than hang.
+        // A grandchild that outlives the child (or left the group after a kill) can keep a pipe
+        // open: wait a moment past the limit, then take what was read rather than hang.
         let grace = if timed_out {
             Duration::from_secs(2)
         } else {
-            Duration::from_secs(3600)
+            deadline.saturating_duration_since(Instant::now()) + Duration::from_secs(2)
         };
         let [stdout, stderr] = readers.map(|rx| rx.recv_timeout(grace).unwrap_or_default());
         if let Some(writer) = writer {

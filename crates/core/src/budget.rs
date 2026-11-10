@@ -276,15 +276,15 @@ pub fn save_edit(
     });
     let ledger_undo = append_line(edits_log, &ledger_row)?;
     if let Err(err) = replace_file(&path, &out) {
-        ledger_undo.undo();
-        return Err(err);
+        let stuck: Vec<String> = ledger_undo.undo().err().into_iter().collect();
+        return Err(with_undo_failures(err, stuck));
     }
     let rows = match read(fleet) {
         Ok(rows) => rows,
         Err(err) => {
-            ledger_undo.undo();
-            let _ = replace_file(&path, &text);
-            return Err(err);
+            let mut stuck: Vec<String> = ledger_undo.undo().err().into_iter().collect();
+            stuck.extend(replace_file(&path, &text).err().map(|e| e.to_string()));
+            return Err(with_undo_failures(err, stuck));
         }
     };
     let waiting = crate::waiting::Item {
@@ -313,18 +313,33 @@ struct LedgerUndo<'a> {
 }
 
 impl LedgerUndo<'_> {
-    fn undo(self) {
+    /// Take the line back off; the error text says what could not be put back.
+    fn undo(self) -> Result<(), String> {
+        let io = |e: std::io::Error| format!("{}: {e}", self.log.display());
         match self.len {
-            None => {
-                let _ = std::fs::remove_file(self.log);
-            }
-            Some(len) => {
-                if let Ok(f) = std::fs::OpenOptions::new().write(true).open(self.log) {
-                    let _ = f.set_len(len);
-                }
-            }
+            None => match std::fs::remove_file(self.log) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(io(e)),
+                _ => Ok(()),
+            },
+            Some(len) => std::fs::OpenOptions::new()
+                .write(true)
+                .open(self.log)
+                .and_then(|f| f.set_len(len))
+                .map_err(io),
         }
     }
+}
+
+/// `err`, and when taking the edit back failed too, say so: an `Err` from `save_edit` must not
+/// hide that part of the edit is still in place.
+fn with_undo_failures(err: CoreError, stuck: Vec<String>) -> CoreError {
+    if stuck.is_empty() {
+        return err;
+    }
+    CoreError::Io(format!(
+        "{err}; the edit could not be fully taken back, check: {}",
+        stuck.join("; ")
+    ))
 }
 
 /// One JSON line appended to `log`, its parent folders created first. Gives back the way to
@@ -347,8 +362,8 @@ fn append_line<'a>(log: &'a std::path::Path, row: &Value) -> Result<LedgerUndo<'
         .map_err(io)?;
     let line = format!("{row}\n");
     if let Err(e) = file.write_all(line.as_bytes()) {
-        LedgerUndo { log, len }.undo();
-        return Err(io(e));
+        let stuck: Vec<String> = LedgerUndo { log, len }.undo().err().into_iter().collect();
+        return Err(with_undo_failures(io(e), stuck));
     }
     Ok(LedgerUndo { log, len })
 }
