@@ -1,7 +1,6 @@
 // #340 on the app face: the Budget panel's save is all or nothing, Waiting item included.
 use super::*;
 use switchboard_core::clock::FixedClock;
-use switchboard_core::waiting::LocalItems;
 
 const CONFIG: &str = r#"{
   "version": 1,

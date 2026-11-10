@@ -12,6 +12,9 @@ use switchboard_core::it::{self, Loadout, ProbeRunner};
 use switchboard_core::platform::{current_os, loadout_probes, Probe};
 use switchboard_core::reports::{self, thread_rows, Filter, Report, FLEET_STATE_DIR_ENV};
 use switchboard_core::settings::{self, Settings};
+// The test modules (`confirm_guarded_tests.rs`, `pool_edit_tests.rs`) take it in through `super::*`.
+#[cfg(test)]
+use switchboard_core::waiting::LocalItems;
 use switchboard_core::CoreError;
 use tauri::Manager;
 
