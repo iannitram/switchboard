@@ -1,7 +1,7 @@
 // Pass 2 of the 3D sky: one living galaxy. The pure parts: placement, zoom, physics, wayfinding.
 import type { Constellation, SkyModel, Star } from "../sky/model";
 import { centreRepo, discParticles, GAL_R, HOLE, isCentre, nebulaStyle, placeSystems, R0, remapRadius, systemParticles } from "./milkyway";
-import { damp, dampPose, detailFade, ENTER, EXIT, labelBudget, MIN_DIST, pinchFactor, wheelFactor, zoneStep, zoomToward, flightMs, FLIGHT_MAX_MS, FLIGHT_MIN_MS } from "./camera";
+import { damp, dampPose, detailFade, ENTER, EXIT, labelBudget, MIN_DIST, pinchFactor, wheelFactor, zoneStep, zoomOutToward, zoomToward, flightMs, FLIGHT_MAX_MS, FLIGHT_MIN_MS } from "./camera";
 import { condensation, DEBRIS_MAX, debrisCount, lensMatches, lensStar, lensSystem, magnitude, starPhysics, type SystemFacts } from "./physics";
 import { outsideX } from "./labels";
 import { breadcrumbs, searchSky, spanningTree } from "./wayfind";
@@ -144,6 +144,30 @@ describe("one galaxy: zoom", () => {
     expect(zoomToward(pose, 1e-9, anchor, MIN_DIST, 500).dist).toBe(MIN_DIST);
     expect(zoomToward(pose, 1e9, null, MIN_DIST, 500).dist).toBe(500);
     expect(zoomToward(pose, 0.5, null, MIN_DIST, 500).target).toEqual(pose.target);
+  });
+
+  test("zooming out never drags the view: it eases from the view centre to the galaxy centre", () => {
+    const home = { x: 0, y: -5, z: 0 };
+    const near: Pose = { target: { x: 60, y: 0, z: 30 }, dist: 10, az: 0, elev: 1 };
+    // Each step moves the target only toward home, never away (the old bug scaled it outward).
+    let p = near;
+    let prev = Math.hypot(p.target.x - home.x, p.target.y - home.y, p.target.z - home.z);
+    for (let i = 0; i < 40; i++) {
+      p = zoomOutToward(p, 1.15, home, 400, 640);
+      const d = Math.hypot(p.target.x - home.x, p.target.y - home.y, p.target.z - home.z);
+      expect(d).toBeLessThanOrEqual(prev + 1e-9);
+      prev = d;
+    }
+    // Home exactly once the whole galaxy is in view; the steps add up the same however split.
+    expect(p.target).toEqual(home);
+    const one = zoomOutToward(near, 4, home, 400, 640);
+    const two = zoomOutToward(zoomOutToward(near, 2, home, 400, 640), 2, home, 400, 640);
+    expect(two.target.x).toBeCloseTo(one.target.x);
+    expect(two.target.z).toBeCloseTo(one.target.z);
+    expect(one.target.x).toBeCloseTo(60 * (1 - Math.log(4) / Math.log(40)));
+    // Capped at the far limit; a factor at or below 1 is not a zoom out.
+    expect(zoomOutToward(near, 1e9, home, 400, 640).dist).toBe(640);
+    expect(zoomOutToward(near, 0.5, home, 400, 640)).toEqual(near);
   });
 
   test("damping eases toward the goal independent of frame rate", () => {

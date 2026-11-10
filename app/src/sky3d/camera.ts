@@ -53,6 +53,29 @@ export function zoomToward(p: Pose, factor: number, anchor: Vec3 | null, minDist
   };
 }
 
+/**
+ * Zoom out (factor above 1) without dragging the view: the cursor is ignored, the view centre
+ * stays where it is, and the target eases toward `home` in step with the zoom, so that it
+ * arrives exactly when the distance reaches `homeDist` (the whole-galaxy view). Each step moves
+ * the target by the share of the remaining log-distance it covers: no jump, no snap on release.
+ */
+export function zoomOutToward(p: Pose, factor: number, home: Vec3, homeDist: number, maxDist: number): Pose {
+  const dist = clamp(p.dist * Math.max(1, factor), p.dist, Math.max(p.dist, maxDist));
+  let k: number;
+  if (dist >= homeDist) k = 1;
+  else if (dist <= p.dist) k = 0;
+  else k = Math.log(dist / p.dist) / Math.log(homeDist / p.dist);
+  return {
+    ...p,
+    dist,
+    target: {
+      x: p.target.x + (home.x - p.target.x) * k,
+      y: p.target.y + (home.y - p.target.y) * k,
+      z: p.target.z + (home.z - p.target.z) * k,
+    },
+  };
+}
+
 /** Frame-rate independent exponential easing of a value toward its goal. */
 export function damp(cur: number, goal: number, lambda: number, dt: number): number {
   return goal + (cur - goal) * Math.exp(-lambda * dt);

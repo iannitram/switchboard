@@ -7,7 +7,7 @@ import type { Constellation, SkyModel } from "../sky/model";
 import { highlightChain } from "../sky/chain";
 import { blendPose, fitDistance, layoutInterior, poseEye, type InteriorLayout, type Pose, type Vec3 } from "./layout";
 import { discParticles, dustParticles, GAL_R, HOLE, placeSystems, systemParticles, type System } from "./milkyway";
-import { dampPose, detailFade, flightMs, MIN_DIST, settling, zoneStep, zoomToward } from "./camera";
+import { dampPose, detailFade, flightMs, MIN_DIST, settling, zoneStep, zoomOutToward, zoomToward } from "./camera";
 import { easeInOutCubic } from "./motion";
 import { condensation, debrisCount, lensDebris, lensDisc, lensStar, lensSystem, starPhysics, systemFacts, type Lens } from "./physics";
 import { spanningTree } from "./wayfind";
@@ -1220,14 +1220,13 @@ export class SkyScene {
   /** Zoom by `factor` (above 1 out) toward a screen point, and enter or leave by distance. */
   zoomAt(factor: number, sx: number, sy: number) {
     this.takeOver();
-    const anchor = factor < 1 ? this.planePoint(sx, sy) : null;
-    this.goal = zoomToward(this.goal, factor, anchor ?? (factor < 1 ? null : { x: 0, y: 0, z: 0 }), MIN_DIST, this.overDist() * 1.6);
-    if (factor > 1 && this.goal.dist > this.overDist() * 0.9) {
-      // Backing out to the whole galaxy recentres it.
-      const k = Math.min(1, (this.goal.dist - this.overDist() * 0.9) / (this.overDist() * 0.4));
-      const home = this.overviewPose().target;
-      const t = this.goal.target;
-      this.goal.target = { x: t.x + (home.x - t.x) * k, y: t.y + (home.y - t.y) * k, z: t.z + (home.z - t.z) * k };
+    if (factor < 1) {
+      // In: toward the point under the cursor.
+      this.goal = zoomToward(this.goal, factor, this.planePoint(sx, sy), MIN_DIST, this.overDist() * 1.6);
+    } else {
+      // Out: along the view centre, easing home to the galaxy as the whole of it comes into view.
+      const home = this.overviewPose();
+      this.goal = zoomOutToward(this.goal, factor, home.target, home.dist, this.overDist() * 1.6);
     }
     this.checkZone();
   }
