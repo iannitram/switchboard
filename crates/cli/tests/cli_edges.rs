@@ -636,7 +636,15 @@ fn loadout_text_escapes_model_names_and_fleet_errors() {
 #[test]
 fn sky_text_escapes_the_repo_name() {
     let dirs = Dirs::new("evil-sky");
-    dirs.save("owner/al\u{1b}]0;X\u{7}pha", &[(1, "One", &[])]);
+    // The repo name is read from the snapshot's JSON, not its file name, so the fixture goes
+    // under a safe file name: ESC and BEL are not valid in a Windows file name.
+    dirs.save("owner/alpha", &[(1, "One", &[])]);
+    let store = SnapshotStore::new(&dirs.data());
+    let path = store.path_for("owner/alpha");
+    let mut snap: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    snap["repo"] = serde_json::Value::from("owner/al\u{1b}]0;X\u{7}pha");
+    std::fs::write(&path, snap.to_string()).unwrap();
     let out = dirs.run(&["sky"]);
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
     assert!(
