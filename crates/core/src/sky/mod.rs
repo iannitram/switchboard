@@ -5,6 +5,7 @@ pub mod chain;
 pub mod codemap;
 pub mod drift;
 pub mod features;
+pub mod jobs;
 pub mod labels;
 pub mod layout;
 pub mod model;
