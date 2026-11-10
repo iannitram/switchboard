@@ -19,7 +19,7 @@ test("typing and pressing Send calls send once with the text and shows the picki
   fireEvent.change(box(), { target: { value: "fix the labeller" } });
   fireEvent.click(screen.getByRole("button", { name: "Send" }));
   expect(send).toHaveBeenCalledTimes(1);
-  expect(send).toHaveBeenCalledWith("fix the labeller");
+  expect(send).toHaveBeenCalledWith("fix the labeller", undefined);
   expect(await screen.findByText("Picked by: rules (fits the budget)")).toBeTruthy();
 });
 
@@ -41,7 +41,7 @@ test("Enter sends and Shift+Enter adds a newline without sending", async () => {
   const plain = fireEvent.keyDown(box(), { key: "Enter" });
   expect(plain).toBe(false); // prevented: the send happens instead
   expect(send).toHaveBeenCalledTimes(1);
-  expect(send).toHaveBeenCalledWith("one");
+  expect(send).toHaveBeenCalledWith("one", undefined);
   await screen.findByText("Picked by: rules (fits the budget)");
 });
 
