@@ -24,9 +24,9 @@ function deepFreeze<T>(v: T): T {
 
 const FULL: LoadoutData = deepFreeze({
   read_at: 1_762_700_000,
-  clis: [["claude", true], ["codex", false], ["gemini", false], ["gh", true]],
+  clis: [["claude", true], ["codex", false], ["gh", true]],
   models_loaded: ["qwen3-coder-30b"],
-  toolchains: ["cargo", "python3"],
+  toolchains: ["cargo", "python3", "gemini"],
   busy: true,
   recent_errors: ["push-failed: remote hung up", "timeout after 30 min"],
 });
@@ -39,7 +39,7 @@ const NO_PROBES: LoadoutData = deepFreeze({
 const LATER: LoadoutData = deepFreeze({
   ...FULL,
   read_at: FULL.read_at + 60,
-  clis: [["claude", true], ["codex", true], ["gemini", false], ["gh", true]],
+  clis: [["claude", true], ["codex", true], ["gh", true]],
   busy: false,
 });
 
@@ -72,7 +72,7 @@ test("one row per probe, in the core's order", () => {
     .getAllByRole("listitem")
     .map((li) => li.getAttribute("aria-label"));
   expect(names).toEqual([
-    "claude", "codex", "gemini", "gh", "cargo", "node", "python3", "llama-swap", "fleet status", "fleet errors",
+    "claude", "codex", "gh", "cargo", "node", "python3", "gemini", "llama-swap", "fleet status", "fleet errors",
   ]);
 });
 
@@ -81,6 +81,7 @@ test("each row shows its name and state", () => {
   expect(row("claude").querySelector("strong")?.textContent).toBe("claude");
   expect(state("claude")).toBe("signed in");
   expect(state("cargo")).toBe("found");
+  expect(state("gemini")).toBe("found");
   expect(state("llama-swap")).toBe("1 loaded");
   expect(detail("llama-swap")).toBe("qwen3-coder-30b");
   expect(state("fleet status")).toBe("busy");
@@ -233,4 +234,11 @@ test("the code map marks IT-1's timer present", () => {
   expect(it!.split("\n")).toContain(
     "- IT-1 loadout every minute (`read_and_store`, `latest_loadout`, `current_loadout`, the `loadout` event): present.",
   );
+});
+
+test("gemini is the Antigravity CLI: a missing agy is not found, never not signed in", () => {
+  render(<LoadoutPanel loadout={{ ...FULL, toolchains: ["cargo", "python3"] }} now={FULL.read_at} />);
+  expect(state("gemini")).toBe("not found");
+  expect(row("gemini").className).toBe("failed");
+  expect(row("gemini").textContent).not.toContain("signed in");
 });
