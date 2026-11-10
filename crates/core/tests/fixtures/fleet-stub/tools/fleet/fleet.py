@@ -3,17 +3,22 @@ FLEET_ROOT=crates/core/tests/fixtures/fleet-stub.
 
 It prints the fixture JSON for the command from ../../answers/<command>.json, where <command>
 is the first argument; with FLEET_STUB_EXIT=<n> it prints FLEET_STUB_STDERR to stderr and
-exits n; with FLEET_STUB_BADJSON=1 it prints text that is not JSON.
+exits n; with FLEET_STUB_BADJSON=1 it prints text that is not JSON; with
+FLEET_STUB_SLEEP=<seconds> it sleeps that long first.
 """
 import os
 import pathlib
 import sys
+import time
 
 HERE = pathlib.Path(__file__).resolve().parent
 ANSWERS = HERE.parent.parent / "answers"
 
 
 def main(argv):
+    sleep = os.environ.get("FLEET_STUB_SLEEP")
+    if sleep:
+        time.sleep(float(sleep))
     code = os.environ.get("FLEET_STUB_EXIT")
     if code:
         sys.stderr.write(os.environ.get("FLEET_STUB_STDERR", "stub failure\n"))

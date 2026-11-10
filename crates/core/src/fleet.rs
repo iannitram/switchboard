@@ -9,6 +9,13 @@ use std::ffi::{OsStr, OsString};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
+/// CORE-1: how long one fleet call may run before the core kills it and records a fleet error
+/// (`FleetErrorReason::Timeout`). `fleet.py` calls are local reads (budget, ledger, status); a
+/// refresh that reads a provider is the slowest, and a call past two minutes is stuck (a held
+/// lock, a dead network). `FleetBridge::with_timeout` changes it for one bridge.
+pub const FLEET_TIMEOUT_SECS: u64 = 120;
 
 /// The environment variable that points the bridge at another root (tests: a stub `fleet.py`
 /// under `tests/fixtures/fleet-stub/`).
@@ -67,6 +74,42 @@ pub enum FleetErrorReason {
     BadJson(String),
     /// The process could not be started. Holds the OS error text.
     Spawn(String),
+    /// The process ran past the time limit and was killed. Holds the limit in seconds.
+    Timeout(u64),
+}
+
+impl std::fmt::Display for FleetError {
+    /// CORE-2: the command, then what went wrong: the exit code and the first lines of stderr,
+    /// the JSON parser's message, the spawn error or the time limit.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let command = self.command.join(" ");
+        match &self.reason {
+            FleetErrorReason::Exit => {
+                match self.exit_code {
+                    Some(code) => write!(f, "{command} exited {code}")?,
+                    None => write!(f, "{command} was killed")?,
+                }
+                let lines: Vec<&str> = self
+                    .stderr
+                    .lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty())
+                    .take(5)
+                    .collect();
+                if !lines.is_empty() {
+                    write!(f, ": {}", lines.join(" | "))?;
+                }
+                Ok(())
+            }
+            FleetErrorReason::BadJson(why) => {
+                write!(f, "{command} printed output that is not JSON ({why})")
+            }
+            FleetErrorReason::Spawn(why) => write!(f, "{command} could not start: {why}"),
+            FleetErrorReason::Timeout(secs) => {
+                write!(f, "{command} ran past {secs} s and was stopped")
+            }
+        }
+    }
 }
 
 /// CORE-1: the fleet bridge: the root it runs against, the launcher and the extra env for
@@ -78,6 +121,8 @@ pub struct FleetBridge {
     python: Option<(String, Vec<String>)>,
     /// Extra env for the child, in the order added.
     env: Vec<(String, String)>,
+    /// The longest one call may run (`FLEET_TIMEOUT_SECS`).
+    timeout: Duration,
 }
 
 impl FleetBridge {
@@ -103,7 +148,14 @@ impl FleetBridge {
             root: root.to_path_buf(),
             python: None,
             env: Vec::new(),
+            timeout: Duration::from_secs(FLEET_TIMEOUT_SECS),
         }
+    }
+
+    /// Let one call run `timeout` at most (default `FLEET_TIMEOUT_SECS`).
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
     }
 
     /// Use `program` with its `args` as the launcher instead of the platform's Python.
@@ -155,11 +207,13 @@ impl FleetBridge {
     /// The child for `command` (program first): `FLEET_ROOT` set to the root, then the
     /// `with_env` pairs, stdout and stderr captured. Stdin is null, or `input` when given (written
     /// from a thread while the output is read, so a large input cannot deadlock on a full pipe).
+    /// CORE-1: a child still running after the bridge's timeout is killed (its whole process
+    /// group on Unix); the flag is true then and the output is what it printed until then.
     fn spawn(
         &self,
         command: &[String],
         input: Option<&[u8]>,
-    ) -> std::io::Result<std::process::Output> {
+    ) -> std::io::Result<(std::process::Output, bool)> {
         let mut child = Command::new(&command[0]);
         child.args(&command[1..]);
         clean_child_env(&mut child);
@@ -174,6 +228,12 @@ impl FleetBridge {
         });
         child.stdout(Stdio::piped());
         child.stderr(Stdio::piped());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            // Its own group, so a timeout can stop the launcher's children too.
+            child.process_group(0);
+        }
         let mut proc = child.spawn()?;
         let writer = match (input, proc.stdin.take()) {
             (Some(bytes), Some(mut stdin)) => {
@@ -185,11 +245,45 @@ impl FleetBridge {
             }
             _ => None,
         };
-        let output = proc.wait_with_output();
+        let readers = [
+            read_in_thread(proc.stdout.take()),
+            read_in_thread(proc.stderr.take()),
+        ];
+
+        let deadline = Instant::now() + self.timeout;
+        let mut timed_out = false;
+        let status = loop {
+            if let Some(status) = proc.try_wait()? {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                timed_out = true;
+                kill_tree(&mut proc);
+                break proc.wait()?;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        // After a kill, a grandchild that left the group can keep a pipe open: wait a moment,
+        // then take what was read rather than hang.
+        let grace = if timed_out {
+            Duration::from_secs(2)
+        } else {
+            Duration::from_secs(3600)
+        };
+        let [stdout, stderr] = readers.map(|rx| rx.recv_timeout(grace).unwrap_or_default());
         if let Some(writer) = writer {
-            let _ = writer.join();
+            if !timed_out {
+                let _ = writer.join();
+            }
         }
-        output
+        Ok((
+            std::process::Output {
+                status,
+                stdout,
+                stderr,
+            },
+            timed_out,
+        ))
     }
 
     /// Run the command line for `args` and wait. A failed spawn is a `FleetError` with
@@ -201,8 +295,8 @@ impl FleetBridge {
         input: Option<&[u8]>,
     ) -> Result<(Vec<String>, Option<i32>, String, String), FleetError> {
         let command = self.command_line(args);
-        let output = match self.spawn(&command, input) {
-            Ok(output) => output,
+        let (output, timed_out) = match self.spawn(&command, input) {
+            Ok(done) => done,
             Err(err) => {
                 return Err(FleetError {
                     command,
@@ -214,6 +308,14 @@ impl FleetBridge {
         };
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        if timed_out {
+            return Err(FleetError {
+                command,
+                exit_code: None,
+                stderr,
+                reason: FleetErrorReason::Timeout(self.timeout.as_secs()),
+            });
+        }
         Ok((command, output.status.code(), stdout, stderr))
     }
 
@@ -264,6 +366,35 @@ impl FleetBridge {
             }),
         }
     }
+}
+
+/// Read `pipe` to its end on a thread; the bytes arrive on the channel.
+fn read_in_thread<R: std::io::Read + Send + 'static>(
+    pipe: Option<R>,
+) -> std::sync::mpsc::Receiver<Vec<u8>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut pipe) = pipe {
+            let _ = pipe.read_to_end(&mut buf);
+        }
+        let _ = tx.send(buf);
+    });
+    rx
+}
+
+/// Kill `proc` and, on Unix, the process group it leads (`kill` is the same tool a shell uses; no
+/// extra dependency).
+fn kill_tree(proc: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        let _ = Command::new("kill")
+            .args(["-s", "KILL", "--", &format!("-{}", proc.id())])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    let _ = proc.kill();
 }
 
 /// CORE-2: how many fleet errors `FleetErrorLog` keeps.
