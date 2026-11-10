@@ -45,7 +45,7 @@ export function App() {
 
   return (
     <div className="app">
-      <nav aria-label="Views">
+      <nav aria-label="Views" style={{ position: "sticky", top: 0, zIndex: 1, background: "Canvas" }}>
         {(Object.keys(VIEWS) as ViewName[]).map((name) => (
           <button key={name} aria-pressed={name === view} onClick={() => setView(name)}>
             {name}

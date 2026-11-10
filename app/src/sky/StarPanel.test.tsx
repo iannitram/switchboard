@@ -93,6 +93,12 @@ test("a bare star says what it lacks", () => {
   expect(screen.queryAllByRole("listitem")).toHaveLength(0);
 });
 
+test("a closed star with no PR says it closed without one", () => {
+  render(<StarPanel star={{ ...BARE, state: "closed" }} onClose={() => {}} />);
+  expect(screen.getByText("Closed without a PR")).toBeTruthy();
+  expect(screen.queryByText("No PR yet")).toBeNull();
+});
+
 test("a PR with no verdict yet is not reviewed", () => {
   render(<StarPanel star={{ ...FULL, pr: { ...FULL.pr!, verdict: null } }} onClose={() => {}} />);
   expect(screen.getByText("Review: not reviewed")).toBeTruthy();
@@ -114,4 +120,21 @@ test("in the Sky view, clicking a star opens its panel and Close shuts it", asyn
   expect(screen.getByRole("complementary", { name: "Star #31" })).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: "Close" }));
   expect(screen.queryByRole("complementary")).toBeNull();
+});
+
+test("picking a star scrolls its panel into view when the DOM supports it", async () => {
+  // SKY-8 (#299): jsdom has no scrollIntoView, so the test supplies one and removes it after.
+  const proto = Element.prototype as unknown as { scrollIntoView?: unknown };
+  const scroll = vi.fn();
+  proto.scrollIntoView = scroll;
+  try {
+    call.mockResolvedValue({ ok: SKY });
+    render(<Sky />);
+    fireEvent.click(await screen.findByTestId("constellation"));
+    fireEvent.click(screen.getByRole("button", { name: "#31 SKY-2: brightness" }));
+    expect(screen.getByRole("complementary", { name: "Star #31" })).toBeTruthy();
+    expect(scroll).toHaveBeenCalledWith({ block: "nearest" });
+  } finally {
+    delete proto.scrollIntoView;
+  }
 });

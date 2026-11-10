@@ -76,10 +76,11 @@ function BackUp({ repo }: { repo?: string }) {
     setLines(rows.length ? rows.map(backupLine) : ["No repos to back up."]);
   }
 
+  const label = repo === undefined ? "Back up all" : "Back up this repo";
   return (
     <div data-testid="backup">
-      <button onClick={run} disabled={busy}>
-        {repo === undefined ? "Back up all" : "Back up"}
+      <button onClick={run} disabled={busy} aria-label={label}>
+        {label}
       </button>
       {busy && <p role="status">Backing up…</p>}
       {lines.length > 0 && (
@@ -141,6 +142,12 @@ export function Sky() {
     };
   }, [load]);
 
+  // SKY-8 (#299): the picked star's panel is scrolled into view. jsdom has no scrollIntoView.
+  const panel = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    panel.current?.scrollIntoView?.({ block: "nearest" });
+  }, [picked]);
+
   if (answer && "error" in answer) {
     const { error } = answer;
     return (
@@ -167,18 +174,24 @@ export function Sky() {
   const zoomed = open === null ? undefined : sky.constellations.find((c) => c.repo === open);
   if (zoomed) {
     return (
-      <>
-        <ConstellationView
-          c={zoomed}
-          onBack={() => {
-            setOpen(null);
-            setPicked(null);
-          }}
-          onStar={setPicked}
-        />
-        <BackUp key={zoomed.repo} repo={zoomed.repo} />
-        {picked && <StarPanel star={picked} onClose={() => setPicked(null)} />}
-      </>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: "1em", alignItems: "flex-start" }}>
+        <div style={{ flex: "1 1 0", minWidth: 0 }}>
+          <ConstellationView
+            c={zoomed}
+            onBack={() => {
+              setOpen(null);
+              setPicked(null);
+            }}
+            onStar={setPicked}
+          />
+          <BackUp key={zoomed.repo} repo={zoomed.repo} />
+        </div>
+        {picked && (
+          <div ref={panel} style={{ flex: "0 0 22em" }}>
+            <StarPanel star={picked} onClose={() => setPicked(null)} />
+          </div>
+        )}
+      </div>
     );
   }
 
