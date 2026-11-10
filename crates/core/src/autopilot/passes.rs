@@ -8,10 +8,13 @@ use super::weekly::{roadmap_changed, weekly_due};
 use crate::abilities::FleetModels;
 use crate::clock::UnixSeconds;
 use crate::fleet::{clean_child_env, FleetBridge, FleetError, FleetErrorReason, FLEET_ROOT_ENV};
-use crate::github::merge::{carried_over_by_patch_id, merge_passed};
+use crate::github::merge::{
+    carried_over_by_patch_id, eligibility, merge, MergeEligibility, MergeJob,
+};
 use crate::github::poll::Poller;
-use crate::github::snapshot::{RepoSnapshot, SnapshotStore};
+use crate::github::snapshot::{PullRequest, RepoSnapshot, SnapshotStore};
 use crate::rules::{Caller, Face, Role};
+use crate::waiting::{Item, LocalItems, Source};
 use crate::CoreError;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -489,36 +492,107 @@ pub fn autopilot_caller() -> Caller {
     }
 }
 
+/// One merge the autopilot tried and was refused (#380): the repo, the PR and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefusedMerge {
+    pub repo: String,
+    pub pr: u64,
+    pub why: String,
+}
+
+/// What one `merge_pass` did: each repo's merges, and each merge that was refused.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MergePass {
+    pub merged: Vec<Merged>,
+    pub refused: Vec<RefusedMerge>,
+}
+
 /// AUTO-4: merge every passed PR of each repo that has a clone beside the pipeline repo, in the
-/// order given. Archived repos and repos with no clone are skipped. A refused merge returns at once.
+/// order given, smallest PR first in each repo. A PASS on an older sha counts when it carries
+/// over by patch-id (`carried_over_by_patch_id`, #381). Archived repos and repos with no clone
+/// are skipped. A refused merge is recorded in `refused` and the pass goes on to the next PR, so
+/// one refusal neither hides the merges before it nor stops the ones after it (#380).
 pub fn merge_pass(
     snaps: &[RepoSnapshot],
     poller: &Poller<'_>,
     pipeline_root: &Path,
     dev_root: &Path,
-) -> Result<Vec<Merged>, CoreError> {
+) -> MergePass {
     let caller = autopilot_caller();
-    let mut out = Vec::new();
+    let mut out = MergePass::default();
     for snap in snaps.iter().filter(|s| !s.archived) {
         let name = snap.repo.rsplit('/').next().unwrap_or(&snap.repo);
         let clone = dev_root.join(name);
         if !clone.is_dir() {
             continue;
         }
-        let (merged, closed) = merge_passed(
-            &caller,
-            &clone,
-            pipeline_root,
-            &snap.repo,
-            &snap.pulls,
-            &|pr| carried_over_by_patch_id(&clone, pr),
-            poller,
-        )?;
+        let mut ready: Vec<(&PullRequest, bool)> = snap
+            .pulls
+            .iter()
+            .filter(|pr| pr.state == "open")
+            .map(|pr| (pr, carried_over_by_patch_id(&clone, pr)))
+            .filter(|(pr, carried)| eligibility(pr, *carried) == MergeEligibility::Eligible)
+            .collect();
+        ready.sort_by_key(|(pr, _)| pr.number);
+        let (mut merged, mut closed) = (Vec::new(), Vec::new());
+        for (pr, carried) in ready {
+            let job = MergeJob {
+                pipeline_root,
+                clone: &clone,
+                repo: &snap.repo,
+                pr,
+                carried_over: carried,
+            };
+            match merge(&caller, &job, poller) {
+                Ok(()) => {
+                    merged.push(pr.number);
+                    closed.extend(pr.closes.iter().copied());
+                }
+                Err(e) => out.refused.push(RefusedMerge {
+                    repo: snap.repo.clone(),
+                    pr: pr.number,
+                    why: match e {
+                        CoreError::Refused(why) => why,
+                        other => other.to_string(),
+                    },
+                }),
+            }
+        }
         if !merged.is_empty() {
-            out.push((snap.repo.clone(), merged, closed));
+            out.merged.push((snap.repo.clone(), merged, closed));
         }
     }
-    Ok(out)
+    out
+}
+
+/// WAIT-1, AUTO-4 (#380): the Waiting item of a refused autopilot merge. One per PR (a later
+/// refusal of the same PR replaces it); its link opens the PR.
+pub fn refused_merge_item(refused: &RefusedMerge, at: UnixSeconds) -> Item {
+    let what = format!("Merge {}#{}", refused.repo, refused.pr);
+    Item {
+        what: what.clone(),
+        why: format!(
+            "The autopilot's merge was refused: {}. Fix it, or merge it by hand.",
+            refused.why
+        ),
+        source: Source::GuardedAction { text: what },
+        link: format!("https://github.com/{}/pull/{}", refused.repo, refused.pr),
+        action: "Open PR".to_string(),
+        since: at,
+    }
+}
+
+/// Put each refused merge of a pass in Waiting on you (`<data>/waiting/local.json`).
+pub fn record_refused_merges(
+    data_dir: &Path,
+    refused: &[RefusedMerge],
+    at: UnixSeconds,
+) -> Result<(), CoreError> {
+    let local = LocalItems::new(data_dir);
+    for r in refused {
+        local.add(refused_merge_item(r, at))?;
+    }
+    Ok(())
 }
 
 /// Write `job` and its brief for `fleet run`: the brief to `<jobs_dir>/<id>.md`, the job to

@@ -214,6 +214,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - AUTO-3 review job (`review_job`): present.
 - AUTO-3 review start (`after_poll`, `review_pass` in `passes.rs`; the app's poll thread starts it): present.
 - AUTO-4 merge pass (`merge_pass` in `passes.rs`; the app's poll thread runs it after `after_poll`): present.
+- AUTO-4 refused merges (`MergePass`, `RefusedMerge`, `refused_merge_item`, `record_refused_merges`: every passed PR is tried, and each refusal is a Waiting item): present.
 - AUTO-8 drifted copies (`drifted`): present.
 - AUTO-2 roadmap_changed: present.
 - AUTO-2 roadmap pass (`roadmap_pass`, `pm_job` in `passes.rs`; run by `after_poll`): present.

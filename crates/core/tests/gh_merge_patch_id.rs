@@ -171,7 +171,7 @@ fn the_merge_pass_merges_a_carried_over_pr() {
         pulls: vec![pull(&reviewed, &head)],
         ..Default::default()
     }];
-    let merged = merge_pass(&snaps, &poller, &pipeline, &dev).unwrap();
+    let merged = merge_pass(&snaps, &poller, &pipeline, &dev).merged;
     assert_eq!(merged, vec![("owner/demo".to_string(), vec![21], vec![])]);
     let log = std::fs::read_to_string(stub_dir.join("calls.log")).unwrap();
     assert_eq!(log.lines().count(), 2, "a dry run and a push: {log}");

@@ -6,7 +6,9 @@
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use switchboard_core::autopilot::passes::{autopilot_caller, merge_pass, Merged};
+use switchboard_core::autopilot::passes::{
+    autopilot_caller, merge_pass, record_refused_merges, MergePass, Merged, RefusedMerge,
+};
 use switchboard_core::clock::FixedClock;
 use switchboard_core::github::poll::Poller;
 use switchboard_core::github::snapshot::SnapshotStore;
@@ -23,8 +25,12 @@ here = os.path.dirname(os.path.abspath(__file__))
 args = sys.argv[1:]
 with open(os.path.join(here, "calls.log"), "a") as f:
     f.write(json.dumps(args) + "\n")
-code = os.path.join(here, "exit-" + args[-1].lstrip("-"))
-code = int(open(code).read()) if os.path.exists(code) else 0
+pr = args[args.index("--pr") + 1]
+code = 0
+for name in ("exit-" + args[-1].lstrip("-"), "exit-pr-" + pr):
+    path = os.path.join(here, name)
+    if os.path.exists(path):
+        code = code or int(open(path).read())
 if code:
     print("REFUSED: branch is behind main")
 sys.exit(code)
@@ -128,8 +134,18 @@ fn snap(repo: &str, pulls: Vec<PullRequest>) -> RepoSnapshot {
     }
 }
 
-/// Run `merge_pass` over `snaps` with a fresh fake transport; answer the result and the reads.
+/// Run `merge_pass` over `snaps` with a fresh fake transport; answer the merges (or the first
+/// refusal, as `CoreError::Refused`) and the reads.
 fn run(w: &World, snaps: &[RepoSnapshot]) -> (Result<Vec<Merged>, CoreError>, Vec<String>) {
+    let (pass, reads) = run_pass(w, snaps);
+    match pass.refused.first() {
+        Some(r) => (Err(CoreError::Refused(r.why.clone())), reads),
+        None => (Ok(pass.merged), reads),
+    }
+}
+
+/// Run `merge_pass` over `snaps` with a fresh fake transport; answer all it did and the reads.
+fn run_pass(w: &World, snaps: &[RepoSnapshot]) -> (MergePass, Vec<String>) {
     let t = Fake::default();
     let store = SnapshotStore::new(&w.pipeline.join("data"));
     let clock = FixedClock::at(1_800_000_000);
@@ -238,7 +254,9 @@ fn an_archived_repo_or_one_without_a_clone_is_skipped() {
 }
 
 #[test]
-fn a_refused_merge_stops_the_pass_with_merge_prs_reason() {
+fn a_refused_merge_is_reported_and_the_pass_goes_on() {
+    // #380: this test once asserted that the first refusal stopped the pass (only PR 7's dry
+    // run, and the error alone). Every PR is now tried and each refusal is reported.
     let w = world("refused");
     std::fs::write(w.stub_dir.join("exit-dry-run"), "1").unwrap();
     let snaps = vec![snap(
@@ -248,13 +266,88 @@ fn a_refused_merge_stops_the_pass_with_merge_prs_reason() {
             pr(8, Some(HEAD), "success", &[13]),
         ],
     )];
-    let (result, reads) = run(&w, &snaps);
+    let (pass, reads) = run_pass(&w, &snaps);
+    assert!(pass.merged.is_empty());
+    let why = "branch is behind main".to_string();
     assert_eq!(
-        result,
-        Err(CoreError::Refused("branch is behind main".to_string()))
+        pass.refused,
+        vec![
+            RefusedMerge {
+                repo: "iannitram/demo".to_string(),
+                pr: 7,
+                why: why.clone()
+            },
+            RefusedMerge {
+                repo: "iannitram/demo".to_string(),
+                pr: 8,
+                why
+            },
+        ]
     );
-    assert_eq!(calls(&w.stub_dir).len(), 1, "only PR 7's dry run");
+    assert_eq!(calls(&w.stub_dir).len(), 2, "each PR's dry run");
     assert!(reads.is_empty());
+}
+
+#[test]
+fn one_refusal_keeps_the_merges_before_and_after_it() {
+    // The #380 report: owner/second#31 merges, owner/throwaway#21 is refused, #29 still merges.
+    let w = world("one-refused");
+    std::fs::create_dir_all(w.dev.join("second")).unwrap();
+    std::fs::create_dir_all(w.dev.join("throwaway")).unwrap();
+    std::fs::write(w.stub_dir.join("exit-pr-21"), "1").unwrap();
+    let snaps = vec![
+        snap("owner/second", vec![pr(31, Some(HEAD), "success", &[3])]),
+        snap(
+            "owner/throwaway",
+            vec![
+                pr(29, Some(HEAD), "success", &[4]),
+                pr(21, Some(HEAD), "success", &[5]),
+            ],
+        ),
+    ];
+    let (pass, reads) = run_pass(&w, &snaps);
+    assert_eq!(
+        pass.merged,
+        vec![
+            ("owner/second".to_string(), vec![31], vec![3]),
+            ("owner/throwaway".to_string(), vec![29], vec![4]),
+        ]
+    );
+    assert_eq!(
+        pass.refused,
+        vec![RefusedMerge {
+            repo: "owner/throwaway".to_string(),
+            pr: 21,
+            why: "branch is behind main".to_string(),
+        }]
+    );
+    assert_eq!(reads, vec!["owner/second", "owner/throwaway"]);
+}
+
+#[test]
+fn each_refusal_lands_in_waiting_once() {
+    let w = world("waiting");
+    let data = w.pipeline.join("data");
+    let refused = RefusedMerge {
+        repo: "owner/throwaway".to_string(),
+        pr: 21,
+        why: "branch is behind main".to_string(),
+    };
+    record_refused_merges(&data, std::slice::from_ref(&refused), 100).unwrap();
+    record_refused_merges(&data, &[refused], 200).unwrap();
+    let items = switchboard_core::waiting::LocalItems::new(&data)
+        .load()
+        .unwrap();
+    assert_eq!(
+        items.len(),
+        1,
+        "a second refusal of one PR replaces the first"
+    );
+    let item = &items[0];
+    assert_eq!(item.what, "Merge owner/throwaway#21");
+    assert!(item.why.contains("branch is behind main"), "{}", item.why);
+    assert_eq!(item.link, "https://github.com/owner/throwaway/pull/21");
+    assert_eq!(item.since, 200);
 }
 
 #[test]

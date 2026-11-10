@@ -124,13 +124,20 @@ fn autopilot_after_poll(
             clock: &SystemClock,
             repos: Vec::new(),
         };
-        let merged = store.load_all().and_then(|snaps| {
-            passes::merge_pass(&snaps, &poller, &pipeline_root, &starter.dev_root)
-        });
-        match merged {
-            Ok(merged) => {
-                for (repo, prs, issues) in merged {
+        // #380: every PR is tried; each refusal lands in Waiting on you.
+        match store.load_all() {
+            Ok(snaps) => {
+                let pass = passes::merge_pass(&snaps, &poller, &pipeline_root, &starter.dev_root);
+                for (repo, prs, issues) in &pass.merged {
                     eprintln!("autopilot: merged {repo} {prs:?}, closing {issues:?}");
+                }
+                for r in &pass.refused {
+                    eprintln!("autopilot: merge {}#{} refused: {}", r.repo, r.pr, r.why);
+                }
+                if let Err(e) =
+                    passes::record_refused_merges(data, &pass.refused, SystemClock.now())
+                {
+                    eprintln!("autopilot: waiting: {e}");
                 }
             }
             Err(e) => eprintln!("autopilot: merge: {e}"),
