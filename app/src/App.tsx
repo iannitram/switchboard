@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { openExternalLinksInBrowser } from "./external-links";
 import { VIEWS, type ViewName } from "./views";
 import { ErrorBanner, fromFleetError } from "./ErrorBanner";
 import { fleetErrors, settingsMissing, type CoreError, type CoreResult } from "./core";
@@ -25,6 +26,9 @@ export function App() {
   const [settingsStatus, setSettingsStatus] = useState<string | null>(null);
   const [errors, setErrors] = useState<CoreError[]>([]);
   const View = VIEWS[view];
+
+  // Links to other sites open in the system browser, not in this window.
+  useEffect(() => openExternalLinksInBrowser(), []);
 
   useEffect(() => {
     let live = true;

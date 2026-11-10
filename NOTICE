@@ -17,3 +17,7 @@ Files lifted from BroCrew, each with its notice and a line saying what was chang
 
 This product bundles three.js (https://threejs.org), copyright 2010-2024 three.js authors,
 licensed under the MIT License.
+
+This product bundles tauri-plugin-opener and @tauri-apps/plugin-opener (https://github.com/tauri-apps/plugins-workspace),
+copyright the Tauri Programme within The Commons Conservancy, licensed under the MIT License or the
+Apache License, Version 2.0, at your option.
