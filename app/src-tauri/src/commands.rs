@@ -528,6 +528,52 @@ pub fn chat_send_as_job(
         })
 }
 
+/// CORE-3, BAK-3 (#347): confirm a delete or restore request that waits in Waiting on you.
+/// `confirmed` is true only when I pressed the confirm button on that request; the argument
+/// has no default, and without it the guard refuses. `cwd` is the folder the app runs in (a
+/// job worktree refuses everything). A refusal changes nothing.
+pub fn confirm_guarded_at(
+    settings_path: &Path,
+    data: &Path,
+    text: &str,
+    confirmed: bool,
+    cwd: &Path,
+) -> Result<switchboard_core::confirm::Done, CoreError> {
+    use switchboard_core::rules::{self, Caller, Face};
+    let caller = Caller {
+        face: Face::Gui,
+        role: None,
+        in_job_worktree: rules::is_job_worktree(cwd),
+        confirmed_in_app: confirmed,
+    };
+    let settings = settings::load(settings_path)?;
+    switchboard_core::confirm::confirm(&settings, data, text, &caller)
+}
+
+/// CORE-3, BAK-3 (#347): the Waiting on you view's confirm on a guarded request. It runs off
+/// the main thread: a restore pushes to GitHub.
+#[tauri::command(async)]
+pub fn confirm_guarded(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    text: String,
+    confirmed: bool,
+) -> Result<switchboard_core::confirm::Done, FaceError> {
+    app.path()
+        .app_data_dir()
+        .map_err(|e| CoreError::Io(format!("app data dir: {e}")))
+        .and_then(|data| {
+            let cwd = std::env::current_dir()
+                .map_err(|e| CoreError::Io(format!("working folder: {e}")))?;
+            confirm_guarded_at(&state.settings_path, &data, &text, confirmed, &cwd)
+        })
+        .map_err(|e| FaceError::new("confirm_guarded", &e))
+}
+
+#[cfg(test)]
+#[path = "confirm_guarded_tests.rs"]
+mod confirm_guarded_tests;
+
 #[cfg(test)]
 #[path = "it_tickets_tests.rs"]
 mod it_tickets_tests;

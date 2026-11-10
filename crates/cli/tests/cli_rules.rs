@@ -273,3 +273,24 @@ fn repo_known_matches_owner_name_or_a_bare_name() {
     assert!(!repo_known("x/r", &known));
     assert!(!repo_known("r", &[]));
 }
+
+/// #347: the app's confirm step reads the request back from the item the CLI leaves, so the
+/// two wordings must stay one.
+#[test]
+fn the_app_reads_the_delete_and_restore_requests_back_from_the_cli_items() {
+    use switchboard_core::confirm::guarded_request;
+    use switchboard_core::rules::GuardedAction;
+    let fake = Fake::default();
+    let cwd = folder("confirm-roundtrip", false);
+    run(&["delete", "owner/alpha"], &cwd, &fake);
+    run(&["restore", "owner/alpha"], &cwd, &fake);
+    let repo = "owner/alpha".to_string();
+    let waiting = fake.waiting.borrow();
+    assert_eq!(
+        waiting.iter().map(guarded_request).collect::<Vec<_>>(),
+        vec![
+            Some(GuardedAction::DeleteRepo { repo: repo.clone() }),
+            Some(GuardedAction::RestoreOverLive { repo }),
+        ]
+    );
+}

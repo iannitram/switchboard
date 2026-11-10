@@ -14,6 +14,7 @@ pub mod backup;
 pub mod backup_run;
 pub mod budget;
 pub mod clock;
+pub mod confirm;
 pub mod error;
 pub mod fleet;
 pub mod frontdoor;
