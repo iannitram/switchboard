@@ -260,6 +260,15 @@ fn fetch_into(
                     CoreError::Parse(format!("release {tag}: asset {name} has no download URL"))
                 })?;
             let bytes = files.fetch(url)?;
+            // A download cut short must not be kept as if it were the whole file.
+            if let Some(size) = asset["size"].as_u64() {
+                if bytes.len() as u64 != size {
+                    return Err(CoreError::GitHub(format!(
+                        "release {tag}: {name} came as {} bytes, the release says {size}",
+                        bytes.len()
+                    )));
+                }
+            }
             let dir = staging.join(safe_part(tag));
             std::fs::create_dir_all(&dir).map_err(|e| io_error(&dir, e))?;
             let path = dir.join(safe_part(name));
@@ -670,8 +679,11 @@ pub fn backup_repo_from(
     let refusal = old.and_then(|old| {
         refuse_reason(&old, &manifest).or_else(|| {
             // A wiki that could not be read looks the same as a wiki that is gone.
-            (old.wiki && !manifest.wiki)
-                .then(|| "the new backup has no wiki, the last had one".to_string())
+            (old.wiki && !manifest.wiki).then(|| {
+                "the new backup has no wiki, the last had one; if the wiki was removed on \
+                 purpose, move the last backup's folder away to let a new backup be written"
+                    .to_string()
+            })
         })
     });
     if let Some(reason) = refusal {
@@ -1150,8 +1162,9 @@ struct Backup {
 }
 
 /// BAK-3: the backup in `dir`, checked against its manifest: the manifest names an `owner/name`
-/// repo, and the one this folder is the backup of when the folder is
-/// `.../github/<owner>/<name>`; `labels.json` and `milestones.json` hold the manifest's counts;
+/// repo, the one this folder is the backup of when the folder is `.../github/<owner>/<name>`,
+/// and the one every API address in the JSON files is for (so the check holds for a copy kept
+/// anywhere); `labels.json` and `milestones.json` hold the manifest's counts;
 /// `repo.bundle` has the manifest's hash (a manifest written before it held one has none to
 /// check; `check_refs` still counts the refs).
 fn read_backup(dir: &Path) -> Result<Backup, CoreError> {
@@ -1185,6 +1198,24 @@ fn read_backup(dir: &Path) -> Result<Backup, CoreError> {
     }
     let labels = keyed_items(dir, "labels.json", "name", manifest.labels)?;
     let milestones = keyed_items(dir, "milestones.json", "title", manifest.milestones)?;
+    // Wherever the folder sits, what it holds says which repo it is the backup of.
+    let mut items: Vec<Value> = labels.iter().chain(&milestones).cloned().collect();
+    for file in ["issues.json", "pulls.json", "comments.json"] {
+        let more = std::fs::read_to_string(dir.join(file))
+            .ok()
+            .and_then(|text| serde_json::from_str::<Vec<Value>>(&text).ok());
+        items.extend(more.unwrap_or_default());
+    }
+    let other = items
+        .iter()
+        .filter_map(repo_of)
+        .find(|of| !of.eq_ignore_ascii_case(&manifest.repo));
+    if let Some(other) = other {
+        return Err(wrong(format!(
+            "the manifest is for {}, the backup holds items of {other}",
+            manifest.repo
+        )));
+    }
     if !manifest.bundle_hash.is_empty() {
         let hash = bundle_hash(dir)?;
         if hash != manifest.bundle_hash {
@@ -1201,6 +1232,20 @@ fn read_backup(dir: &Path) -> Result<Backup, CoreError> {
         milestones,
         bundle: dir.join("repo.bundle"),
     })
+}
+
+/// The `owner/name` in a backed-up item's API address (`repository_url`, `issue_url` or `url`),
+/// when it has one.
+fn repo_of(item: &Value) -> Option<String> {
+    ["repository_url", "issue_url", "url"]
+        .iter()
+        .find_map(|key| {
+            let rest = item[*key]
+                .as_str()?
+                .strip_prefix("https://api.github.com/repos/")?;
+            let mut parts = rest.split('/');
+            Some(format!("{}/{}", parts.next()?, parts.next()?))
+        })
 }
 
 /// BAK-3: the bundle, cloned into `work`, holds as many refs as the manifest says.

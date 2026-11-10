@@ -382,6 +382,37 @@ fn a_manifest_for_another_repo_than_its_folder_is_refused() {
     refused_before_any_write(&f, &home, "not an owner/name repo");
 }
 
+/// #364: a copy of the backup kept anywhere (not in `github/<owner>/<name>`), its manifest edited
+/// to name another repo: what the folder holds still says which repo it is the backup of.
+#[test]
+fn a_manifest_for_another_repo_than_the_backups_items_is_refused_wherever_it_sits() {
+    let f = fixture("wrong-repo-copy");
+    std::fs::write(
+        f.backup.join("comments.json"),
+        r#"[{"body": "me too",
+             "issue_url": "https://api.github.com/repos/owner/demo/issues/1"}]"#,
+    )
+    .unwrap();
+    set_manifest(&f.backup, |m| m["repo"] = json!("other/zzz"));
+    refused_before_any_write(
+        &f,
+        &f.backup,
+        "the manifest is for other/zzz, the backup holds items of owner/demo",
+    );
+
+    // With the manifest's own repo (any case) the same copy restores.
+    set_manifest(&f.backup, |m| m["repo"] = json!("Owner/Demo"));
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            answer(404, json!({"message": "Not Found"})),
+            answer(200, json!({"full_name": NEW, "private": true})),
+        ],
+    );
+    let report = restore_history_from(&f.fleet, &f.backup, NEW, &remote(&f, &api)).unwrap();
+    assert_eq!(report.refs, 3);
+}
+
 /// #365: a label comes back with its colour and description, a milestone with its description
 /// and due date.
 #[test]

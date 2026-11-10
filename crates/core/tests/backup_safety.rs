@@ -10,8 +10,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
 use switchboard_core::backup::{
-    backup_all_from, backup_repo_from, BackupOutcome, FileSource, Manifest, Remote,
+    backup_all_from, backup_repo_from, BackupOutcome, FileSource, HttpFiles, Manifest, Remote,
 };
+use switchboard_core::backup_run::{failed_row, BackupRow};
 use switchboard_core::github::transport::{GitHubTransport, RestAnswer};
 use switchboard_core::settings::Settings;
 use switchboard_core::CoreError;
@@ -284,6 +285,110 @@ fn backups_of_one_repo_at_once_each_write_a_whole_backup() {
     }
 }
 
+/// The folder the parent of `two_processes_child` hands it.
+const CHILD_ROOT: &str = "SWITCHBOARD_TEST_BACKUP_CHILD_ROOT";
+
+/// One backup in a process of its own, for the test below. Does nothing in a normal test run:
+/// only the parent sets `CHILD_ROOT`. Waits for `<root>/go` so every child starts together.
+#[test]
+fn two_processes_child() {
+    let Ok(root) = std::env::var(CHILD_ROOT) else {
+        return;
+    };
+    let root = PathBuf::from(root);
+    while !root.join("go").exists() {
+        std::thread::sleep(std::time::Duration::from_micros(200));
+    }
+    let api = ByPath::default();
+    let files = Files::default();
+    let outcome = backup_repo_from(
+        &settings(&root.join("Backups")),
+        REPO,
+        &remote(&root.join("server"), &api, &files),
+        TAKEN_AT,
+    );
+    match outcome {
+        Ok(BackupOutcome::Written(_)) => println!("child outcome: written"),
+        Ok(BackupOutcome::Refused(why)) => println!("child outcome: refused {why}"),
+        Err(e) => println!("child outcome: error {e}"),
+    }
+}
+
+/// #363: backups of one repo started at the same moment in separate processes (the app's weekly
+/// run and `switchboard backup`), which the lock inside one process does not keep apart. A
+/// process that loses the race for the folder may come back with an error; what must hold is
+/// that at least one is written and the folder left behind is one whole backup, with the bundle
+/// its manifest was written for and no staging or set-aside folder beside it.
+#[test]
+fn backups_of_one_repo_from_several_processes_leave_one_whole_backup() {
+    let root = scratch("processes");
+    let server = server(&root, REPO, true);
+    let backups = root.join("Backups");
+    back_up(&backups, &server, &ByPath::default());
+    let dir = folder(&backups, REPO);
+    let go = root.join("go");
+
+    for round in 0..5 {
+        let _ = std::fs::remove_file(&go);
+        let children: Vec<_> = (0..4)
+            .map(|_| {
+                Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", "two_processes_child", "--nocapture"])
+                    .env(CHILD_ROOT, &root)
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .unwrap()
+            })
+            .collect();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        std::fs::write(&go, "").unwrap();
+        let said: Vec<String> = children
+            .into_iter()
+            .map(|child| {
+                let out = child.wait_with_output().unwrap();
+                String::from_utf8_lossy(&out.stdout).into_owned()
+            })
+            .collect();
+
+        for text in &said {
+            assert!(
+                text.contains("child outcome: written") || text.contains("child outcome: error"),
+                "round {round}: {text}"
+            );
+        }
+        assert!(
+            said.iter().any(|t| t.contains("child outcome: written")),
+            "round {round}: no backup was written: {said:?}"
+        );
+        assert_eq!(names(&dir), WHOLE, "round {round}");
+        let manifest = read_manifest(&dir);
+        assert_eq!(
+            (manifest.refs, manifest.issues, manifest.wiki),
+            (1, 2, true)
+        );
+        assert_eq!(
+            manifest.bundle_hash,
+            git(&dir, &["hash-object", "--no-filters", "repo.bundle"]),
+            "round {round}: the bundle is the manifest's"
+        );
+        let bundle = dir.join("repo.bundle");
+        git(
+            &server.join(format!("{REPO}.git")),
+            &["bundle", "verify", "-q", &bundle.to_string_lossy()],
+        );
+        git(
+            &dir.join("wiki.git"),
+            &["rev-parse", "--verify", "-q", "master"],
+        );
+        assert_eq!(
+            names(dir.parent().unwrap()),
+            ["demo"],
+            "round {round}: no staging or set-aside folder is left"
+        );
+    }
+}
+
 /// #364: the manifest holds the hash of the bundle it was written for.
 #[test]
 fn the_manifest_holds_the_bundles_hash() {
@@ -377,6 +482,43 @@ fn a_repo_with_no_wiki_is_written_without_one() {
     assert!(!folder(&backups, REPO).join("wiki.git").exists());
 }
 
+/// #367: a wiki that was really removed. The refusal says what to do, and doing it (moving the
+/// last backup away) lets the next backup be written, without a wiki.
+#[test]
+fn a_wiki_removed_on_purpose_has_a_stated_way_forward() {
+    let root = scratch("wiki-removed");
+    let server = server(&root, REPO, true);
+    let backups = root.join("Backups");
+    let api = ByPath::default();
+    assert!(back_up(&backups, &server, &api).wiki);
+    let dir = folder(&backups, REPO);
+    let before = tree(&dir);
+
+    std::fs::remove_dir_all(server.join(format!("{REPO}.wiki.git"))).unwrap();
+    let files = Files::default();
+    let outcome = backup_repo_from(
+        &settings(&backups),
+        REPO,
+        &remote(&server, &api, &files),
+        TAKEN_AT,
+    );
+    match outcome {
+        Ok(BackupOutcome::Refused(why)) => {
+            assert!(
+                why.starts_with("the new backup has no wiki, the last had one"),
+                "{why}"
+            );
+            assert!(why.contains("move the last backup's folder away"), "{why}");
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    assert_eq!(tree(&dir), before, "the last backup is untouched");
+
+    std::fs::rename(&dir, root.join("demo-with-wiki")).unwrap();
+    assert!(!back_up(&backups, &server, &api).wiki);
+    assert!(!dir.join("wiki.git").exists());
+}
+
 /// #368: a backup holds the repo's releases: the list, and each file under its tag.
 #[test]
 fn a_backup_holds_the_releases_and_their_files() {
@@ -457,6 +599,114 @@ fn a_release_file_that_cannot_be_fetched_keeps_the_last_backup() {
     assert!(matches!(outcome, Err(CoreError::GitHub(_))), "{outcome:?}");
     assert_eq!(tree(&dir), before);
     assert_eq!(names(dir.parent().unwrap()), ["demo"]);
+}
+
+/// #368: a release file that came short of the size the release gives (a download cut off) is
+/// not kept as if it were whole: the backup fails and the last one stays.
+#[test]
+fn a_release_file_cut_short_keeps_the_last_backup() {
+    let root = scratch("release-short");
+    let server = server(&root, REPO, false);
+    let backups = root.join("Backups");
+    back_up(&backups, &server, &ByPath::default());
+    let dir = folder(&backups, REPO);
+    let before = tree(&dir);
+
+    let asset = "https://api.github.com/repos/owner/demo/releases/assets/7";
+    let api = ByPath {
+        releases: vec![json!({"tag_name": "v1.0", "assets": [{
+            "name": "app.zip", "size": 9, "url": asset,
+        }]})],
+        ..ByPath::default()
+    };
+    let files = Files {
+        by_url: HashMap::from([(asset.to_string(), b"zip".to_vec())]),
+        ..Files::default()
+    };
+    let outcome = backup_repo_from(
+        &settings(&backups),
+        REPO,
+        &remote(&server, &api, &files),
+        TAKEN_AT,
+    );
+    match outcome {
+        Err(CoreError::GitHub(why)) => {
+            assert!(why.contains("came as 3 bytes, the release says 9"), "{why}");
+        }
+        other => panic!("expected an error, got {other:?}"),
+    }
+    assert_eq!(tree(&dir), before);
+    assert_eq!(names(dir.parent().unwrap()), ["demo"]);
+}
+
+struct Token;
+
+impl switchboard_core::platform::TokenStore for Token {
+    fn get(&self, _service: &str) -> Option<String> {
+        Some("test-token-not-real".to_string())
+    }
+}
+
+/// A local HTTP server for `connections` requests, one after the other: `/app.zip` is nine
+/// bytes, `/short.zip` says nine and sends three, anything else is 404. Returns its address and
+/// a handle that gives every request's text.
+fn http_server(connections: usize) -> (String, std::thread::JoinHandle<Vec<String>>) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let handle = std::thread::spawn(move || {
+        let mut requests = Vec::new();
+        for _ in 0..connections {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0u8; 1];
+            while !request.ends_with(b"\r\n\r\n") && stream.read(&mut byte).unwrap_or(0) == 1 {
+                request.push(byte[0]);
+            }
+            let request = String::from_utf8_lossy(&request).into_owned();
+            let answer: &[u8] = if request.starts_with("GET /app.zip ") {
+                b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\nConnection: close\r\n\r\nzip bytes"
+            } else if request.starts_with("GET /short.zip ") {
+                b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\nConnection: close\r\n\r\nzip"
+            } else {
+                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            };
+            let _ = stream.write_all(answer);
+            requests.push(request);
+        }
+        requests
+    });
+    (base, handle)
+}
+
+/// #368: `HttpFiles`, the file source the app uses, against a local server: a file comes back
+/// whole, a 404 and a download cut short are errors, and the GitHub token is not sent to a host
+/// that is not GitHub's.
+#[test]
+fn http_files_fetches_a_file_and_fails_on_a_missing_or_short_one() {
+    let (base, server) = http_server(3);
+    let files = HttpFiles::new(&Token).unwrap();
+
+    assert_eq!(
+        files.fetch(&format!("{base}/app.zip")).unwrap(),
+        b"zip bytes"
+    );
+    let gone = files.fetch(&format!("{base}/gone.zip"));
+    assert!(matches!(gone, Err(CoreError::GitHub(_))), "{gone:?}");
+    let short = files.fetch(&format!("{base}/short.zip"));
+    assert!(matches!(short, Err(CoreError::GitHub(_))), "{short:?}");
+
+    let requests = server.join().unwrap();
+    assert_eq!(requests.len(), 3);
+    for request in &requests {
+        let lower = request.to_ascii_lowercase();
+        assert!(!lower.contains("authorization"), "{request}");
+        assert!(!lower.contains("test-token-not-real"), "{request}");
+        assert!(
+            lower.contains("accept: application/octet-stream"),
+            "{request}"
+        );
+    }
 }
 
 /// #369: the repo in the middle cannot be backed up; the ones before and after it still are,
@@ -557,4 +807,24 @@ fn an_empty_folder_is_no_last_backup() {
     std::fs::create_dir_all(folder(&backups, REPO)).unwrap();
     back_up(&backups, &server, &ByPath::default());
     assert!(folder(&backups, REPO).join("manifest.json").is_file());
+}
+
+/// #369: a repo whose backup failed is a row of its own, so the rows of the other repos in a
+/// "Back up all" still come back.
+#[test]
+fn a_failed_backup_is_a_row_with_the_error_as_its_reason() {
+    let backups = Path::new("/nc/Backups");
+    let error = CoreError::Io("o/gone: git clone --mirror: not found".to_string());
+    assert_eq!(
+        failed_row(backups, "o/gone", &error),
+        BackupRow {
+            repo: "o/gone".to_string(),
+            outcome: "failed".to_string(),
+            folder: switchboard_core::backup_run::folder(backups, "o/gone")
+                .display()
+                .to_string(),
+            manifest: None,
+            reason: Some(error.to_string()),
+        }
+    );
 }
