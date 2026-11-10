@@ -93,13 +93,12 @@ fn no_pipeline_repo_in_the_settings_is_the_sky_with_no_job_and_no_error() {
 }
 
 #[test]
-fn a_ledger_that_does_not_read_still_gives_the_sky_without_jobs_and_says_why() {
-    // Not UTF-8, so `read_ledger` cannot read the file.
-    let (star, jobs_error) = star(&setup("badledger", &[0xff, 0xfe, 0xfd, b'\n']));
+fn a_ledger_that_is_not_utf8_still_gives_the_sky_without_jobs() {
+    // Before #349 `read_ledger` fails on such a file (the jobs error); since #349 it reads the
+    // bad bytes as a line that is no event. Either way the sky shows, with no job.
+    let (star, _jobs_error) = star(&setup("badledger", &[0xff, 0xfe, 0xfd, b'\n']));
     assert_eq!(star["inFlight"], json!(false), "{star}");
     assert_eq!(star["job"], json!(null), "{star}");
-    let why = jobs_error.expect("the ledger error").to_string();
-    assert!(why.contains("m1.jsonl"), "{why}");
 }
 
 #[test]
