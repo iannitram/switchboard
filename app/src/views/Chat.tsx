@@ -110,6 +110,8 @@ export type ChatRoute = {
   service?: string;
   model?: string;
   handoff?: string | null;
+  /** FD-3: nothing was in budget, so the ask is queued in its thread (`handoff_id`); why. */
+  queued?: string;
 };
 
 /** One turn in the thread: the person's message, or the answer to it. */
@@ -198,9 +200,10 @@ export function Chat({
     const pick = result.ok.pick;
     setRouted(pick && pick.to === "claude-handoff" ? { reason: pick.reason, prompt: message } : null);
     const answer = result.ok;
+    // Any reply that names its thread continues it, a queued ask's too (FD-3).
+    if (answer.handoff_id) setThreadId(answer.handoff_id);
     if (answer.text !== undefined) {
       const { text, service, model, step, handoff: moved, handoff_id, kind } = answer;
-      if (handoff_id) setThreadId(handoff_id);
       setTurns((current) => [
         ...current,
         { role: "assistant", text, service, model, step, handoff: moved ?? null, handoff_id, kind },
@@ -252,6 +255,7 @@ export function Chat({
       {route && (
         <p>{`Picked by: ${route.step}${route.kind ? ` (${route.kind})` : ""}`}</p>
       )}
+      {route?.queued && <p role="status">{`Queued: ${route.queued}. The ask is kept in this chat.`}</p>}
     </div>
   );
 }

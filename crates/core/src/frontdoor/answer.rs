@@ -1,7 +1,7 @@
 //! FD-11, FD-13: answer one routed chat turn. The route's pick is a service and model: build that
 //! service's adapter, send the turn with the thread's earlier turns, and store the user turn and
 //! the answer turn (with its log row) in the thread. A Claude handoff or a wait is not answered:
-//! nothing is sent and nothing is stored (FD-8).
+//! nothing is sent (FD-8); a wait's ask is queued in the thread (FD-3, #377).
 //!
 //! The transport and the key lookup are passed in, so a test sends nothing and reads no
 //! environment. A key is never logged, stored or returned.
@@ -79,7 +79,14 @@ pub struct ChatReply {
     /// The reason in the model's `[[handoff: <reason>]]` marker, if its reply had one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub handoff: Option<String>,
+    /// FD-3 (#377): set when nothing was in budget: the ask is queued in its thread (under
+    /// `handoff_id`) and this says why, for the chat to show.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queued: Option<String>,
 }
+
+/// The `outcome` of a user turn that was queued because nothing was in budget (FD-3).
+pub const QUEUED: &str = "queued";
 
 /// A fresh thread id from the clock: `chat-<unix nanoseconds>`.
 pub fn new_handoff_id() -> String {
@@ -154,16 +161,33 @@ fn adapter_for(service: &str, ctx: &AnswerContext) -> Result<Box<dyn ChatAdapter
     })
 }
 
-/// The thread's earlier user and answer turns, oldest first.
+/// The thread's earlier user and answer turns, oldest first. A queued ask that was never
+/// answered is left out, so the model sees questions and answers in turn.
 fn history(store: &ThreadStore, handoff_id: &str) -> Result<Vec<Turn>, CoreError> {
     Ok(store
-        .read(handoff_id)?
+        .turns(handoff_id)?
         .into_iter()
+        .filter(|row| row.outcome.as_deref() != Some(QUEUED))
         .filter_map(|row| match (row.role, row.text) {
             (Some(role), Some(text)) => Some(Turn { role, text }),
             _ => None,
         })
         .collect())
+}
+
+/// FD-3 (#377): every queued ask still waiting: the threads whose last turn is a user turn
+/// marked `queued`, as (handoff id, the ask's row), threads in id order.
+pub fn queued_asks(data_dir: &Path) -> Result<Vec<(String, JobRow)>, CoreError> {
+    let store = ThreadStore::new(data_dir);
+    let mut out = Vec::new();
+    for id in store.list()? {
+        if let Some(last) = store.turns(&id)?.pop() {
+            if last.role.as_deref() == Some("user") && last.outcome.as_deref() == Some(QUEUED) {
+                out.push((id, last));
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// The user turn's row in the thread.
@@ -190,22 +214,40 @@ fn answer_row(answer: &Answer, kind: Option<&str>, handoff_id: &str) -> JobRow {
 /// FD-11: answer `message` for `route`. A service pick is sent through its adapter with the
 /// thread's earlier turns (`handoff_id`, or a new thread when None); then the user turn and the
 /// answer turn are stored. A missing key, a missing qwen URL or a failed call is the error, and
-/// nothing is stored. A Claude handoff or a wait answers nothing: the reply is the route alone.
+/// nothing is stored. A wait (nothing in budget, FD-3) queues the ask: the user turn is stored
+/// marked `queued` and the reply carries the thread and the reason (#377). A Claude handoff
+/// answers nothing: the reply is the route alone.
 pub fn answer_route(
     route: ChatRoute,
     message: &str,
     handoff_id: Option<&str>,
     ctx: &AnswerContext,
 ) -> Result<ChatReply, CoreError> {
-    let ChatPick::Service { service, model } = &route.pick else {
+    let empty = |route: ChatRoute| ChatReply {
+        route,
+        handoff_id: None,
+        text: None,
+        service: None,
+        model: None,
+        handoff: None,
+        queued: None,
+    };
+    if let ChatPick::Wait { reason } = &route.pick {
+        let id = handoff_id.map_or_else(new_handoff_id, str::to_string);
+        let row = JobRow {
+            outcome: Some(QUEUED.to_string()),
+            ..user_row(message, route.kind.as_deref(), &id)
+        };
+        ThreadStore::new(ctx.data_dir).append(&id, &row)?;
+        let queued = Some(reason.clone());
         return Ok(ChatReply {
-            route,
-            handoff_id: None,
-            text: None,
-            service: None,
-            model: None,
-            handoff: None,
+            handoff_id: Some(id),
+            queued,
+            ..empty(route)
         });
+    }
+    let ChatPick::Service { service, model } = &route.pick else {
+        return Ok(empty(route));
     };
     let adapter = adapter_for(service, ctx)?;
     let store = ThreadStore::new(ctx.data_dir);
@@ -225,6 +267,7 @@ pub fn answer_route(
         service: Some(answer.service),
         model: Some(answer.model),
         handoff: answer.handoff,
+        queued: None,
         route,
     })
 }
