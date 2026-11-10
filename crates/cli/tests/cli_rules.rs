@@ -18,7 +18,7 @@ use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use cli::{run_with, Writes};
+use cli::{repo_known, run_with, Writes};
 use switchboard_core::waiting::{Item, Source};
 
 const NOW: i64 = 1_700_000_000;
@@ -30,6 +30,9 @@ struct Fake {
     refuse: Option<&'static str>,
     merged: RefCell<Vec<(String, u64)>>,
     waiting: RefCell<Vec<Item>>,
+    /// `knows_repo` answers false when set; `asked` records each repo it was asked about.
+    unknown: bool,
+    asked: RefCell<Vec<String>>,
 }
 
 impl Writes for Fake {
@@ -44,6 +47,11 @@ impl Writes for Fake {
     fn waiting(&self, item: &Item) -> Result<(), String> {
         self.waiting.borrow_mut().push(item.clone());
         Ok(())
+    }
+
+    fn knows_repo(&self, repo: &str) -> Result<bool, String> {
+        self.asked.borrow_mut().push(repo.to_string());
+        Ok(!self.unknown)
     }
 }
 
@@ -224,4 +232,44 @@ fn unknown_role_exits_2() {
     assert_eq!(code, ExitCode::from(2));
     assert_eq!(err, "switchboard: unknown role: wizard\n");
     assert!(fake.merged.borrow().is_empty());
+}
+
+#[test]
+fn delete_and_restore_of_an_unknown_repo_exit_1_and_write_nothing() {
+    for command in ["delete", "restore"] {
+        let fake = Fake {
+            unknown: true,
+            ..Default::default()
+        };
+        let (code, err) = run(&[command, "nope"], &folder("unknown", false), &fake);
+        assert_eq!(code, ExitCode::from(1), "{command}");
+        assert_eq!(err, "switchboard: no such repo: nope\n", "{command}");
+        assert!(fake.waiting.borrow().is_empty(), "{command}");
+    }
+}
+
+#[test]
+fn merge_never_asks_whether_the_repo_is_known() {
+    let fake = Fake {
+        unknown: true,
+        ..Default::default()
+    };
+    run(
+        &["--role", "project-manager", "merge", "switchboard#7"],
+        &folder("merge-known", false),
+        &fake,
+    );
+    assert!(fake.asked.borrow().is_empty());
+    assert_eq!(fake.merged.borrow().len(), 1);
+}
+
+#[test]
+fn repo_known_matches_owner_name_or_a_bare_name() {
+    let known = vec!["o/r".to_string(), "iannitram/switchboard".to_string()];
+    assert!(repo_known("o/r", &known));
+    assert!(repo_known("switchboard", &known));
+    assert!(!repo_known("o/switchboard", &known));
+    assert!(!repo_known("witch", &known));
+    assert!(!repo_known("x/r", &known));
+    assert!(!repo_known("r", &[]));
 }

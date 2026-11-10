@@ -1,8 +1,8 @@
 //! `switchboard`: the CLI face (CLI-1 to CLI-3) and `switchboard mcp` (MCP-1 to MCP-3). Both
 //! are thin calls into the core; neither holds a rule of its own.
 
-// Skeleton only: stubs take arguments they don't read yet. Remove once CLI-1 and MCP-1 land.
-#![allow(unused_variables, dead_code)]
+// The test crates compile this file in as a module and leave `main` and others unused.
+#![allow(dead_code)]
 
 mod cli;
 mod mcp;
@@ -46,22 +46,54 @@ pub fn parse_args(argv: &[String]) -> Result<Args, String> {
     Ok(args)
 }
 
-/// The real core behind `switchboard mcp`: each read tool calls the same core call the CLI uses
-/// for that answer. None of those calls is built yet, so each tool answers with the issue that
-/// builds it.
-struct Core;
+/// The real core behind `switchboard mcp`: each read tool answers with what the CLI command of
+/// the same name prints with `--json`. `data` is the app data folder (`None` when unknown).
+struct Core {
+    data: Option<std::path::PathBuf>,
+}
+
+impl Core {
+    fn data(&self) -> Result<&std::path::Path, String> {
+        self.data
+            .as_deref()
+            .ok_or_else(|| format!("set {} to the app data folder", cli::DATA_ENV))
+    }
+}
 
 impl mcp::ReadCore for Core {
     fn call(&self, tool: &str, args: &serde_json::Value) -> Result<serde_json::Value, String> {
-        let blocker = match tool {
-            "sky" | "constellation" => "SKY-1, #30",
-            "star" => "SKY-8, #43",
-            "waiting" => "WAIT-1, #50",
-            "reports" => "REP-1, #44",
-            "budget" => "BUD-1, #23",
+        let text = |key: &str| args.get(key).and_then(|v| v.as_str());
+        let limit = args
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .map_or(usize::MAX, |n| n as usize);
+        let answer = match tool {
+            "sky" => cli::sky_answer(self.data()?),
+            "constellation" => {
+                let repo = text("repo").ok_or("constellation: repo is required")?;
+                cli::constellation_answer(self.data()?, repo)
+            }
+            "star" => {
+                let repo = text("repo").ok_or("star: repo is required")?;
+                let issue = args
+                    .get("issue")
+                    .and_then(|v| v.as_u64())
+                    .ok_or("star: issue is required")?;
+                cli::star_answer(self.data()?, &format!("{repo}#{issue}"))
+            }
+            "waiting" => cli::waiting_items(self.data()?).and_then(|mut items| {
+                items.truncate(limit);
+                serde_json::to_value(items).map_err(cli::Fail::from)
+            }),
+            "reports" => cli::reports_answer().and_then(|mut reports| {
+                reports.truncate(limit);
+                serde_json::to_value(reports).map_err(cli::Fail::from)
+            }),
+            "budget" => cli::budget_rows()
+                .and_then(|rows| serde_json::to_value(rows).map_err(cli::Fail::from)),
             other => return Err(format!("unknown tool: {other}")),
         };
-        Err(format!("{tool}: not built yet ({blocker})"))
+        answer.map_err(|fail| fail.message)
     }
 }
 
@@ -107,7 +139,10 @@ fn main() -> ExitCode {
                 clock: &SystemClock,
             };
             let stdin = std::io::stdin();
-            match mcp::serve(stdin.lock(), std::io::stdout().lock(), &Core, role, &writes) {
+            let core = Core {
+                data: cli::data_dir(),
+            };
+            match mcp::serve(stdin.lock(), std::io::stdout().lock(), &core, role, &writes) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("switchboard mcp: {e}");
@@ -116,5 +151,85 @@ fn main() -> ExitCode {
             }
         }
         _ => cli::run(&argv),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mcp::ReadCore;
+    use serde_json::json;
+    use switchboard_core::github::snapshot::SnapshotStore;
+    use switchboard_core::github::{Issue, PullRequest, RepoSnapshot};
+
+    /// A stub app data folder holding one repo snapshot with an open issue and a PR closing it.
+    fn stub_data(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("switchboard-core-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let snap = RepoSnapshot {
+            repo: "owner/alpha".to_string(),
+            issues: vec![Issue {
+                number: 2,
+                title: "Core two".to_string(),
+                state: "open".to_string(),
+                labels: vec!["size:medium".to_string()],
+                milestone: Some("1.0".to_string()),
+                body: String::new(),
+                closed_by_pr: None,
+            }],
+            pulls: vec![PullRequest {
+                number: 10,
+                title: "PR 10".to_string(),
+                state: "open".to_string(),
+                closes: vec![2],
+                ci_on_head: "success".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        SnapshotStore::new(&dir).save(&snap).expect("save snapshot");
+        dir
+    }
+
+    #[test]
+    fn read_tools_answer_data_from_the_stub_folder() {
+        let core = Core {
+            data: Some(stub_data("answers")),
+        };
+        let sky = core.call("sky", &json!({})).expect("sky");
+        assert_eq!(sky[0]["repo"], "owner/alpha");
+        assert_eq!(sky[0]["open"], 1);
+        let star = core
+            .call("star", &json!({ "repo": "alpha", "issue": 2 }))
+            .expect("star");
+        assert_eq!(star["title"], "Core two");
+        assert_eq!(star["pr"]["number"], 10);
+        let constellation = core
+            .call("constellation", &json!({ "repo": "alpha" }))
+            .expect("constellation");
+        assert_eq!(constellation["repo"], "owner/alpha");
+        let waiting = core
+            .call("waiting", &json!({ "limit": 5 }))
+            .expect("waiting");
+        assert!(waiting.is_array());
+    }
+
+    #[test]
+    fn unknown_tool_repo_and_star_are_errors() {
+        let core = Core {
+            data: Some(stub_data("errors")),
+        };
+        assert!(core
+            .call("nope", &json!({}))
+            .unwrap_err()
+            .contains("unknown tool"));
+        assert!(core
+            .call("constellation", &json!({ "repo": "zzz" }))
+            .is_err());
+        assert!(core
+            .call("star", &json!({ "repo": "alpha", "issue": 99 }))
+            .is_err());
+        assert!(Core { data: None }.call("sky", &json!({})).is_err());
     }
 }

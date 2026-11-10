@@ -153,8 +153,8 @@ pub struct AbilitiesIndex {
     /// router (FD-8), not listed here.
     pub agents: BTreeMap<String, (String, String)>,
     /// FD-1's ask table: a lowercase phrase and the `needs` tag it asks for. `from_json_with`
-    /// seeds "search the web" -> `web` and "write code" -> `code`; `with_ask` adds one (a skill
-    /// name).
+    /// seeds "search the web" -> `web`, "write code" -> `code`, and "ask claude" and "open in
+    /// claude" -> `claude`; `with_ask` adds one (a skill name). Phrases are tried in this order.
     pub asks: Vec<(String, String)>,
 }
 
@@ -243,11 +243,21 @@ impl AbilitiesIndex {
     }
 
     /// The request kinds whose `needs` contain `tag`, in id order (FD-1's explicit-ask step).
-    /// Job actions are never listed.
+    /// Job actions are never listed; `actions_needing` lists those.
     pub fn kinds_needing(&self, tag: &str) -> Vec<&Ability> {
         self.request_kinds()
             .into_iter()
             .filter(|a| a.needs.iter().any(|need| need == tag))
+            .collect()
+    }
+
+    /// The job actions (entries that are not request kinds) whose `needs` contain `tag`, in id
+    /// order. FD-1's explicit-ask step uses it for a need only a job action carries, such as
+    /// `code`, which a chat adapter cannot answer.
+    pub fn actions_needing(&self, tag: &str) -> Vec<&Ability> {
+        self.entries
+            .iter()
+            .filter(|a| !a.request && a.needs.iter().any(|need| need == tag))
             .collect()
     }
 }
@@ -311,8 +321,14 @@ fn parse_models(
     Ok(models)
 }
 
-/// FD-1's built-in ask phrases and the `needs` tag each asks for.
-const DEFAULT_ASKS: &[(&str, &str)] = &[("search the web", "web"), ("write code", "code")];
+/// FD-1's built-in ask phrases and the `needs` tag each asks for, tried in this order. The need
+/// `claude` is special: it is always a Claude handoff (FD-8), whether or not an entry carries it.
+const DEFAULT_ASKS: &[(&str, &str)] = &[
+    ("search the web", "web"),
+    ("write code", "code"),
+    ("ask claude", "claude"),
+    ("open in claude", "claude"),
+];
 
 /// The service whose `ok` flag `true` means "this machine's Qwen" (`FleetModels::qwen`).
 const QWEN: &str = "qwen";

@@ -262,8 +262,14 @@ fn sky_star(snap: &RepoSnapshot, issue: &Issue, jobs: &[StarJob]) -> Star {
     }
 }
 
+/// One drift item with the link GitHub serves for it. An orphan links its issue. A dark feature
+/// and a stale roadmap link the ROADMAP.md on the default branch, but only when the snapshot has
+/// one; without it the link is the repo page, and the stale item says so (`no ROADMAP.md`).
 fn drift_item(snap: &RepoSnapshot, block: &FeatureBlock, item: &Drift) -> DriftItem {
-    let roadmap = format!("https://github.com/{}/blob/HEAD/ROADMAP.md", snap.repo);
+    let roadmap = match snap.roadmap_md {
+        Some(_) => format!("https://github.com/{}/blob/HEAD/ROADMAP.md", snap.repo),
+        None => format!("https://github.com/{}", snap.repo),
+    };
     match item {
         Drift::Orphan { number, features } => {
             let title = snap
@@ -300,6 +306,7 @@ fn drift_item(snap: &RepoSnapshot, block: &FeatureBlock, item: &Drift) -> DriftI
             let text = match (updated, age_days) {
                 (Some(u), Some(d)) => format!("ROADMAP.md updated {u}, {d} days ago"),
                 (Some(u), None) => format!("ROADMAP.md Updated: {u} is not a date"),
+                (None, _) if snap.roadmap_md.is_none() => "no ROADMAP.md".to_string(),
                 (None, _) => "ROADMAP.md has no Updated: line".to_string(),
             };
             DriftItem {
