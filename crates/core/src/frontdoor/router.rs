@@ -101,6 +101,9 @@ pub fn pick_for_kind(index: &AbilitiesIndex, kind: &str, budget: &dyn BudgetGate
 /// The Claude subscription's lane: never called by the core, only handed off (FD-8).
 const CLAUDE_SUBSCRIPTION: &str = "claude";
 
+/// The ask need that always takes the Claude handoff (or the wait for its budget).
+const CLAUDE_NEED: &str = "claude";
+
 /// The paid pools FD-3 uses only as overflow, after every resetting or free service.
 const PAID_POOLS: [&str; 2] = ["deepseek", "claudeapi"];
 
@@ -234,7 +237,11 @@ fn trigger(message: &str, index: &AbilitiesIndex, budget: &dyn BudgetGate) -> Op
     })
 }
 
-/// FD-1 step 2: an ask phrase in the message whose `needs` tag some request kind carries.
+/// FD-1 step 2: an ask phrase in the message. When a request kind carries its `needs` tag, the
+/// route is that kind's pick (FD-3). Otherwise, when a job action carries the tag (`code`), or
+/// the need is `claude`, a chat adapter cannot answer it (it needs tools and a repo), so the
+/// pick is a Claude handoff (FD-8), or the wait for Claude's budget when braked, with no kind.
+/// A need nothing carries falls through to the next phrase and then the next step.
 fn explicit_ask(message: &str, index: &AbilitiesIndex, budget: &dyn BudgetGate) -> Option<Route> {
     let haystack = padded(message);
     index
@@ -242,11 +249,25 @@ fn explicit_ask(message: &str, index: &AbilitiesIndex, budget: &dyn BudgetGate) 
         .iter()
         .filter(|(phrase, _)| haystack.contains(&padded(phrase)))
         .find_map(|(_, need)| {
-            let kind = index.kinds_needing(need).first()?.id.clone();
+            if let Some(kind) = index.kinds_needing(need).first().map(|a| a.id.clone()) {
+                return Some(Route {
+                    step: Step::ExplicitAsk { need: need.clone() },
+                    pick: pick_for_kind(index, &kind, budget),
+                    kind: Some(kind),
+                });
+            }
+            if need != CLAUDE_NEED && index.actions_needing(need).is_empty() {
+                return None;
+            }
+            let pick = if budget.allows(CLAUDE_SUBSCRIPTION) {
+                Pick::ClaudeHandoff(format!("{need}: needs a Claude session with tools"))
+            } else {
+                wait_claude()
+            };
             Some(Route {
                 step: Step::ExplicitAsk { need: need.clone() },
-                pick: pick_for_kind(index, &kind, budget),
-                kind: Some(kind),
+                kind: None,
+                pick,
             })
         })
 }
@@ -290,8 +311,9 @@ fn budget_rule(index: &AbilitiesIndex, budget: &dyn BudgetGate, complexity: Comp
 /// FD-1: route one message, stopping at the first step that matches: a trigger word (an
 /// agent's name, whole word, case-insensitive), an explicit ask, the labeller (rules only, no
 /// small model), then the budget and complexity rule. A braked pool is skipped, never called,
-/// and the `Pick::Wait` says why. An ask whose `needs` tag no request kind carries falls
-/// through to the next step.
+/// and the `Pick::Wait` says why. An ask whose `needs` tag a request kind carries takes that
+/// kind's pick; one only a job action carries (and the `claude` ask) is a Claude handoff; one
+/// nothing carries falls through to the next step.
 pub fn route(
     message: &str,
     index: &AbilitiesIndex,
