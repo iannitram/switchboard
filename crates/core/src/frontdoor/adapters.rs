@@ -123,10 +123,13 @@ pub struct HttpChatTransport {
 
 impl HttpChatTransport {
     pub fn new() -> Self {
+        Self::with_timeout(std::time::Duration::from_secs(300))
+    }
+
+    /// A transport whose whole call (connect, send, read) gives up after `timeout`.
+    pub fn with_timeout(timeout: std::time::Duration) -> Self {
         Self {
-            agent: ureq::AgentBuilder::new()
-                .timeout(std::time::Duration::from_secs(300))
-                .build(),
+            agent: ureq::AgentBuilder::new().timeout(timeout).build(),
         }
     }
 }
