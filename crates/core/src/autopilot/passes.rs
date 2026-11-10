@@ -520,8 +520,21 @@ pub fn write_job(
     Ok(job_path)
 }
 
+/// Create the `.out` and `.err` files beside a job file (`<job id>.json`), for the launcher's
+/// stdout and stderr. Answers them as (out, err).
+pub fn job_log_files(job_path: &Path) -> Result<(std::fs::File, std::fs::File), CoreError> {
+    let create = |p: PathBuf| {
+        std::fs::File::create(&p).map_err(|e| CoreError::Io(format!("{}: {e}", p.display())))
+    };
+    Ok((
+        create(job_path.with_extension("out"))?,
+        create(job_path.with_extension("err"))?,
+    ))
+}
+
 /// The app's starter: AUTO-1 through the bridge, and `fleet run <job file> --json` in the
-/// background.
+/// background. The launcher's stdout goes to `<job id>.out` and its stderr to `<job id>.err`,
+/// beside the job file, so a crash leaves its reason on disk.
 pub struct FleetStarter {
     pub fleet: FleetBridge,
     pub jobs_dir: PathBuf,
@@ -535,9 +548,7 @@ impl JobStarter for FleetStarter {
 
     fn start(&mut self, job: &Value, brief: &str) -> Result<(), CoreError> {
         let path = write_job(&self.jobs_dir, &self.dev_root, job, brief)?;
-        let out_path = path.with_extension("out");
-        let out = std::fs::File::create(&out_path)
-            .map_err(|e| CoreError::Io(format!("{}: {e}", out_path.display())))?;
+        let (out, err) = job_log_files(&path)?;
         let job_file = path.to_string_lossy().into_owned();
         let command = self.fleet.command_line(&["run", &job_file]);
         let mut child = Command::new(&command[0])
@@ -545,7 +556,7 @@ impl JobStarter for FleetStarter {
             .env(FLEET_ROOT_ENV, self.fleet.root().as_os_str())
             .stdin(Stdio::null())
             .stdout(Stdio::from(out))
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(err))
             .spawn()
             .map_err(|e| CoreError::Io(format!("{}: {e}", command[0])))?;
         std::thread::spawn(move || {
