@@ -15,8 +15,9 @@ export type Loadout = {
 };
 
 // The toolchains the core probes (it.rs `LOADOUT_TOOLCHAINS`). The core leaves a missing one out
-// of `toolchains`, so the panel names it "not found" instead of dropping its row.
-const TOOLCHAINS = ["cargo", "node", "python3"];
+// of `toolchains`, so the panel names it "not found" instead of dropping its row. `gemini` is the
+// Antigravity CLI (`agy`): presence only, never "signed in".
+const TOOLCHAINS = ["cargo", "node", "python3", "gemini"];
 
 // How often the age line is worked out again, so a stalled core timer shows as an older read.
 const AGE_TICK_MS = 30_000;

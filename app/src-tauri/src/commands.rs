@@ -338,22 +338,46 @@ pub fn budget_save_edit(
 }
 
 /// REP-1, REP-3: the reports, newest first, narrowed by `filter` when the face sends one.
-/// Chat threads join when FD-13 (#113) fills the thread store.
+/// The chat threads join from the thread store in the app data folder (REP follow-up, #286).
 #[tauri::command]
 pub fn reports(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     filter: Option<Filter>,
 ) -> Result<Vec<Report>, FaceError> {
     bridge(&state.settings_path)
         .and_then(|fleet| {
             let env = std::env::var_os(FLEET_STATE_DIR_ENV);
-            reports::load(&fleet, env.as_deref(), &[], filter.as_ref())
+            let data = app
+                .path()
+                .app_data_dir()
+                .map_err(|e| CoreError::Io(format!("app data dir: {e}")))?;
+            let threads = thread_rows(&data);
+            reports::load(&fleet, env.as_deref(), &threads, filter.as_ref())
         })
         .map_err(|e| {
             record_fleet_error(&state, &e);
             FaceError::new("reports", &e)
         })
 }
+
+/// REP follow-up (#286): each chat thread in the thread store under `data` (the folder
+/// `ThreadStore::new` takes, the same one the chat commands write to), in the store's sorted id
+/// order. A missing store folder gives none. A thread that cannot be read is skipped, so the
+/// other threads still show.
+fn thread_rows(data: &Path) -> Vec<(String, Vec<switchboard_core::joblog::JobRow>)> {
+    let store = switchboard_core::frontdoor::thread::ThreadStore::new(data);
+    store
+        .list()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|id| store.read(&id).ok().map(|rows| (id, rows)))
+        .collect()
+}
+
+#[cfg(test)]
+#[path = "reports_threads_tests.rs"]
+mod reports_threads_tests;
 
 /// FD-9: log an implicit chat signal (FD-8's press sends `opened-in-claude`) as its own row in
 /// the chat's thread, in the thread store in the app data folder.
@@ -480,19 +504,41 @@ mod loadout_tests;
 #[path = "commands_tests.rs"]
 mod tests;
 
-/// FD-1: route one Chat message (the composer's Send, #177) and say which step picked.
-#[tauri::command]
+/// FD-1, FD-11: route one Chat message (the composer's Send, #177), then answer it: a service
+/// pick is sent through its adapter and both turns are stored in the thread (`handoff_id` names
+/// an open thread; none starts one). A Claude handoff is not answered. The reply is the route
+/// (`step`, `kind`, `pick`) with `text`, `service`, `model`, `handoff` and `handoff_id` when
+/// answered. It runs off the main thread: it calls a model.
+#[tauri::command(async)]
 pub fn chat_route(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     message: String,
-) -> Result<switchboard_core::frontdoor::chat::ChatRoute, FaceError> {
+    handoff_id: Option<String>,
+) -> Result<switchboard_core::frontdoor::answer::ChatReply, FaceError> {
+    use switchboard_core::frontdoor::{answer, chat};
+    let data = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| CoreError::Io(format!("app data dir: {e}")));
     bridge(&state.settings_path)
         .and_then(|fleet| {
-            switchboard_core::frontdoor::chat::route_message(
-                &fleet,
-                &message,
-                switchboard_core::frontdoor::chat::estimate_complexity(&message),
-            )
+            let routed =
+                chat::route_message(&fleet, &message, chat::estimate_complexity(&message))?;
+            let machine = switchboard_core::abilities::FleetModels::local_machine();
+            let qwen = answer::qwen_base_url(&fleet, machine.as_deref());
+            let env = |name: &str| std::env::var(name).ok();
+            let transport = || -> Box<dyn switchboard_core::frontdoor::adapters::ChatTransport> {
+                Box::new(switchboard_core::frontdoor::adapters::HttpChatTransport::new())
+            };
+            let data = data?;
+            let ctx = answer::AnswerContext {
+                data_dir: &data,
+                qwen_base_url: qwen.as_deref(),
+                env: &env,
+                transport: &transport,
+            };
+            answer::answer_route(routed, &message, handoff_id.as_deref(), &ctx)
         })
         .map_err(|e| {
             record_fleet_error(&state, &e);

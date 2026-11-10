@@ -65,7 +65,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 `crates/core/src/settings.rs` · CORE-5 · present. The one settings file: pipeline repo clone, NextCloud backups folder, vault agents folder. `Settings::missing()` names what is not set; `load` gives defaults for a missing file. Read by every module that needs a path. Face: a Settings view (`app/src/views/Settings.tsx`, present).
 
 ### core-fleet
-`crates/core/src/fleet.rs` · CORE-1, CORE-2, AUTO-1 · present. `FleetBridge` runs `<python> <root>/tools/fleet/fleet.py <cmd> --json` (root from settings, `FLEET_ROOT` overrides) and parses it; a non-zero exit or bad JSON is a `FleetError` (command, exit code, stderr), recorded in `FleetErrorLog`, never a guessed value. Tests use `tests/fixtures/fleet-stub/` (`FLEET_STUB_EXIT`, `FLEET_STUB_BADJSON`, answers in `answers/<cmd>.json`). Used by abilities, joblog, budget, github::queue, autopilot, it.
+`crates/core/src/fleet.rs` · CORE-1, CORE-2, AUTO-1 · present. `FleetBridge` runs `<python> <root>/tools/fleet/fleet.py <cmd> --json` (root from settings, `FLEET_ROOT` overrides) and parses it; a non-zero exit or bad JSON is a `FleetError` (command, exit code, stderr), recorded in `FleetErrorLog`, never a guessed value. Tests use `tests/fixtures/fleet-stub/` (`FLEET_STUB_EXIT`, `FLEET_STUB_BADJSON`, answers in `answers/<cmd>.json`). Used by abilities, joblog, budget, github::queue, autopilot, it. `clean_child_env(cmd)` (with the pure `clean_ld_library_path(ld, appdir)`) takes the packaged app's `PYTHONHOME`, `PYTHONPATH`, `PYTHONDONTWRITEBYTECODE` and its `APPDIR` entries in `LD_LIBRARY_PATH` out of every fleet child's environment, the bridge's and `FleetStarter::start`'s.
 
 ### core-abilities
 `crates/core/src/abilities.rs` · the abilities index · present. Reads `fleet actions --json`: every action and request kind (`"request": true`) with `needs` and `first`, and per kind the model for each service (`models`, `model(kind, service)`): the `ok.<service>.model` rows, plus `ok.qwen: true` and a top-level `claudeapi: true` filled from `tools/fleet/config.json` (`FleetModels`: this machine's `qwen_model`, `ok.claude`'s tier through `claudeapi_models`; `load_with`). Read by the router (FD-1, FD-3) and FD-12.
@@ -146,6 +146,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - REP-3 filter (`filter`, `Filter`): present.
 - REP-3 filter bar (`FilterBar`, `Reports`): present.
 - REP-W command (`state_dir_from`, `read_done_cards`, `assemble`, `load`, `reports`): present.
+- REP follow-up, chat threads in reports (`thread_rows` in `app/src-tauri/src/commands.rs`, read from the thread store in the app data folder): present.
 
 ### budget
 `crates/core/src/budget.rs`, `app/src/views/Budget.tsx` · BUD-1 to BUD-4 · planned. Rows from `fleet budget --json`, edits to `config.json` with a ledger row (U5: landed through review), refresh on a timer, Claude's pool as reading plus a labelled estimate from local session logs.
@@ -189,6 +190,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - FD-8 Open in Claude (`as_prompt`): present.
 - FD-4 learned pick (`sample_size`, `learned_pick`): present.
 - FD-1 chat_route command (`ChatRoute`, `FleetGate`, `route_message`, `estimate_complexity`, `chat_route`): present.
+- FD-11 answer a routed turn (`answer_route`, `AnswerContext`, `ChatReply`, `qwen_base_url`, `key_var`; `chat_route` returns `ChatReply`: the route plus `text`, `service`, `model`, `handoff`, `handoff_id` when answered): present. Keys come from one environment variable per paid service: `DEEPSEEK_API_KEY` (deepseek), `OPENAI_API_KEY` (chatgpt), `GEMINI_API_KEY` (gemini), `ANTHROPIC_API_KEY` (claudeapi); qwen needs none and takes its URL from `machines.<machine>.qwen_server_url` in the fleet config. A missing key is the turn's error (`no key for <service>: set <VAR>`), never another service. A chat turn's thread row carries `role` and `text`.
 - FD-5 sticky signals (`signals`): present.
 - FD-3 pick for a kind (`pick_for_kind`): present.
 - FD-1 router (`route`): present.
@@ -205,6 +207,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - AUTO-5 weekly due check (`weekly_due`): present.
 - AUTO-5 weekly run (`weekly_run`, `drift_pass` in `passes.rs`; the drift clear and the backup after Sunday 6am, from the app's poll thread): present.
 - AUTO-5 local lane health (`FleetStarter::may_spend` asks `qwen_server_up` for the lane `qwen`: an HTTP GET with `http_qwen_probe` on `machines.<machine>.qwen_server_url`, read by `FleetModels::read_qwen_server_url`; no URL or no answer means the next lane): present.
+- AUTO-5 failed-job clean-up (`pm_cleanup_target`, `remove_pm_worktree` in `passes.rs`; `FleetStarter::finished` removes the worktree and branch of a Project Manager job that ended `infra` with nothing pushed): present.
 - AUTO-7 place: present.
 - AUTO-3 review (`step`, `first_rung`): present.
 - AUTO-3 review job (`review_job`): present.

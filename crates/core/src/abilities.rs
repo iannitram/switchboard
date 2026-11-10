@@ -89,6 +89,30 @@ impl FleetModels {
         Some(Self::from_config(&config, machine))
     }
 
+    /// The labeller's model and server for `machine`: `machines.<machine>.qwen_model` and the
+    /// base URL of `machines.<machine>.qwen_server_url` (its `/v1/models` tail dropped). `None`
+    /// when either is missing or blank, so the caller labels by rules only.
+    pub fn qwen_endpoint(config: &Value, machine: Option<&str>) -> Option<(String, String)> {
+        let entry = config.get("machines")?.get(machine?)?;
+        let model = entry.get("qwen_model")?.as_str()?.trim();
+        let url = entry.get("qwen_server_url")?.as_str()?.trim();
+        let base = url.trim_end_matches('/');
+        let base = base.strip_suffix("/v1/models").unwrap_or(base);
+        let base = base.trim_end_matches('/');
+        (!model.is_empty() && !base.is_empty()).then(|| (model.to_string(), base.to_string()))
+    }
+
+    /// `qwen_endpoint` read from `<root>/tools/fleet/config.json`; `None` when the file cannot
+    /// be read or parsed.
+    pub fn read_qwen_endpoint(
+        fleet: &FleetBridge,
+        machine: Option<&str>,
+    ) -> Option<(String, String)> {
+        let text = std::fs::read_to_string(config_path(fleet)).ok()?;
+        let config: Value = serde_json::from_str(&text).ok()?;
+        Self::qwen_endpoint(&config, machine)
+    }
+
     /// This machine's token the way the fleet tools find it (`local_machine` in the pipeline's
     /// `tools/fleet/common.py`): `FLEET_MACHINE` when set and not blank, else the stripped
     /// contents of `~/.config/software-depot/machine`, either one run through `canon_machine`;

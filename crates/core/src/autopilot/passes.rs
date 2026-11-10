@@ -7,7 +7,7 @@ use super::review::{first_rung, review_job, Rung};
 use super::weekly::{roadmap_changed, weekly_due};
 use crate::abilities::FleetModels;
 use crate::clock::UnixSeconds;
-use crate::fleet::{FleetBridge, FLEET_ROOT_ENV};
+use crate::fleet::{clean_child_env, FleetBridge, FLEET_ROOT_ENV};
 use crate::github::merge::merge_passed;
 use crate::github::poll::Poller;
 use crate::github::snapshot::{RepoSnapshot, SnapshotStore};
@@ -573,6 +573,61 @@ pub fn job_timed_out(age_secs: u64) -> bool {
     age_secs > PM_JOB_TIMEOUT_SECS
 }
 
+/// A worktree and branch that a failed Project Manager job left behind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PmCleanup {
+    pub worktree: PathBuf,
+    pub branch: String,
+}
+
+/// Should the output of a finished `fleet run --json` job be cleaned up, and what? Yes only when
+/// `outcome` is `infra`, `pushed` is false, the worktree folder's name starts with `fleet-pm-`
+/// and `branch` starts with `fleet/pm-`; a missing or mistyped field is a no.
+pub fn pm_cleanup_target(output: &Value) -> Option<PmCleanup> {
+    if output.get("outcome")?.as_str()? != "infra" || output.get("pushed")?.as_bool()? {
+        return None;
+    }
+    let worktree = PathBuf::from(output.get("worktree")?.as_str()?);
+    let branch = output.get("branch")?.as_str()?;
+    let folder = worktree.file_name()?.to_str()?;
+    if !folder.starts_with("fleet-pm-") || !branch.starts_with("fleet/pm-") {
+        return None;
+    }
+    Some(PmCleanup {
+        worktree,
+        branch: branch.to_string(),
+    })
+}
+
+/// Removes the worktree and branch in `target` with git, run from the worktree's main clone.
+/// A worktree folder that does not exist is skipped; every failure is ignored.
+pub fn remove_pm_worktree(target: &PmCleanup) {
+    if !target.worktree.is_dir() {
+        return;
+    }
+    let git = |dir: &Path, args: &[&str]| {
+        let mut cmd = Command::new("git");
+        cmd.arg("-C").arg(dir).args(args);
+        cmd.stdin(Stdio::null());
+        cmd.output().ok().filter(|o| o.status.success())
+    };
+    let Some(common) = git(&target.worktree, &["rev-parse", "--git-common-dir"]) else {
+        return;
+    };
+    let common = PathBuf::from(String::from_utf8_lossy(&common.stdout).trim());
+    let common = if common.is_absolute() {
+        common
+    } else {
+        target.worktree.join(common)
+    };
+    let Some(clone) = common.parent().map(Path::to_path_buf) else {
+        return;
+    };
+    let worktree = target.worktree.to_string_lossy().into_owned();
+    let _ = git(&clone, &["worktree", "remove", "--force", &worktree]);
+    let _ = git(&clone, &["branch", "-D", &target.branch]);
+}
+
 /// The app's starter: AUTO-1 through the bridge, and `fleet run <job file> --json` in the
 /// background. The launcher's stdout goes to `<job id>.out` and its stderr to `<job id>.err`,
 /// beside the job file, so a crash leaves its reason on disk.
@@ -634,8 +689,10 @@ impl JobStarter for FleetStarter {
         let (out, err) = job_log_files(&path)?;
         let job_file = path.to_string_lossy().into_owned();
         let command = self.fleet.command_line(&["run", &job_file]);
-        let mut child = Command::new(&command[0])
-            .args(&command[1..])
+        let mut cmd = Command::new(&command[0]);
+        cmd.args(&command[1..]);
+        clean_child_env(&mut cmd);
+        let mut child = cmd
             .env(FLEET_ROOT_ENV, self.fleet.root().as_os_str())
             .stdin(Stdio::null())
             .stdout(Stdio::from(out))
@@ -654,7 +711,14 @@ impl JobStarter for FleetStarter {
             return Ok(true);
         }
         let out = self.jobs_dir.join(format!("{job_id}.out"));
-        if std::fs::metadata(out).is_ok_and(|m| m.len() > 0) {
+        if std::fs::metadata(&out).is_ok_and(|m| m.len() > 0) {
+            if let Some(clean) = std::fs::read_to_string(&out)
+                .ok()
+                .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+                .and_then(|output| pm_cleanup_target(&output))
+            {
+                remove_pm_worktree(&clean);
+            }
             return Ok(true);
         }
         let age = std::fs::metadata(&job_file)

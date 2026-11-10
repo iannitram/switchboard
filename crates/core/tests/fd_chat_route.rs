@@ -448,7 +448,7 @@ fn route_message_is_the_real_router_over_the_fleet() {
     let index = AbilitiesIndex::load_with(&fleet, FleetModels::local_machine().as_deref()).unwrap();
     for message in ["hello there", "search the web for llama-swap"] {
         let got = route_message(&fleet, message, DEFAULT_COMPLEXITY).unwrap();
-        let want = router::route(message, &index, &AllowAll, DEFAULT_COMPLEXITY);
+        let want = router::route(message, &index, &AllowAll, DEFAULT_COMPLEXITY, None);
         assert_eq!(got, ChatRoute::from(&want), "{message}");
     }
 }
@@ -512,7 +512,7 @@ fn a_qwen_first_kind_routes_to_qwen_with_this_machines_model() {
         Some("strix-halo"),
         "search the web for llama-swap",
         Complexity::Small,
-        router::route,
+        |m, i, g, c| router::route(m, i, g, c, None),
     )
     .unwrap();
     assert_eq!(
@@ -537,7 +537,7 @@ fn a_big_no_tools_message_routes_to_the_claude_api_sonnet_model() {
         Some("strix-halo"),
         "hello there",
         Complexity::BigNoTools,
-        router::route,
+        |m, i, g, c| router::route(m, i, g, c, None),
     )
     .unwrap();
     assert_eq!(
@@ -581,7 +581,8 @@ fn the_chat_route_command_is_a_thin_call_into_route_message() {
         .find("pub fn chat_route(")
         .expect("commands.rs has pub fn chat_route(");
     let before = &commands[..at];
-    let attr = before.rfind("#[tauri::command]").expect("an attribute");
+    // `#[tauri::command(async)]` counts: chat_route calls a model, so it runs off the main thread.
+    let attr = before.rfind("#[tauri::command").expect("an attribute");
     assert!(
         !before[attr..].contains("fn "),
         "#[tauri::command] is not on chat_route"
