@@ -206,6 +206,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - AUTO-6 satellite loop (`tick`, `ChildRunner`, `classify_failed`; the app's satellite thread, switched on by `satellite.json`): present.
 - AUTO-5 weekly due check (`weekly_due`): present.
 - AUTO-5 weekly run (`weekly_run`, `drift_pass` in `passes.rs`; the drift clear and the backup after Sunday 6am, from the app's poll thread): present.
+- AUTO-5 local lane health (`FleetStarter::may_spend` asks `qwen_server_up` for the lane `qwen`: an HTTP GET with `http_qwen_probe` on `machines.<machine>.qwen_server_url`, read by `FleetModels::read_qwen_server_url`; no URL or no answer means the next lane): present.
 - AUTO-5 failed-job clean-up (`pm_cleanup_target`, `remove_pm_worktree` in `passes.rs`; `FleetStarter::finished` removes the worktree and branch of a Project Manager job that ended `infra` with nothing pushed): present.
 - AUTO-7 place: present.
 - AUTO-3 review (`step`, `first_rung`): present.

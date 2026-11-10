@@ -5,6 +5,7 @@
 
 use super::review::{first_rung, review_job, Rung};
 use super::weekly::{roadmap_changed, weekly_due};
+use crate::abilities::FleetModels;
 use crate::clock::UnixSeconds;
 use crate::fleet::{clean_child_env, FleetBridge, FLEET_ROOT_ENV};
 use crate::github::merge::merge_passed;
@@ -630,15 +631,57 @@ pub fn remove_pm_worktree(target: &PmCleanup) {
 /// The app's starter: AUTO-1 through the bridge, and `fleet run <job file> --json` in the
 /// background. The launcher's stdout goes to `<job id>.out` and its stderr to `<job id>.err`,
 /// beside the job file, so a crash leaves its reason on disk.
+///
+/// The lane `qwen` may also spend only when the local model server answers: `qwen_probe` is
+/// asked with the `machines.<machine>.qwen_server_url` from the fleet config.
 pub struct FleetStarter {
     pub fleet: FleetBridge,
     pub jobs_dir: PathBuf,
     pub dev_root: PathBuf,
+    /// This machine's name, for the fleet config's `machines` table.
+    pub machine: Option<String>,
+    /// Does the model server at this URL answer? `http_qwen_probe` in the app; a fake in tests.
+    pub qwen_probe: QwenProbe,
+}
+
+/// A question to the local model server: does it answer at this URL?
+pub type QwenProbe = Box<dyn Fn(&str) -> bool + Send>;
+
+/// How long the model server gets to answer a probe, in seconds.
+pub const QWEN_PROBE_SECS: u64 = 4;
+
+/// The real probe: an HTTP GET with a `QWEN_PROBE_SECS` timeout. Any answer below 500 counts as
+/// up; a refused or timed-out connection or a server error is down.
+pub fn http_qwen_probe(url: &str) -> bool {
+    let agent = ureq::AgentBuilder::new()
+        .timeout(std::time::Duration::from_secs(QWEN_PROBE_SECS))
+        .build();
+    match agent.get(url).call() {
+        Ok(_) => true,
+        Err(ureq::Error::Status(code, _)) => code < 500,
+        Err(_) => false,
+    }
+}
+
+/// Does the local model server of `machine` answer? `false` when the fleet config has no
+/// `qwen_server_url` for it.
+pub fn qwen_server_up(fleet: &FleetBridge, machine: Option<&str>, probe: &QwenProbe) -> bool {
+    FleetModels::read_qwen_server_url(fleet, machine).is_some_and(|url| probe(&url))
 }
 
 impl JobStarter for FleetStarter {
     fn may_spend(&mut self, lane: &str) -> Result<bool, CoreError> {
-        super::may_spend(&self.fleet, lane)
+        if !super::may_spend(&self.fleet, lane)? {
+            return Ok(false);
+        }
+        if lane == "qwen" {
+            return Ok(qwen_server_up(
+                &self.fleet,
+                self.machine.as_deref(),
+                &self.qwen_probe,
+            ));
+        }
+        Ok(true)
     }
 
     fn start(&mut self, job: &Value, brief: &str) -> Result<(), CoreError> {
