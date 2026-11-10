@@ -790,40 +790,30 @@ fn reports(json: bool, filter: &Filter) -> ExitCode {
         Ok(root) => root,
         Err(code) => return code,
     };
-    let fleet = FleetBridge::new(&root);
-    let cards = match fleet.run_json(&["cards"]).map_err(CoreError::Fleet) {
-        Ok(cards) => cards,
+    let state = std::env::var_os(reports::FLEET_STATE_DIR_ENV);
+    let shown = match load_reports(&root, state.as_deref(), filter) {
+        Ok(shown) => shown,
         Err(e) => {
             eprintln!("switchboard reports: {e}");
             return ExitCode::from(1);
         }
     };
-    let Some(cards) = cards.as_array() else {
-        eprintln!("switchboard reports: fleet cards is not a JSON array");
-        return ExitCode::from(1);
-    };
-    let state = env_path(STATE_ENV)
-        .or_else(data_dir)
-        .unwrap_or_else(|| root.clone());
-    let events = match joblog::read_ledger(&joblog::ledger_files(&root, &state)) {
-        Ok(events) => events,
-        Err(e) => {
-            eprintln!("switchboard reports: {e}");
-            return ExitCode::from(1);
-        }
-    };
-    let rows = joblog::read_all(&events, &[]);
-    let all: Vec<Report> = cards
-        .iter()
-        .map(|card| reports::from_card(card, &rows))
-        .collect();
-    let sorted = reports::newest_first(&all);
-    let shown = reports::filter(&sorted, filter);
     if json {
         return print_json("reports", serde_json::to_string_pretty(&shown));
     }
-    print!("{}", reports_text(&shown));
+    let refs: Vec<&Report> = shown.iter().collect();
+    print!("{}", reports_text(&refs));
     ExitCode::SUCCESS
+}
+
+/// The reports on disk for the pipeline checkout at `root`, newest first, narrowed by `filter`.
+/// `state` is the `FLEET_STATE_DIR` value; when it is not set the fleet's own state folder is used.
+fn load_reports(
+    root: &Path,
+    state: Option<&std::ffi::OsStr>,
+    filter: &Filter,
+) -> Result<Vec<Report>, CoreError> {
+    reports::load(&FleetBridge::new(root), state, &[], Some(filter))
 }
 
 /// One line per report, in list order: `<title> | <outcome> | <project>`; no reports gives the
@@ -1216,4 +1206,38 @@ pub fn loadout_text(loadout: &Loadout) -> String {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reports_load_reads_the_done_cards_from_the_state_env_folder() {
+        // The test name is unique per copy of this module (the integration tests compile it twice).
+        let tag: String = std::thread::current()
+            .name()
+            .unwrap_or("test")
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
+        let base = std::env::temp_dir().join(format!("sb-reports-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let pipeline = base.join("pipeline");
+        let state = base.join("state");
+        let done = state.join("jobs").join("done");
+        std::fs::create_dir_all(&pipeline).unwrap();
+        std::fs::create_dir_all(&done).unwrap();
+        std::fs::write(
+            done.join("card-1.json"),
+            r#"{"id":"card-1","title":"Fix the sync retry","repo":"owner/app-a","outcome":"passed"}"#,
+        )
+        .unwrap();
+
+        let found = load_reports(&pipeline, Some(state.as_os_str()), &Filter::default()).unwrap();
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, "card-1");
+    }
 }
