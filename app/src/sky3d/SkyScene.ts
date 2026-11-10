@@ -11,6 +11,8 @@ import { dampPose, detailFade, flightMs, MIN_DIST, settling, zoneStep, zoomOutTo
 import { easeInOutCubic } from "./motion";
 import { condensation, debrisCount, lensDebris, lensDisc, lensStar, lensSystem, starPhysics, systemFacts, type Lens } from "./physics";
 import { spanningTree } from "./wayfind";
+import { exposureForZoom } from "./optics";
+import { makeOptics, type Optics } from "./post";
 import { gauss, seeded } from "./random";
 
 const FOV = 42;
@@ -291,31 +293,6 @@ void main() {
   gl_FragColor = vec4(col * (0.1 + heat * 0.8) * n * dop * edge * uAlpha, 1.0);
 }`;
 
-const LENS_VS = /* glsl */ `
-varying vec2 vUv;
-void main() {
-  vUv = uv;
-  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-}`;
-
-const LENS_FS = /* glsl */ `
-uniform float uHalf;
-uniform float uHorizon;
-uniform float uAlpha;
-uniform float uTime;
-varying vec2 vUv;
-void main() {
-  vec2 p = (vUv - 0.5) * 2.0 * uHalf;
-  float d = length(p) / uHorizon;
-  if (d < 1.0) discard;
-  float up = 0.7 + 0.3 * (p.y / max(length(p), 1e-4));
-  float photon = exp(-pow((d - 1.06) / 0.03, 2.0)) * 1.2;
-  float einstein = exp(-pow((d - 1.4) / 0.22, 2.0)) * 0.22 * up * (0.9 + 0.1 * sin(uTime * 0.3 + atan(p.y, p.x) * 3.0));
-  float halo = exp(-(d - 1.0) * 1.3) * 0.1;
-  vec3 col = vec3(1.0, 0.83, 0.58) * (photon + einstein) + vec3(0.55, 0.68, 1.0) * halo;
-  gl_FragColor = vec4(col * uAlpha, 1.0);
-}`;
-
 const STAR_VS = /* glsl */ `
 uniform float uPx;
 uniform float uDpr;
@@ -469,7 +446,8 @@ function glowTexture(): THREE.Texture {
   g.fillStyle = grad;
   g.fillRect(0, 0, 128, 128);
   const t = new THREE.CanvasTexture(c);
-  t.colorSpace = THREE.SRGBColorSpace;
+  // A mask, not a colour: drawn into a linear HDR target, so no sRGB decode.
+  t.colorSpace = THREE.NoColorSpace;
   return t;
 }
 
@@ -493,7 +471,8 @@ export class SkyScene {
   private discMat: THREE.ShaderMaterial;
   private dustMat: THREE.ShaderMaterial;
   private bulge: THREE.Sprite;
-  private hole: { group: THREE.Group; disc: THREE.ShaderMaterial; lens: THREE.ShaderMaterial; lensMesh: THREE.Mesh } | null = null;
+  private hole: { group: THREE.Group; disc: THREE.ShaderMaterial } | null = null;
+  private optics: Optics;
   private debris: { geo: THREE.BufferGeometry; mat: THREE.ShaderMaterial } | null = null;
   private bridges: THREE.ShaderMaterial | null = null;
   private glow: THREE.Texture;
@@ -532,6 +511,7 @@ export class SkyScene {
   ) {
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true, powerPreference: "default" });
     this.renderer.setClearColor(0x000000, 0);
+    this.optics = makeOptics(this.renderer, this.scene, this.camera, 1, 1, 1);
     this.glow = glowTexture();
     this.disposables.push(this.glow);
     this.field = this.buildField();
@@ -618,26 +598,15 @@ export class SkyScene {
     discMesh.rotation.x = -Math.PI / 2;
     discMesh.rotation.z = 0.0;
     discMesh.renderOrder = 4;
-    const half = HOLE.horizon * 3.2;
-    const lensGeo = new THREE.PlaneGeometry(half * 2, half * 2);
-    const lens = new THREE.ShaderMaterial({
-      vertexShader: LENS_VS,
-      fragmentShader: LENS_FS,
-      uniforms: { uHalf: { value: half }, uHorizon: { value: HOLE.horizon }, uAlpha: { value: 1 }, uTime: { value: 0 } },
-      ...LIGHT,
-      depthTest: false,
-    });
-    const lensMesh = new THREE.Mesh(lensGeo, lens);
-    lensMesh.renderOrder = 5;
     const coreMat = new THREE.SpriteMaterial({ map: this.glow, color: new THREE.Color(1, 0.72, 0.42), opacity: 0.3, ...GLOW });
     const core = new THREE.Sprite(coreMat);
     core.scale.setScalar(HOLE.discOuter * 5);
     core.renderOrder = 3;
-    group.add(core, horizon, discMesh, lensMesh);
-    own.push(horizonGeo, horizonMat, ringGeo, disc, lensGeo, lens, coreMat);
+    group.add(core, horizon, discMesh);
+    own.push(horizonGeo, horizonMat, ringGeo, disc, coreMat);
     this.skyGroup.add(group);
     this.skyDisposables.push(...own);
-    this.hole = { group, disc, lens, lensMesh };
+    this.hole = { group, disc };
   }
 
   // -- the projects ---------------------------------------------------------------------------
@@ -1255,6 +1224,7 @@ export class SkyScene {
     this.dpr = Math.min(1.5, window.devicePixelRatio || 1);
     this.renderer.setPixelRatio(this.dpr);
     this.renderer.setSize(this.width, this.height, false);
+    this.optics.setSize(this.width, this.height, this.dpr);
     this.camera.aspect = this.width / this.height;
     this.camera.updateProjectionMatrix();
     // Until the camera has been moved, the overview follows the window's shape.
@@ -1462,13 +1432,18 @@ export class SkyScene {
       const d = Math.hypot(eye.x, eye.z);
       this.hole.disc.uniforms.uTime.value = t;
       this.hole.disc.uniforms.uView.value.set(eye.x / Math.max(d, 1e-6), -eye.z / Math.max(d, 1e-6));
-      this.hole.lens.uniforms.uTime.value = t;
-      this.hole.lensMesh.quaternion.copy(this.camera.quaternion);
       const sw = this.systems.get([...this.systems.values()].find((s) => s.place.centre)!.c.repo)!;
       const hover = sw.c.repo === this.hovered ? 1.3 : 1;
       this.hole.disc.uniforms.uAlpha.value = Math.max(0.35, sw.lens) * hover * Math.min(1, 0.45 + share);
-      this.hole.lens.uniforms.uAlpha.value = Math.max(0.35, sw.lens) * hover;
-    }
+      // The lens: where the horizon falls on screen, and how big. Off when it is out of view
+      // or too small to bend anything visibly.
+      const sc = this.toScreen({ x: 0, y: 0, z: 0 }, HOLE.horizon);
+      const pass = this.optics.lens;
+      pass.enabled = sc.visible && sc.r > 1.5 && sc.x > -sc.r * 14 && sc.x < this.width + sc.r * 14 && sc.y > -sc.r * 14 && sc.y < this.height + sc.r * 14;
+      pass.uniforms.uC.value.set(sc.x * this.dpr, (this.height - sc.y) * this.dpr);
+      pass.uniforms.uRs.value = sc.r * this.dpr;
+      pass.uniforms.uOn.value = 1;
+    } else this.optics.lens.enabled = false;
     if (this.debris) {
       this.debris.mat.uniforms.uTime.value = t;
       this.debris.mat.uniforms.uPx.value = pxScale;
@@ -1491,7 +1466,8 @@ export class SkyScene {
       for (const f of it.fadeMats) f.mat.opacity = f.base * it.fade;
     }
 
-    this.renderer.render(this.scene, this.camera);
+    this.optics.finish.uniforms.uExposure.value = exposureForZoom(share);
+    this.optics.composer.render(dt);
     this.onFrame?.();
   }
 
@@ -1521,6 +1497,7 @@ export class SkyScene {
     this.skyDisposables = [];
     this.disposables = [];
     this.systems.clear();
+    this.optics.dispose();
     this.renderer.dispose();
     this.renderer.forceContextLoss();
   }

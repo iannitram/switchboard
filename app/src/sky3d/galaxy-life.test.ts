@@ -6,6 +6,7 @@ import { condensation, DEBRIS_MAX, debrisCount, lensMatches, lensStar, lensSyste
 import { outsideX } from "./labels";
 import { breadcrumbs, searchSky, spanningTree } from "./wayfind";
 import type { Pose } from "./layout";
+import { blackbody, exposureForZoom, EXPOSURE_FAR, EXPOSURE_NEAR, nebulaStage, populationTemp, powerLawBrightness } from "./optics";
 
 const star = (number: number, extra: Partial<Star> = {}): Star => ({
   number,
@@ -330,5 +331,79 @@ describe("one galaxy: lenses and labels", () => {
     expect(outsideX({ x: 500, r: 20 }, { x: 400 }, 100, 6)).toBe(500 + 20 + 6 + 50);
     // Left of the hub: mirrored, so it never lies across the bright core.
     expect(outsideX({ x: 300, r: 20 }, { x: 400 }, 100, 6)).toBe(300 - 20 - 6 - 50);
+  });
+});
+
+describe("one galaxy: light as a telescope sees it", () => {
+  test("star colour follows the Planckian locus: red-orange, white, blue-white", () => {
+    const cool = blackbody(3000);
+    const sun = blackbody(6500);
+    const hot = blackbody(20000);
+    expect(cool[0]).toBe(1);
+    expect(cool[2]).toBeLessThan(0.5);
+    expect(Math.min(...sun)).toBeGreaterThan(0.95);
+    expect(hot[2]).toBe(1);
+    expect(hot[0]).toBeLessThan(0.8);
+    // Bluer all the way up: the blue-to-red ratio never falls as the temperature rises.
+    let prev = 0;
+    for (let k = 1500; k <= 30000; k += 500) {
+      const [r, , b] = blackbody(k);
+      expect(b / r).toBeGreaterThanOrEqual(prev - 1e-9);
+      prev = b / r;
+    }
+    for (const c of [blackbody(500), blackbody(1e6)]) for (const v of c) expect(v).toBeGreaterThanOrEqual(0);
+  });
+
+  test("populations: the old bulge is cooler than the young arms", () => {
+    expect(populationTemp("old", 0)).toBe(3300);
+    expect(populationTemp("old", 1)).toBeCloseTo(5600);
+    expect(populationTemp("young", 0.5)).toBeGreaterThan(populationTemp("old", 0.99));
+  });
+
+  test("brightness is a power law: many faint, few bright, capped", () => {
+    const draws = Array.from({ length: 2000 }, (_, i) => powerLawBrightness((i + 0.5) / 2000));
+    const faint = draws.filter((b) => b < 0.4).length;
+    const bright = draws.filter((b) => b > 2).length;
+    expect(faint).toBeGreaterThan(1200);
+    expect(bright).toBeGreaterThan(0);
+    expect(bright).toBeLessThan(60);
+    expect(Math.max(...draws)).toBeLessThanOrEqual(6);
+  });
+
+  test("exposure comes down as the camera closes in, never below the floor", () => {
+    expect(exposureForZoom(1)).toBe(EXPOSURE_FAR);
+    expect(exposureForZoom(3)).toBe(EXPOSURE_FAR);
+    expect(exposureForZoom(0.001)).toBe(EXPOSURE_NEAR);
+    expect(exposureForZoom(0)).toBe(EXPOSURE_NEAR);
+    expect(exposureForZoom(NaN)).toBe(EXPOSURE_NEAR);
+    let prev = 0;
+    for (let z = 0.005; z <= 1.2; z *= 1.3) {
+      const e = exposureForZoom(z);
+      expect(e).toBeGreaterThanOrEqual(prev);
+      prev = e;
+    }
+    expect(exposureForZoom(0.1)).toBeGreaterThan(EXPOSURE_NEAR);
+    expect(exposureForZoom(0.1)).toBeLessThan(EXPOSURE_FAR);
+  });
+
+  test("progress turns gas into stars: dense cloud, then a cavity round a young cluster, then a clean cluster", () => {
+    const young = nebulaStage(0);
+    const mid = nebulaStage(0.55);
+    const done = nebulaStage(1);
+    expect(young.gas).toBe(1);
+    expect(young.cavity).toBe(0);
+    expect(young.cluster).toBe(0);
+    expect(young.protostars).toBeGreaterThan(3);
+    expect(mid.cavity).toBeGreaterThan(0.2);
+    expect(mid.cluster).toBeGreaterThan(0.3);
+    expect(mid.gas).toBeLessThan(young.gas);
+    expect(done.protostars).toBe(0);
+    expect(done.gas).toBeLessThan(0.3);
+    expect(done.gas).toBeGreaterThan(0);
+    expect(done.cluster).toBe(1);
+    expect(done.cavity).toBeGreaterThan(mid.cavity);
+    expect(nebulaStage(-2)).toEqual(young);
+    expect(nebulaStage(NaN)).toEqual(young);
+    expect(nebulaStage(9)).toEqual(done);
   });
 });
