@@ -1,22 +1,28 @@
-// The 3D sky's renderer: a deep star field, one procedural galaxy per project, and the opened
-// galaxy resolved into its constellations. It draws only; the React overlay (Sky3D.tsx) holds
-// the labels, buttons and panels and asks this scene where things are on screen.
+// The 3D sky's renderer (#297, pass 2): one living spiral galaxy. Projects are star systems in
+// its disc, the switchboard project is the black hole at its centre, and the camera zooms
+// continuously from the whole galaxy down to a single issue star. It draws only; the React
+// overlay (Sky3D.tsx) holds labels, buttons and panels and asks this scene where things are.
 import * as THREE from "three";
 import type { Constellation, SkyModel } from "../sky/model";
 import { highlightChain } from "../sky/chain";
-import { starLook } from "../sky/stars";
-import { galaxyParticles, galaxyShape, particleCount } from "./galaxy";
-import { blendPose, fitDistance, galaxyPlacement, layoutInterior, poseEye, type InteriorLayout, type Pose, type Vec3 } from "./layout";
-import { complete, easeInOutCubic, flightValue, flyTo, inFlight, rest, type Flight } from "./motion";
+import { blendPose, fitDistance, layoutInterior, poseEye, type InteriorLayout, type Pose, type Vec3 } from "./layout";
+import { discParticles, dustParticles, GAL_R, HOLE, placeSystems, systemParticles, type System } from "./milkyway";
+import { dampPose, detailFade, flightMs, MIN_DIST, settling, zoneStep, zoomToward } from "./camera";
+import { easeInOutCubic } from "./motion";
+import { condensation, debrisCount, lensDebris, lensDisc, lensStar, lensSystem, starPhysics, systemFacts, type Lens } from "./physics";
+import { spanningTree } from "./wayfind";
 import { gauss, seeded } from "./random";
 
 const FOV = 42;
-/** The opened galaxy's outer ring, in world units. */
-export const INTERIOR_R = 26;
-const OVERVIEW_ELEV = 0.86;
-const GALAXY_ELEV = 1.06;
-const REUSE = new THREE.Color("#94a3b8");
-const WARNING = new THREE.Color("#d97706");
+const OVER_ELEV = 0.72;
+const SYS_ELEV = 1.05;
+/** A click lands this many system radii away: the whole constellation in view. */
+const SYS_DIST = 2.35;
+const IDLE_MS = 20000;
+const DISC_COUNT = 64000;
+const DUST_COUNT = 3800;
+const AMBER = new THREE.Color("#f5a524");
+const REUSE = new THREE.Color("#93c5fd");
 
 // Light adds to the canvas without writing alpha, so it composites over the CSS sky as pure
 // additive light (alpha written by additive points would show as dark specks).
@@ -32,64 +38,158 @@ const LIGHT = {
 } as const;
 /** The same for sprites and lines, whose colour is scaled by their alpha. */
 const GLOW = { ...LIGHT, blendSrc: THREE.SrcAlphaFactor } as const;
+/** Dust and dark knots: real occlusion, darkening what is behind. */
+const SHADE = { transparent: true, depthWrite: false, blending: THREE.NormalBlending } as const;
 
 export type Screen = { x: number; y: number; r: number; visible: boolean };
+export type ZoneEvent = { enter: string } | { leave: true };
 
-type Galaxy = {
+type Sys = {
   c: Constellation;
-  place: Vec3 & { scale: number };
-  group: THREE.Group;
-  tilt: THREE.Group;
-  tiltQ: THREE.Quaternion;
-  spinner: THREE.Group;
-  points: THREE.Points;
-  mat: THREE.ShaderMaterial;
-  core: THREE.Sprite;
-  spin: number;
-  lit: number;
+  place: System;
+  points: THREE.Points | null;
+  mat: THREE.ShaderMaterial | null;
+  core: THREE.Sprite | null;
+  debris: [number, number];
+  lens: number;
 };
 
 type Interior = {
   repo: string;
   group: THREE.Group;
   layout: InteriorLayout;
-  stars: { number: number; index: number; state: "open" | "closed"; inFlight: boolean; chain: boolean }[];
+  R: number;
+  stars: { number: number; index: number; state: "open" | "closed"; inFlight: boolean; chain: boolean; edged: boolean; size: number }[];
   starGeo: THREE.BufferGeometry;
   starMat: THREE.ShaderMaterial;
+  darkMat: THREE.ShaderMaterial | null;
+  flowGeo: THREE.BufferGeometry | null;
+  flowMat: THREE.ShaderMaterial | null;
+  flowEdge: number[];
   edgeGeo: THREE.BufferGeometry | null;
-  edgeMat: THREE.LineBasicMaterial;
   edges: [number, number][];
   chainPairs: Set<string>;
   fadeMats: { mat: THREE.Material & { opacity: number }; base: number }[];
+  own: { dispose(): void }[];
+  fade: number;
 };
 
 // ---- shaders ------------------------------------------------------------------------------
 
-const GALAXY_VS = /* glsl */ `
-uniform float uSize;
-uniform float uPxScale;
-attribute float aSize;
+const DISC_VS = /* glsl */ `
+uniform float uTime;
+uniform float uPx;
+uniform float uDpr;
+uniform float uSpin;
+uniform float uDim;
+attribute vec4 aOrbit;
 attribute vec3 aColor;
+attribute float aPhase;
+attribute float aKind;
 varying vec3 vColor;
-varying float vFade;
+varying float vKind;
+varying float vAlpha;
+varying float vOp;
 void main() {
-  vec4 mv = modelViewMatrix * vec4(position, 1.0);
+  float r = aOrbit.x;
+  float inner = 30.0 / (r + 30.0);
+  // Slow rotation, faster inside; the shear breathes instead of winding the arms up.
+  float th = aOrbit.y + uSpin * (uTime * (0.0018 + 0.0014 * inner) + 0.05 * inner * sin(uTime * 0.0021));
+  vec3 p = vec3(r * cos(th), aOrbit.z, r * sin(th));
+  vec4 mv = modelViewMatrix * vec4(p, 1.0);
   gl_Position = projectionMatrix * mv;
-  float px = aSize * uSize * uPxScale / max(-mv.z, 0.001);
-  vFade = clamp(px / 2.5, 0.2, 1.0);
-  gl_PointSize = clamp(px, 1.5, 40.0);
+  float depth = max(-mv.z, 0.001);
+  float px = aOrbit.w * uPx / depth;
+  float a = 1.0;
+  if (aKind < 0.5) {
+    // A star stays a point: farther is dimmer, not smaller.
+    a = clamp(px * 0.8, 0.22, 1.0);
+    px = clamp(px, 1.0 * uDpr, 3.0 * uDpr);
+    float tw = 0.8 + 0.2 * sin(uTime * (0.6 + aPhase * 1.5) + aPhase * 60.0);
+    a *= mix(1.0, tw, step(0.55, aPhase));
+  } else {
+    px = min(px, 200.0 * uDpr);
+    a = smoothstep(1.0, 14.0, depth);
+  }
+  gl_PointSize = px;
   vColor = aColor;
+  vKind = aKind;
+  vAlpha = a * uDim;
+  vOp = aPhase;
 }`;
 
-const GALAXY_FS = /* glsl */ `
-uniform float uAlpha;
+const DISC_FS = /* glsl */ `
 varying vec3 vColor;
-varying float vFade;
+varying float vKind;
+varying float vAlpha;
 void main() {
   float d = length(gl_PointCoord - 0.5) * 2.0;
   if (d > 1.0) discard;
-  float a = exp(-d * d * 5.0) * 0.55 + smoothstep(0.4, 0.0, d) * 0.6;
-  gl_FragColor = vec4(vColor * a * uAlpha * vFade, 1.0);
+  float a = vKind < 0.5 ? exp(-d * d * 4.0) * 0.6 + smoothstep(0.55, 0.0, d) * 0.55 : exp(-d * d * 3.4) * 0.42;
+  gl_FragColor = vec4(vColor * a * vAlpha, 1.0);
+}`;
+
+const DUST_FS = /* glsl */ `
+varying vec3 vColor;
+varying float vAlpha;
+varying float vOp;
+void main() {
+  float d = length(gl_PointCoord - 0.5) * 2.0;
+  if (d > 1.0) discard;
+  gl_FragColor = vec4(vColor, exp(-d * d * 3.0) * vOp * min(vAlpha, 1.0));
+}`;
+
+const SYS_VS = /* glsl */ `
+uniform float uTime;
+uniform float uPx;
+uniform float uDpr;
+uniform float uScale;
+uniform float uAlpha;
+attribute vec3 aColor;
+attribute float aSize;
+attribute float aKind;
+attribute float aPhase;
+varying vec3 vColor;
+varying float vKind;
+varying float vAlpha;
+void main() {
+  vec3 p = position;
+  float ang = uTime * 0.012 * (1.3 - min(length(p), 1.0));
+  float c = cos(ang);
+  float s = sin(ang);
+  p.xz = mat2(c, -s, s, c) * p.xz;
+  vec4 mv = modelViewMatrix * vec4(p, 1.0);
+  gl_Position = projectionMatrix * mv;
+  float depth = max(-mv.z, 0.001);
+  float px = aSize * uScale * uPx / depth;
+  float a = 1.0;
+  if (aKind < 0.5) {
+    a = clamp(px * 0.5, 0.35, 1.0);
+    px = clamp(px, 1.4 * uDpr, 8.0 * uDpr);
+    a *= 0.85 + 0.15 * sin(uTime * (0.8 + aPhase) + aPhase * 50.0);
+  } else if (aKind < 1.5) {
+    px = min(px, 220.0 * uDpr);
+    a = smoothstep(0.6, 3.0, depth / uScale);
+  } else {
+    // A wisp: fine structure, which only shows once the camera is close enough to resolve it.
+    px = min(px, 90.0 * uDpr);
+    a = smoothstep(0.25, 1.2, depth / uScale) * smoothstep(9.0, 2.5, depth / uScale);
+  }
+  gl_PointSize = px;
+  vColor = aColor;
+  vKind = aKind;
+  vAlpha = a * uAlpha;
+}`;
+
+const SYS_FS = /* glsl */ `
+varying vec3 vColor;
+varying float vKind;
+varying float vAlpha;
+void main() {
+  float d = length(gl_PointCoord - 0.5) * 2.0;
+  if (d > 1.0) discard;
+  float a = vKind < 0.5 ? exp(-d * d * 5.0) * 0.6 + smoothstep(0.45, 0.0, d) * 0.5 : vKind < 1.5 ? exp(-d * d * 3.0) * 0.05 : exp(-d * d * 6.0) * 0.34;
+  gl_FragColor = vec4(vColor * a * vAlpha, 1.0);
 }`;
 
 const FIELD_VS = /* glsl */ `
@@ -103,7 +203,7 @@ void main() {
   vec4 mv = modelViewMatrix * vec4(position, 1.0);
   gl_Position = projectionMatrix * mv;
   gl_PointSize = aSize * uDpr;
-  float tw = 0.85 + 0.15 * sin(uTime * (0.6 + aPhase) + aPhase * 40.0);
+  float tw = 0.85 + 0.15 * sin(uTime * (0.5 + aPhase) + aPhase * 40.0);
   vColor = aColor * tw;
 }`;
 
@@ -116,28 +216,137 @@ void main() {
   gl_FragColor = vec4(vColor * a * a, 1.0);
 }`;
 
-const STAR_VS = /* glsl */ `
+const DEBRIS_VS = /* glsl */ `
+uniform float uTime;
 uniform float uDpr;
+uniform float uPx;
+attribute vec4 aOrbit;
+attribute float aAlpha;
+varying float vAlpha;
+void main() {
+  float ang = aOrbit.y + uTime * aOrbit.z;
+  vec3 p = position + vec3(cos(ang) * aOrbit.x, sin(ang * 3.0 + aOrbit.y * 5.0) * aOrbit.w, sin(ang) * aOrbit.x);
+  vec4 mv = modelViewMatrix * vec4(p, 1.0);
+  gl_Position = projectionMatrix * mv;
+  float px = 0.16 * uPx / max(-mv.z, 0.001);
+  gl_PointSize = clamp(px, 1.3 * uDpr, 4.5 * uDpr);
+  vAlpha = aAlpha * clamp(px, 0.4, 1.0);
+}`;
+
+const DEBRIS_FS = /* glsl */ `
+uniform vec3 uColor;
+varying float vAlpha;
+void main() {
+  float d = length(gl_PointCoord - 0.5) * 2.0;
+  if (d > 1.0) discard;
+  gl_FragColor = vec4(uColor * (exp(-d * d * 4.0) * 0.9) * vAlpha, 1.0);
+}`;
+
+const BRIDGE_VS = /* glsl */ `
+attribute float aT;
+attribute vec3 aColor;
+varying float vT;
+varying vec3 vColor;
+void main() {
+  vT = aT;
+  vColor = aColor;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}`;
+
+const BRIDGE_FS = /* glsl */ `
+uniform float uTime;
+uniform float uAlpha;
+varying float vT;
+varying vec3 vColor;
+void main() {
+  float flow = pow(fract(vT * 3.0 - uTime * 0.12), 8.0);
+  float ends = smoothstep(0.0, 0.08, vT) * smoothstep(1.0, 0.92, vT);
+  gl_FragColor = vec4(vColor * (0.3 + 0.9 * flow) * ends * uAlpha, 1.0);
+}`;
+
+const DISCRING_VS = /* glsl */ `
+varying vec2 vP;
+void main() {
+  vP = position.xy;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}`;
+
+const DISCRING_FS = /* glsl */ `
+uniform float uTime;
+uniform float uInner;
+uniform float uOuter;
+uniform float uAlpha;
+uniform vec2 uView;
+varying vec2 vP;
+void main() {
+  float r = length(vP);
+  float ang = atan(vP.y, vP.x);
+  float t = clamp((r - uInner) / (uOuter - uInner), 0.0, 1.0);
+  float heat = pow(1.0 - t, 1.7);
+  float sw = ang * 2.0 + uTime * 0.45 / (0.25 + t) - log(r) * 6.0;
+  float n = 0.6 + 0.25 * sin(sw * 3.0 + sin(sw * 1.7 + r * 3.0) * 1.4) + 0.15 * sin(r * 14.0 - uTime * 0.6);
+  float dop = 1.0 + 0.5 * dot(vec2(-sin(ang), cos(ang)), uView);
+  vec3 col = mix(vec3(1.0, 0.42, 0.14), vec3(1.0, 0.94, 0.82), heat);
+  float edge = smoothstep(0.0, 0.06, t) * smoothstep(1.0, 0.5, t);
+  gl_FragColor = vec4(col * (0.1 + heat * 0.8) * n * dop * edge * uAlpha, 1.0);
+}`;
+
+const LENS_VS = /* glsl */ `
+varying vec2 vUv;
+void main() {
+  vUv = uv;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+}`;
+
+const LENS_FS = /* glsl */ `
+uniform float uHalf;
+uniform float uHorizon;
+uniform float uAlpha;
+uniform float uTime;
+varying vec2 vUv;
+void main() {
+  vec2 p = (vUv - 0.5) * 2.0 * uHalf;
+  float d = length(p) / uHorizon;
+  if (d < 1.0) discard;
+  float up = 0.7 + 0.3 * (p.y / max(length(p), 1e-4));
+  float photon = exp(-pow((d - 1.06) / 0.03, 2.0)) * 1.2;
+  float einstein = exp(-pow((d - 1.4) / 0.22, 2.0)) * 0.22 * up * (0.9 + 0.1 * sin(uTime * 0.3 + atan(p.y, p.x) * 3.0));
+  float halo = exp(-(d - 1.0) * 1.3) * 0.1;
+  vec3 col = vec3(1.0, 0.83, 0.58) * (photon + einstein) + vec3(0.55, 0.68, 1.0) * halo;
+  gl_FragColor = vec4(col * uAlpha, 1.0);
+}`;
+
+const STAR_VS = /* glsl */ `
+uniform float uPx;
+uniform float uDpr;
+uniform float uScale;
 uniform float uTime;
 uniform float uPulse;
 attribute vec3 aColor;
 attribute float aSize;
 attribute float aAlpha;
 attribute float aKind;
-attribute float aFlight;
+attribute float aCorona;
+attribute float aPhase;
+attribute float aGlow;
+varying float vGlow;
 varying vec3 vColor;
 varying float vAlpha;
 varying float vKind;
-varying float vFlight;
+varying float vCorona;
+varying float vSpin;
 void main() {
   vec4 mv = modelViewMatrix * vec4(position, 1.0);
   gl_Position = projectionMatrix * mv;
-  float pulse = aFlight * uPulse * (0.5 + 0.5 * sin(uTime * 4.2));
-  gl_PointSize = aSize * uDpr * (1.0 + 0.45 * pulse);
+  float px = aSize * uScale * uPx / max(-mv.z, 0.001);
+  float pulse = aKind > 1.5 ? uPulse * (0.5 + 0.5 * sin(uTime * 3.2 + aPhase * 6.283)) : 0.0;
+  gl_PointSize = clamp(px * (1.0 + 0.12 * pulse), 9.0 * uDpr, 380.0 * uDpr);
   vColor = aColor;
-  vAlpha = aAlpha * (1.0 + 0.5 * pulse);
+  vAlpha = aAlpha * (1.0 + 0.55 * pulse);
   vKind = aKind;
-  vFlight = aFlight;
+  vCorona = aCorona;
+  vSpin = uTime * 1.5 * uPulse + aPhase * 6.283;
+  vGlow = aGlow;
 }`;
 
 const STAR_FS = /* glsl */ `
@@ -145,23 +354,105 @@ uniform float uFade;
 varying vec3 vColor;
 varying float vAlpha;
 varying float vKind;
-varying float vFlight;
+varying float vCorona;
+varying float vSpin;
+varying float vGlow;
 void main() {
   vec2 p = gl_PointCoord - 0.5;
   float d = length(p) * 2.0;
   if (d > 1.0) discard;
-  float a;
+  vec3 col;
   if (vKind < 0.5) {
-    a = exp(-d * d * 9.0) * 0.75 + smoothstep(0.26, 0.1, d);
+    // Closed: a steady warm star with soft spikes.
+    float core = smoothstep(0.28, 0.15, d);
+    float glow = exp(-d * d * 9.0) * 0.7;
+    float spikes = (exp(-abs(p.x) * 80.0) + exp(-abs(p.y) * 80.0)) * smoothstep(0.95, 0.1, d) * 0.35;
+    col = vColor * (core * 1.25 + (glow + spikes) * vGlow);
+  } else if (vKind < 1.5) {
+    // Open: a dim protostar inside a faint dust halo.
+    float core = smoothstep(0.2, 0.1, d) * 0.85;
+    float halo = exp(-pow((d - 0.46) / 0.16, 2.0)) * 0.24;
+    col = vColor * (core + exp(-d * d * 14.0) * 0.25) + vec3(0.62, 0.4, 0.26) * halo;
   } else {
-    // A dark star: a dim dashed ring.
-    float ring = smoothstep(0.1, 0.0, abs(d - 0.6));
-    float dash = step(0.0, sin(atan(p.y, p.x) * 6.0));
-    a = ring * dash * 0.9 + exp(-d * d * 10.0) * 0.12;
+    // In flight: a pulsar, two beams sweeping round; still under reduced motion.
+    float core = smoothstep(0.22, 0.1, d) * 1.3;
+    float ang = atan(p.y, p.x) - vSpin;
+    float beam = pow(abs(cos(ang)), 28.0) * smoothstep(1.0, 0.15, d) * 0.85;
+    float ring = smoothstep(0.045, 0.0, abs(d - 0.72)) * 0.55;
+    col = vColor * (core + beam + ring + exp(-d * d * 10.0) * 0.5 * vGlow);
   }
-  // A fleet job in flight: a steady ring as well, so it reads without motion.
-  a += vFlight * smoothstep(0.07, 0.0, abs(d - 0.86)) * 0.8;
-  gl_FragColor = vec4(vColor * a * vAlpha * uFade, 1.0);
+  if (vCorona > 0.5) {
+    vec3 cc = vCorona < 1.5 ? vec3(0.35, 0.95, 0.55) : vec3(1.0, 0.36, 0.36);
+    col += cc * smoothstep(0.035, 0.0, abs(d - 0.36)) * 0.95;
+  }
+  gl_FragColor = vec4(col * vAlpha * uFade, 1.0);
+}`;
+
+const DARK_VS = /* glsl */ `
+uniform float uPx;
+uniform float uDpr;
+uniform float uScale;
+attribute float aSize;
+attribute float aAlpha;
+varying float vAlpha;
+void main() {
+  vec4 mv = modelViewMatrix * vec4(position, 1.0);
+  gl_Position = projectionMatrix * mv;
+  gl_PointSize = clamp(aSize * uScale * uPx / max(-mv.z, 0.001), 12.0 * uDpr, 300.0 * uDpr);
+  vAlpha = aAlpha;
+}`;
+
+const DARK_FS = /* glsl */ `
+uniform float uFade;
+varying float vAlpha;
+void main() {
+  vec2 p = gl_PointCoord - 0.5;
+  float d = length(p) * 2.0;
+  if (d > 1.0) discard;
+  float fill = smoothstep(0.7, 0.25, d) * 0.85;
+  float dash = step(0.0, sin(atan(p.y, p.x) * 8.0));
+  float ring = smoothstep(0.06, 0.0, abs(d - 0.78)) * dash;
+  vec3 col = mix(vec3(0.03, 0.025, 0.03), vec3(0.58, 0.62, 0.76), ring);
+  gl_FragColor = vec4(col, max(fill, ring * 0.9) * vAlpha * uFade);
+}`;
+
+const FLOW_VS = /* glsl */ `
+uniform float uTime;
+uniform float uFlow;
+uniform float uPx;
+uniform float uDpr;
+uniform float uScale;
+uniform float uSize;
+attribute vec3 aB;
+attribute float aPhase;
+attribute float aHot;
+attribute float aHi;
+varying float vS;
+varying float vHot;
+varying float vHi;
+void main() {
+  float s = fract(aPhase + uTime * 0.16 * uFlow);
+  vec3 p = mix(position, aB, s);
+  vec4 mv = modelViewMatrix * vec4(p, 1.0);
+  gl_Position = projectionMatrix * mv;
+  float px = uSize * uScale * uPx / max(-mv.z, 0.001) * (aHot > 0.5 ? 1.5 : 1.0);
+  gl_PointSize = clamp(px, 2.0 * uDpr, 18.0 * uDpr);
+  vS = s;
+  vHot = aHot;
+  vHi = aHi;
+}`;
+
+const FLOW_FS = /* glsl */ `
+uniform float uFade;
+varying float vS;
+varying float vHot;
+varying float vHi;
+void main() {
+  float d = length(gl_PointCoord - 0.5) * 2.0;
+  if (d > 1.0) discard;
+  vec3 col = vHot > 0.5 ? vec3(1.0, 0.76, 0.32) : vec3(0.55, 0.78, 1.0);
+  float a = exp(-d * d * 5.0) * (0.12 + 0.88 * vS * vS) * (vHot > 0.5 ? 1.3 : 0.8);
+  gl_FragColor = vec4(col * a * vHi * uFade, 1.0);
 }`;
 
 // ---- procedural textures ------------------------------------------------------------------
@@ -172,8 +463,8 @@ function glowTexture(): THREE.Texture {
   const g = c.getContext("2d")!;
   const grad = g.createRadialGradient(64, 64, 0, 64, 64, 64);
   grad.addColorStop(0, "rgba(255,255,255,1)");
-  grad.addColorStop(0.15, "rgba(255,255,255,0.55)");
-  grad.addColorStop(0.45, "rgba(255,255,255,0.12)");
+  grad.addColorStop(0.15, "rgba(255,255,255,0.5)");
+  grad.addColorStop(0.45, "rgba(255,255,255,0.1)");
   grad.addColorStop(1, "rgba(255,255,255,0)");
   g.fillStyle = grad;
   g.fillRect(0, 0, 128, 128);
@@ -182,24 +473,11 @@ function glowTexture(): THREE.Texture {
   return t;
 }
 
-function nebulaTexture(key: string): THREE.Texture {
-  const c = document.createElement("canvas");
-  c.width = c.height = 256;
-  const g = c.getContext("2d")!;
-  const r = seeded(key);
-  for (let i = 0; i < 14; i++) {
-    const x = 128 + gauss(r) * 34;
-    const y = 128 + gauss(r) * 26;
-    const rad = 30 + r() * 70;
-    const grad = g.createRadialGradient(x, y, 0, x, y, rad);
-    grad.addColorStop(0, `rgba(255,255,255,${0.1 + r() * 0.12})`);
-    grad.addColorStop(1, "rgba(255,255,255,0)");
-    g.fillStyle = grad;
-    g.fillRect(0, 0, 256, 256);
-  }
-  const t = new THREE.CanvasTexture(c);
-  t.colorSpace = THREE.SRGBColorSpace;
-  return t;
+function pointsOf(geo: THREE.BufferGeometry, mat: THREE.Material, order: number): THREE.Points {
+  const p = new THREE.Points(geo, mat);
+  p.frustumCulled = false;
+  p.renderOrder = order;
+  return p;
 }
 
 // ---- the scene ----------------------------------------------------------------------------
@@ -207,12 +485,17 @@ function nebulaTexture(key: string): THREE.Texture {
 export class SkyScene {
   readonly renderer: THREE.WebGLRenderer;
   private scene = new THREE.Scene();
-  private camera = new THREE.PerspectiveCamera(FOV, 1, 0.1, 5000);
-  private galaxies = new Map<string, Galaxy>();
+  private camera = new THREE.PerspectiveCamera(FOV, 1, 0.05, 6000);
+  private systems = new Map<string, Sys>();
   private interior: Interior | null = null;
   private skyGroup = new THREE.Group();
-  private reuseGroup = new THREE.Group();
   private field: THREE.ShaderMaterial;
+  private discMat: THREE.ShaderMaterial;
+  private dustMat: THREE.ShaderMaterial;
+  private bulge: THREE.Sprite;
+  private hole: { group: THREE.Group; disc: THREE.ShaderMaterial; lens: THREE.ShaderMaterial; lensMesh: THREE.Mesh } | null = null;
+  private debris: { geo: THREE.BufferGeometry; mat: THREE.ShaderMaterial } | null = null;
+  private bridges: THREE.ShaderMaterial | null = null;
   private glow: THREE.Texture;
   private disposables: { dispose(): void }[] = [];
   private skyDisposables: { dispose(): void }[] = [];
@@ -222,20 +505,26 @@ export class SkyScene {
   private raf = 0;
   private running = false;
   private dirty = true;
-  private clock0 = performance.now();
-  private flight: Flight = rest(0);
+  private last = performance.now();
+  private lastInput = performance.now();
+  private skip = false;
+  private cam: Pose = { target: { x: 0, y: 0, z: 0 }, dist: 300, az: 0.5, elev: OVER_ELEV };
+  private goal: Pose = { target: { x: 0, y: 0, z: 0 }, dist: 300, az: 0.5, elev: OVER_ELEV };
+  private tween: { from: Pose; to: Pose; start: number; ms: number } | null = null;
+  private placed = false;
+  private moved = false;
   private open: string | null = null;
   private hovered: string | null = null;
   private focusStar: number | null = null;
   private picked: number | null = null;
-  private userAz = 0;
-  private userElev = 0;
-  private zoom = 1;
-  private blend = 0;
+  private lens: Lens = "natural";
   private tmp = new THREE.Vector3();
   private right = new THREE.Vector3();
+  private time = 0;
   /** Called after each drawn frame: the overlay repositions itself. */
   onFrame: (() => void) | null = null;
+  /** The camera entered or left a project by zooming. */
+  onZone: ((z: ZoneEvent) => void) | null = null;
 
   constructor(
     canvas: HTMLCanvasElement,
@@ -246,46 +535,34 @@ export class SkyScene {
     this.glow = glowTexture();
     this.disposables.push(this.glow);
     this.field = this.buildField();
-    this.buildNebulae();
-    this.scene.add(this.skyGroup);
-    this.skyGroup.add(this.reuseGroup);
+    [this.discMat, this.dustMat] = this.buildDisc();
+    const bulgeMat = new THREE.SpriteMaterial({ map: this.glow, color: new THREE.Color(1, 0.78, 0.5), opacity: 0.3, ...GLOW });
+    this.bulge = new THREE.Sprite(bulgeMat);
+    this.bulge.scale.setScalar(GAL_R * 0.55);
+    this.bulge.renderOrder = 1;
+    this.disposables.push(bulgeMat);
+    this.scene.add(this.bulge, this.skyGroup);
   }
 
-  // -- background: two star layers (far shell, nearer dust for parallax) and soft nebulae --
+  // -- background: a far star shell -----------------------------------------------------------
   private buildField(): THREE.ShaderMaterial {
     const r = seeded("switchboard-sky-field");
-    const far = 3200;
-    const near = 1400;
-    const n = far + near;
+    const n = 3600;
     const pos = new Float32Array(n * 3);
     const col = new Float32Array(n * 3);
     const size = new Float32Array(n);
     const phase = new Float32Array(n);
     for (let i = 0; i < n; i++) {
-      let x: number;
-      let y: number;
-      let z: number;
-      if (i < far) {
-        const u = r() * 2 - 1;
-        const t = r() * Math.PI * 2;
-        const s = Math.sqrt(1 - u * u);
-        const rad = 1400 + r() * 900;
-        x = rad * s * Math.cos(t);
-        y = rad * u;
-        z = rad * s * Math.sin(t);
-      } else {
-        const rad = 160 + Math.pow(r(), 0.7) * 520;
-        const t = r() * Math.PI * 2;
-        x = rad * Math.cos(t);
-        z = rad * Math.sin(t);
-        y = gauss(r) * 70 - 40;
-      }
-      pos.set([x, y, z], i * 3);
+      const u = r() * 2 - 1;
+      const t = r() * Math.PI * 2;
+      const s = Math.sqrt(1 - u * u);
+      const rad = 2400 + r() * 1200;
+      pos.set([rad * s * Math.cos(t), rad * u, rad * s * Math.sin(t)], i * 3);
       const temp = r();
       const c = temp < 0.15 ? [1, 0.82, 0.66] : temp < 0.55 ? [0.78, 0.86, 1] : [0.92, 0.94, 1];
-      const b = i < far ? 0.35 + Math.pow(r(), 3) * 0.65 : 0.25 + r() * 0.35;
+      const b = 0.25 + Math.pow(r(), 3) * 0.6;
       col.set([c[0] * b, c[1] * b, c[2] * b], i * 3);
-      size[i] = i < far ? 1.2 + Math.pow(r(), 6) * 2.6 : 1.3 + r() * 1.4;
+      size[i] = 1.1 + Math.pow(r(), 6) * 2.4;
       phase[i] = r();
     }
     const geo = new THREE.BufferGeometry();
@@ -293,267 +570,418 @@ export class SkyScene {
     geo.setAttribute("aColor", new THREE.BufferAttribute(col, 3));
     geo.setAttribute("aSize", new THREE.BufferAttribute(size, 1));
     geo.setAttribute("aPhase", new THREE.BufferAttribute(phase, 1));
-    const mat = new THREE.ShaderMaterial({
-      vertexShader: FIELD_VS,
-      fragmentShader: FIELD_FS,
-      uniforms: { uDpr: { value: 1 }, uTime: { value: 0 } },
-      ...LIGHT,
-    });
-    const pts = new THREE.Points(geo, mat);
-    pts.frustumCulled = false;
-    this.scene.add(pts);
+    const mat = new THREE.ShaderMaterial({ vertexShader: FIELD_VS, fragmentShader: FIELD_FS, uniforms: { uDpr: { value: 1 }, uTime: { value: 0 } }, ...LIGHT });
+    this.scene.add(pointsOf(geo, mat, 0));
     this.disposables.push(geo, mat);
     return mat;
   }
 
-  private buildNebulae() {
-    const r = seeded("switchboard-sky-nebulae");
-    const tints = ["#1e3a8a", "#4c1d95", "#0e7490", "#312e81", "#701a75", "#134e4a"];
-    for (let i = 0; i < 7; i++) {
-      const tex = nebulaTexture(`nebula-${i}`);
-      const mat = new THREE.SpriteMaterial({
-        map: tex,
-        color: new THREE.Color(tints[i % tints.length]),
-        opacity: 0.32 + r() * 0.2,
-        ...GLOW,
-      });
-      const s = new THREE.Sprite(mat);
-      const t = (i / 7) * Math.PI * 2 + r() * 0.6;
-      const rad = 700 + r() * 500;
-      s.position.set(rad * Math.cos(t), -260 + r() * 300, rad * Math.sin(t));
-      const k = 900 + r() * 700;
-      s.scale.set(k * (1.2 + r() * 0.6), k, 1);
-      this.scene.add(s);
-      this.disposables.push(tex, mat);
-    }
+  // -- the galaxy: stars and glowing gas, then dark dust lanes over them ------------------------
+  private buildDisc(): [THREE.ShaderMaterial, THREE.ShaderMaterial] {
+    const uniforms = () => ({ uTime: { value: 0 }, uPx: { value: 900 }, uDpr: { value: 1 }, uSpin: { value: 1 }, uDim: { value: 1 } });
+    const make = (p: ReturnType<typeof discParticles>) => {
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(p.count * 3), 3));
+      geo.setAttribute("aOrbit", new THREE.BufferAttribute(p.orbit, 4));
+      geo.setAttribute("aColor", new THREE.BufferAttribute(p.colors, 3));
+      geo.setAttribute("aPhase", new THREE.BufferAttribute(p.phase, 1));
+      geo.setAttribute("aKind", new THREE.BufferAttribute(p.kind, 1));
+      this.disposables.push(geo);
+      return geo;
+    };
+    const discMat = new THREE.ShaderMaterial({ vertexShader: DISC_VS, fragmentShader: DISC_FS, uniforms: uniforms(), ...LIGHT });
+    const dustMat = new THREE.ShaderMaterial({ vertexShader: DISC_VS, fragmentShader: DUST_FS, uniforms: uniforms(), ...SHADE });
+    this.scene.add(pointsOf(make(discParticles("milky-way", DISC_COUNT)), discMat, 1));
+    this.scene.add(pointsOf(make(dustParticles("milky-way", DUST_COUNT)), dustMat, 2));
+    this.disposables.push(discMat, dustMat);
+    return [discMat, dustMat];
   }
 
-  // -- the projects --------------------------------------------------------------------------
+  // -- the black hole: a dark horizon, a hot accretion disc, a lensing ring -------------------
+  private buildHole() {
+    const group = new THREE.Group();
+    const own: { dispose(): void }[] = [];
+    const horizonGeo = new THREE.SphereGeometry(HOLE.horizon, 48, 24);
+    const horizonMat = new THREE.MeshBasicMaterial({ color: 0x000000 });
+    const horizon = new THREE.Mesh(horizonGeo, horizonMat);
+    horizon.renderOrder = 0;
+    const ringGeo = new THREE.RingGeometry(HOLE.horizon * 1.3, HOLE.discOuter, 160, 1);
+    const disc = new THREE.ShaderMaterial({
+      vertexShader: DISCRING_VS,
+      fragmentShader: DISCRING_FS,
+      uniforms: { uTime: { value: 0 }, uInner: { value: HOLE.horizon * 1.3 }, uOuter: { value: HOLE.discOuter }, uAlpha: { value: 1 }, uView: { value: new THREE.Vector2() } },
+      side: THREE.DoubleSide,
+      ...LIGHT,
+      depthTest: true,
+    });
+    const discMesh = new THREE.Mesh(ringGeo, disc);
+    discMesh.rotation.x = -Math.PI / 2;
+    discMesh.rotation.z = 0.0;
+    discMesh.renderOrder = 4;
+    const half = HOLE.horizon * 3.2;
+    const lensGeo = new THREE.PlaneGeometry(half * 2, half * 2);
+    const lens = new THREE.ShaderMaterial({
+      vertexShader: LENS_VS,
+      fragmentShader: LENS_FS,
+      uniforms: { uHalf: { value: half }, uHorizon: { value: HOLE.horizon }, uAlpha: { value: 1 }, uTime: { value: 0 } },
+      ...LIGHT,
+      depthTest: false,
+    });
+    const lensMesh = new THREE.Mesh(lensGeo, lens);
+    lensMesh.renderOrder = 5;
+    const coreMat = new THREE.SpriteMaterial({ map: this.glow, color: new THREE.Color(1, 0.72, 0.42), opacity: 0.3, ...GLOW });
+    const core = new THREE.Sprite(coreMat);
+    core.scale.setScalar(HOLE.discOuter * 5);
+    core.renderOrder = 3;
+    group.add(core, horizon, discMesh, lensMesh);
+    own.push(horizonGeo, horizonMat, ringGeo, disc, lensGeo, lens, coreMat);
+    this.skyGroup.add(group);
+    this.skyDisposables.push(...own);
+    this.hole = { group, disc, lens, lensMesh };
+  }
+
+  // -- the projects ---------------------------------------------------------------------------
   setSky(sky: SkyModel) {
     for (const d of this.skyDisposables) d.dispose();
     this.skyDisposables = [];
-    for (const g of this.galaxies.values()) this.skyGroup.remove(g.group);
-    this.galaxies.clear();
-    this.reuseGroup.clear();
+    this.skyGroup.clear();
+    this.systems.clear();
+    this.hole = null;
+    this.debris = null;
+    this.bridges = null;
 
+    const places = placeSystems(sky.constellations);
     for (const c of sky.constellations) {
-      const place = galaxyPlacement(c);
-      const shape = galaxyShape(c.repo);
-      const p = galaxyParticles(c.repo, shape, particleCount(c.size));
-      const geo = new THREE.BufferGeometry();
-      geo.setAttribute("position", new THREE.BufferAttribute(p.positions, 3));
-      geo.setAttribute("aColor", new THREE.BufferAttribute(p.colors, 3));
-      geo.setAttribute("aSize", new THREE.BufferAttribute(p.sizes, 1));
-      const lit = 0.6 + 0.4 * Math.min(1, Math.max(0, c.brightness));
-      const mat = new THREE.ShaderMaterial({
-        vertexShader: GALAXY_VS,
-        fragmentShader: GALAXY_FS,
-        uniforms: { uSize: { value: 0.03 }, uPxScale: { value: 500 }, uAlpha: { value: lit } },
-        ...LIGHT,
-      });
-      const points = new THREE.Points(geo, mat);
-      points.frustumCulled = false;
-      const spinner = new THREE.Group();
-      spinner.add(points);
-      const tilt = new THREE.Group();
-      const tiltQ = new THREE.Quaternion().setFromEuler(new THREE.Euler(shape.tiltX, 0, shape.tiltZ));
-      tilt.quaternion.copy(tiltQ);
-      tilt.add(spinner);
-      const coreMat = new THREE.SpriteMaterial({
-        map: this.glow,
-        color: new THREE.Color(1, 0.84, 0.62),
-        opacity: 0.25 + 0.75 * c.brightness,
-        ...GLOW,
-      });
-      const core = new THREE.Sprite(coreMat);
-      const group = new THREE.Group();
-      group.position.set(place.x, place.y, place.z);
-      group.add(tilt, core);
-      // SKY-5: a small amber flag on a project with drift.
-      if (c.drift.length > 0) {
-        const flagMat = new THREE.SpriteMaterial({
-          map: this.glow,
-          color: new THREE.Color("#f5a524"),
-          opacity: 0.9,
-          ...GLOW,
+      const place = places.get(c.repo)!;
+      const sys: Sys = { c, place, points: null, mat: null, core: null, debris: [0, 0], lens: 1 };
+      if (place.centre) {
+        this.buildHole();
+      } else {
+        const cond = condensation(c);
+        const p = systemParticles(c.repo, cond, 140 + Math.round(360 * c.size));
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute("position", new THREE.BufferAttribute(p.local, 3));
+        geo.setAttribute("aColor", new THREE.BufferAttribute(p.colors, 3));
+        const size = new Float32Array(p.count);
+        for (let i = 0; i < p.count; i++) size[i] = p.orbit[i * 4 + 3];
+        geo.setAttribute("aSize", new THREE.BufferAttribute(size, 1));
+        geo.setAttribute("aKind", new THREE.BufferAttribute(p.kind, 1));
+        geo.setAttribute("aPhase", new THREE.BufferAttribute(p.phase, 1));
+        const mat = new THREE.ShaderMaterial({
+          vertexShader: SYS_VS,
+          fragmentShader: SYS_FS,
+          uniforms: { uTime: { value: 0 }, uPx: { value: 900 }, uDpr: { value: 1 }, uScale: { value: place.scale }, uAlpha: { value: 1 } },
+          ...LIGHT,
         });
-        const flag = new THREE.Sprite(flagMat);
-        flag.position.set(place.scale * 0.85, place.scale * 0.45, 0);
-        flag.scale.setScalar(Math.max(1.6, place.scale * 0.22));
-        flag.name = "drift-flag";
-        group.add(flag);
-        this.skyDisposables.push(flagMat);
+        const points = pointsOf(geo, mat, 3);
+        points.position.set(place.x, place.y, place.z);
+        points.scale.setScalar(place.scale);
+        // A condensed system gets a bright heart; a nebula only a faint one.
+        const coreMat = new THREE.SpriteMaterial({ map: this.glow, color: new THREE.Color(1, 0.9, 0.75), opacity: 0.05 + 0.6 * cond, ...GLOW });
+        const core = new THREE.Sprite(coreMat);
+        core.position.copy(points.position);
+        core.scale.setScalar(place.scale * (0.9 + 0.6 * cond));
+        core.renderOrder = 3;
+        this.skyGroup.add(points, core);
+        this.skyDisposables.push(geo, mat, coreMat);
+        sys.points = points;
+        sys.mat = mat;
+        sys.core = core;
       }
-      this.skyGroup.add(group);
-      this.skyDisposables.push(geo, mat, coreMat);
-      this.galaxies.set(c.repo, { c, place, group, tilt, tiltQ, spinner, points, mat, core, spin: shape.spin, lit });
+      this.systems.set(c.repo, sys);
     }
+    if (!this.hole) this.bulge.scale.setScalar(GAL_R * 0.55);
+    this.buildDebris();
+    this.buildBridges(sky);
+    this.applyLens();
 
-    // SKY-6: dashed reuse lines, amber when the reused project is Parked or archived.
+    if (!this.placed) {
+      this.placed = true;
+      this.cam = this.overviewPose();
+      this.goal = { ...this.cam };
+    }
+    if (this.interior) {
+      const repo = this.interior.repo;
+      this.dropInterior();
+      if (this.systems.has(repo)) this.buildInterior(repo);
+    }
+    if (this.open && !this.systems.has(this.open)) this.open = null;
+    this.dirty = true;
+  }
+
+  /** SKY-5 as debris: amber grains orbiting each project, denser with more drift. */
+  private buildDebris() {
+    let total = 0;
+    for (const s of this.systems.values()) total += debrisCount(s.c.drift.length);
+    if (total === 0) return;
+    const pos = new Float32Array(total * 3);
+    const orbit = new Float32Array(total * 4);
+    const alpha = new Float32Array(total);
+    let i = 0;
+    for (const s of this.systems.values()) {
+      const n = debrisCount(s.c.drift.length);
+      const r = seeded(`debris:${s.c.repo}`);
+      const base = s.place.centre ? HOLE.discOuter * 1.5 : s.place.scale * 1.45;
+      s.debris = [i, n];
+      for (let k = 0; k < n; k++, i++) {
+        pos.set([s.place.x, s.place.y, s.place.z], i * 3);
+        orbit.set([base * (1 + gauss(r) * 0.08), r() * Math.PI * 2, (0.05 + r() * 0.08) * (r() < 0.5 ? 1 : 1), base * 0.05 * r()], i * 4);
+        alpha[i] = 0.55 + r() * 0.45;
+      }
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+    geo.setAttribute("aOrbit", new THREE.BufferAttribute(orbit, 4));
+    geo.setAttribute("aAlpha", new THREE.BufferAttribute(alpha, 1));
+    geo.setAttribute("aBase", new THREE.BufferAttribute(alpha.slice(), 1));
+    const mat = new THREE.ShaderMaterial({
+      vertexShader: DEBRIS_VS,
+      fragmentShader: DEBRIS_FS,
+      uniforms: { uTime: { value: 0 }, uDpr: { value: 1 }, uPx: { value: 900 }, uColor: { value: AMBER } },
+      ...LIGHT,
+    });
+    this.skyGroup.add(pointsOf(geo, mat, 6));
+    this.skyDisposables.push(geo, mat);
+    this.debris = { geo, mat };
+  }
+
+  /** SKY-6 as light bridges arcing above the disc; amber when the reused project is parked. */
+  private buildBridges(sky: SkyModel) {
     const nameOf = (repo: string) => repo.slice(repo.lastIndexOf("/") + 1);
+    const segs: number[] = [];
+    const ts: number[] = [];
+    const cols: number[] = [];
+    const STEPS = 48;
     for (const c of sky.constellations) {
       for (const r of c.reuses) {
         const target = sky.constellations.find((t) => t.repo === r.repo || nameOf(t.repo) === r.repo);
         if (!target || target === c) continue;
-        const a = this.galaxies.get(c.repo)!.place;
-        const b = this.galaxies.get(target.repo)!.place;
-        const geo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(a.x, a.y, a.z), new THREE.Vector3(b.x, b.y, b.z)]);
-        const mat = new THREE.LineDashedMaterial({
-          color: r.warning ? WARNING : REUSE,
-          dashSize: 2.2,
-          gapSize: 1.6,
-          opacity: r.warning ? 0.85 : 0.5,
-          ...GLOW,
-        });
-        const line = new THREE.Line(geo, mat);
-        line.computeLineDistances();
-        this.reuseGroup.add(line);
-        this.skyDisposables.push(geo, mat);
+        const a = this.systems.get(c.repo)!.place;
+        const b = this.systems.get(target.repo)!.place;
+        const len = Math.hypot(a.x - b.x, a.z - b.z);
+        const lift = 4 + len * 0.28;
+        const col = r.warning ? AMBER : REUSE;
+        const at = (t: number) => [a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t + Math.sin(Math.PI * t) * lift, a.z + (b.z - a.z) * t];
+        for (let i = 0; i < STEPS; i++) {
+          const t0 = i / STEPS;
+          const t1 = (i + 1) / STEPS;
+          segs.push(...at(t0), ...at(t1));
+          ts.push(t0, t1);
+          cols.push(col.r, col.g, col.b, col.r, col.g, col.b);
+        }
       }
     }
-
-    // A galaxy that left the sky closes.
-    if (this.interior && !this.galaxies.has(this.interior.repo)) this.dropInterior();
-    else if (this.interior) {
-      const repo = this.interior.repo;
-      this.dropInterior();
-      this.buildInterior(repo);
-    }
-    this.dirty = true;
+    if (!segs.length) return;
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(segs), 3));
+    geo.setAttribute("aT", new THREE.BufferAttribute(new Float32Array(ts), 1));
+    geo.setAttribute("aColor", new THREE.BufferAttribute(new Float32Array(cols), 3));
+    const mat = new THREE.ShaderMaterial({ vertexShader: BRIDGE_VS, fragmentShader: BRIDGE_FS, uniforms: { uTime: { value: 0 }, uAlpha: { value: 0.7 } }, ...LIGHT });
+    const lines = new THREE.LineSegments(geo, mat);
+    lines.frustumCulled = false;
+    lines.renderOrder = 6;
+    this.skyGroup.add(lines);
+    this.skyDisposables.push(geo, mat);
+    this.bridges = mat;
   }
 
-  // -- the opened galaxy (SKY-3, SKY-4, SKY-7) ----------------------------------------------
+  // -- one project's constellation (SKY-3, SKY-4, SKY-7, SKY-8), built on approach ------------
   private buildInterior(repo: string) {
-    const g = this.galaxies.get(repo);
-    if (!g) return;
-    const c = g.c;
+    const sys = this.systems.get(repo);
+    if (!sys || sys.c.features.length === 0) return;
+    const c = sys.c;
+    const R = sys.place.R;
     const layout = layoutInterior(c);
     const group = new THREE.Group();
-    group.position.set(g.place.x, g.place.y, g.place.z);
-    group.scale.setScalar(INTERIOR_R);
+    group.position.set(sys.place.x, sys.place.y, sys.place.z);
+    group.scale.setScalar(R);
     const fadeMats: Interior["fadeMats"] = [];
     const own: { dispose(): void }[] = [];
+    const tints = { "1.0": new THREE.Color("#7dd3fc"), "after-1.0": new THREE.Color("#a5b4fc"), "after-2.0": new THREE.Color("#c4b5fd") } as const;
 
-    // A ring for each milestone.
-    const ringColors = { "1.0": "#7dd3fc", "after-1.0": "#a5b4fc", "after-2.0": "#c4b5fd" } as const;
+    // Milestone rings: orbital shells.
     for (const ring of layout.rings) {
       const pts: THREE.Vector3[] = [];
-      for (let i = 0; i <= 160; i++) {
-        const a = (i / 160) * Math.PI * 2;
+      for (let i = 0; i <= 200; i++) {
+        const a = (i / 200) * Math.PI * 2;
         pts.push(new THREE.Vector3(ring.radius * Math.cos(a), 0, ring.radius * Math.sin(a)));
       }
       const geo = new THREE.BufferGeometry().setFromPoints(pts);
       const dashed = ring.release !== "1.0";
-      const base = ring.release === "1.0" ? 0.42 : ring.release === "after-1.0" ? 0.3 : 0.22;
+      const base = ring.release === "1.0" ? 0.4 : ring.release === "after-1.0" ? 0.26 : 0.18;
       const mat = dashed
-        ? new THREE.LineDashedMaterial({ color: ringColors[ring.release], dashSize: 0.018, gapSize: 0.014, opacity: base, ...GLOW })
-        : new THREE.LineBasicMaterial({ color: ringColors[ring.release], opacity: base, ...GLOW });
+        ? new THREE.LineDashedMaterial({ color: tints[ring.release], dashSize: 0.016, gapSize: 0.014, opacity: base, ...GLOW })
+        : new THREE.LineBasicMaterial({ color: tints[ring.release], opacity: base, ...GLOW });
       const line = new THREE.Line(geo, mat);
       if (dashed) line.computeLineDistances();
+      line.renderOrder = 7;
       group.add(line);
       fadeMats.push({ mat, base });
       own.push(geo, mat);
     }
 
-    // A soft glow under each feature's cluster, lit by how much of it is closed.
+    // Each feature: a faint glow and its figure (minimum spanning tree of its stars).
+    const fig: number[] = [];
+    const figCol: number[] = [];
     for (const f of c.features) {
       const at = layout.features.get(f.id)!;
       const closed = f.stars.filter((s) => s.state === "closed").length;
       const share = f.stars.length ? closed / f.stars.length : 0;
-      const tint = f.release === "1.0" ? "#60a5fa" : f.release === "after-1.0" ? "#818cf8" : "#a78bfa";
-      const base = f.stars.length ? 0.16 + 0.3 * share : 0.08;
-      const mat = new THREE.SpriteMaterial({ map: this.glow, color: new THREE.Color(tint), opacity: base, ...GLOW });
-      const s = new THREE.Sprite(mat);
-      s.position.set(at.x, at.y, at.z);
-      s.scale.setScalar(Math.max(0.09, at.r * 3.4));
-      group.add(s);
-      fadeMats.push({ mat, base });
-      own.push(mat);
+      if (f.stars.length) {
+        const base = 0.1 + 0.18 * share;
+        const mat = new THREE.SpriteMaterial({ map: this.glow, color: tints[f.release], opacity: base, ...GLOW });
+        const s = new THREE.Sprite(mat);
+        s.position.set(at.x, at.y, at.z);
+        s.scale.setScalar(Math.max(0.08, at.r * 3.2));
+        s.renderOrder = 7;
+        group.add(s);
+        fadeMats.push({ mat, base });
+        own.push(mat);
+      }
+      const pts = f.stars.map((s) => layout.stars.get(s.number)!);
+      for (const [a, b] of spanningTree(pts)) {
+        fig.push(pts[a].x, pts[a].y, pts[a].z, pts[b].x, pts[b].y, pts[b].z);
+        const t = tints[f.release];
+        figCol.push(t.r, t.g, t.b, t.r, t.g, t.b);
+      }
+    }
+    if (fig.length) {
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(fig), 3));
+      geo.setAttribute("color", new THREE.BufferAttribute(new Float32Array(figCol), 3));
+      const mat = new THREE.LineBasicMaterial({ vertexColors: true, opacity: 0.42, ...GLOW });
+      const lines = new THREE.LineSegments(geo, mat);
+      lines.renderOrder = 8;
+      group.add(lines);
+      fadeMats.push({ mat, base: 0.42 });
+      own.push(geo, mat);
     }
 
-    // Stars and dark stars in one Points object.
+    // Issue stars, sized by magnitude, shaped by state.
     const stars: Interior["stars"] = [];
-    const entries: { p: Vec3; kind: number }[] = [];
-    for (const f of c.features) {
-      if (f.stars.length === 0) {
-        entries.push({ p: layout.features.get(f.id)!, kind: 1 });
-        continue;
-      }
+    const edged = new Set(c.edges.flat());
+    const sp: number[] = [];
+    for (const f of c.features)
       for (const s of f.stars) {
-        stars.push({ number: s.number, index: entries.length, state: s.state, inFlight: s.inFlight, chain: c.chain.includes(s.number) });
-        entries.push({ p: layout.stars.get(s.number)!, kind: 0 });
+        const p = layout.stars.get(s.number)!;
+        sp.push(p.x, p.y, p.z);
+        stars.push({ number: s.number, index: stars.length, state: s.state, inFlight: s.inFlight, chain: c.chain.includes(s.number), edged: edged.has(s.number), size: 0 });
       }
-    }
-    const n = entries.length;
+    const n = stars.length;
     const starGeo = new THREE.BufferGeometry();
-    const pos = new Float32Array(n * 3);
-    const kind = new Float32Array(n);
-    const flightA = new Float32Array(n);
-    entries.forEach((e, i) => {
-      pos.set([e.p.x, e.p.y, e.p.z], i * 3);
-      kind[i] = e.kind;
+    starGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(sp), 3));
+    for (const [name, k] of [["aColor", 3], ["aSize", 1], ["aAlpha", 1], ["aKind", 1], ["aCorona", 1], ["aPhase", 1], ["aGlow", 1]] as const)
+      starGeo.setAttribute(name, new THREE.BufferAttribute(new Float32Array(n * k), k));
+    const all = c.features.flatMap((f) => f.stars);
+    const kind = starGeo.getAttribute("aKind") as THREE.BufferAttribute;
+    const corona = starGeo.getAttribute("aCorona") as THREE.BufferAttribute;
+    const phase = starGeo.getAttribute("aPhase") as THREE.BufferAttribute;
+    // A crowded figure's glows add up to a white blot, so each star's glow is shared out.
+    const glow = starGeo.getAttribute("aGlow") as THREE.BufferAttribute;
+    const crowd = c.features.flatMap((f) => f.stars.map(() => Math.min(1, Math.sqrt(8 / Math.max(1, f.stars.length)))));
+    crowd.forEach((g, i) => glow.setX(i, g));
+    const pr = seeded(`stars:${repo}`);
+    all.forEach((s, i) => {
+      const ph = starPhysics(s);
+      kind.setX(i, ph.kind === "closed" ? 0 : ph.kind === "open" ? 1 : 2);
+      corona.setX(i, ph.corona === "pass" ? 1 : ph.corona === "fail" ? 2 : 0);
+      phase.setX(i, pr());
+      stars[i].size = ph.magnitude;
     });
-    for (const s of stars) flightA[s.index] = s.inFlight ? 1 : 0;
-    starGeo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
-    starGeo.setAttribute("aColor", new THREE.BufferAttribute(new Float32Array(n * 3), 3));
-    starGeo.setAttribute("aSize", new THREE.BufferAttribute(new Float32Array(n), 1));
-    starGeo.setAttribute("aAlpha", new THREE.BufferAttribute(new Float32Array(n), 1));
-    starGeo.setAttribute("aKind", new THREE.BufferAttribute(kind, 1));
-    starGeo.setAttribute("aFlight", new THREE.BufferAttribute(flightA, 1));
-    const starMat = new THREE.ShaderMaterial({
-      vertexShader: STAR_VS,
-      fragmentShader: STAR_FS,
-      uniforms: { uDpr: { value: this.dpr }, uTime: { value: 0 }, uPulse: { value: this.reducedMotion ? 0 : 1 }, uFade: { value: 0 } },
-      ...LIGHT,
-    });
-    const starPts = new THREE.Points(starGeo, starMat);
-    starPts.frustumCulled = false;
-    starPts.renderOrder = 2;
-    group.add(starPts);
+    const unif = () => ({ uPx: { value: 900 }, uDpr: { value: this.dpr }, uScale: { value: R }, uTime: { value: 0 }, uPulse: { value: this.reducedMotion ? 0 : 1 }, uFade: { value: 0 } });
+    const starMat = new THREE.ShaderMaterial({ vertexShader: STAR_VS, fragmentShader: STAR_FS, uniforms: unif(), ...LIGHT });
+    group.add(pointsOf(starGeo, starMat, 10));
     own.push(starGeo, starMat);
 
-    // A line for each `Blocked by #N` between two drawn stars.
+    // A feature with no issue: a dark dust knot with a dashed outline.
+    const dark = c.features.filter((f) => f.stars.length === 0);
+    let darkMat: THREE.ShaderMaterial | null = null;
+    if (dark.length) {
+      const geo = new THREE.BufferGeometry();
+      const dp = new Float32Array(dark.length * 3);
+      const ds = new Float32Array(dark.length);
+      dark.forEach((f, i) => {
+        const at = layout.features.get(f.id)!;
+        dp.set([at.x, at.y, at.z], i * 3);
+        ds[i] = Math.max(at.r * 2.4, layout.gap * 2.2);
+      });
+      geo.setAttribute("position", new THREE.BufferAttribute(dp, 3));
+      geo.setAttribute("aSize", new THREE.BufferAttribute(ds, 1));
+      geo.setAttribute("aAlpha", new THREE.BufferAttribute(new Float32Array(dark.length).fill(1), 1));
+      darkMat = new THREE.ShaderMaterial({ vertexShader: DARK_VS, fragmentShader: DARK_FS, uniforms: unif(), ...SHADE });
+      group.add(pointsOf(geo, darkMat, 9));
+      own.push(geo, darkMat);
+    }
+
+    // Blocked-by: a faint filament with light flowing from blocker to blocked.
     const drawn = c.edges.filter(([a, b]) => layout.stars.has(a) && layout.stars.has(b));
+    const chainPairs = new Set<string>();
+    for (let i = 1; i < c.chain.length; i++) chainPairs.add(`${c.chain[i - 1]}-${c.chain[i]}`);
     let edgeGeo: THREE.BufferGeometry | null = null;
-    const edgeMat = new THREE.LineBasicMaterial({ vertexColors: true, opacity: 0, ...GLOW });
-    own.push(edgeMat);
+    let flowGeo: THREE.BufferGeometry | null = null;
+    let flowMat: THREE.ShaderMaterial | null = null;
+    const flowEdge: number[] = [];
     if (drawn.length) {
       edgeGeo = new THREE.BufferGeometry();
       const ep = new Float32Array(drawn.length * 6);
+      const fa: number[] = [];
+      const fb: number[] = [];
+      const fph: number[] = [];
+      const hot: number[] = [];
+      const fr = seeded(`flow:${repo}`);
       drawn.forEach(([a, b], i) => {
         const pa = layout.stars.get(a)!;
         const pb = layout.stars.get(b)!;
         ep.set([pa.x, pa.y, pa.z, pb.x, pb.y, pb.z], i * 6);
+        const isChain = chainPairs.has(`${a}-${b}`);
+        const k = isChain ? 12 : 6;
+        const off = fr();
+        for (let j = 0; j < k; j++) {
+          fa.push(pa.x, pa.y, pa.z);
+          fb.push(pb.x, pb.y, pb.z);
+          fph.push((off + j / k) % 1);
+          hot.push(isChain ? 1 : 0);
+          flowEdge.push(i);
+        }
       });
       edgeGeo.setAttribute("position", new THREE.BufferAttribute(ep, 3));
       edgeGeo.setAttribute("color", new THREE.BufferAttribute(new Float32Array(drawn.length * 6), 3));
+      const edgeMat = new THREE.LineBasicMaterial({ vertexColors: true, opacity: 1, ...GLOW });
       const lines = new THREE.LineSegments(edgeGeo, edgeMat);
-      lines.renderOrder = 1;
+      lines.renderOrder = 8;
       group.add(lines);
-      own.push(edgeGeo);
+      fadeMats.push({ mat: edgeMat, base: 1 });
+      own.push(edgeGeo, edgeMat);
+
+      flowGeo = new THREE.BufferGeometry();
+      flowGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(fa), 3));
+      flowGeo.setAttribute("aB", new THREE.BufferAttribute(new Float32Array(fb), 3));
+      flowGeo.setAttribute("aPhase", new THREE.BufferAttribute(new Float32Array(fph), 1));
+      flowGeo.setAttribute("aHot", new THREE.BufferAttribute(new Float32Array(hot), 1));
+      flowGeo.setAttribute("aHi", new THREE.BufferAttribute(new Float32Array(hot.length).fill(1), 1));
+      flowMat = new THREE.ShaderMaterial({
+        vertexShader: FLOW_VS,
+        fragmentShader: FLOW_FS,
+        uniforms: { ...unif(), uFlow: { value: this.reducedMotion ? 0 : 1 }, uSize: { value: layout.gap * 0.35 } },
+        ...LIGHT,
+      });
+      group.add(pointsOf(flowGeo, flowMat, 9));
+      own.push(flowGeo, flowMat);
     }
-    fadeMats.push({ mat: edgeMat, base: 1 });
 
-    const chainPairs = new Set<string>();
-    for (let i = 1; i < c.chain.length; i++) chainPairs.add(`${c.chain[i - 1]}-${c.chain[i]}`);
-
-    this.scene.add(group);
-    this.interior = { repo, group, layout, stars, starGeo, starMat, edgeGeo, edgeMat, edges: drawn, chainPairs, fadeMats };
-    this.interiorOwn = own;
+    this.skyGroup.add(group);
+    this.interior = { repo, group, layout, R, stars, starGeo, starMat, darkMat, flowGeo, flowMat, flowEdge, edgeGeo, edges: drawn, chainPairs, fadeMats, own, fade: 0 };
     this.paintInterior();
   }
 
-  private interiorOwn: { dispose(): void }[] = [];
-
   private dropInterior() {
     if (!this.interior) return;
-    this.scene.remove(this.interior.group);
-    for (const d of this.interiorOwn) d.dispose();
-    this.interiorOwn = [];
+    this.skyGroup.remove(this.interior.group);
+    for (const d of this.interior.own) d.dispose();
     this.interior = null;
   }
 
-  /** Colour, size and alpha of each star and line, from state, chain, hover and pick. */
+  /** Colour, size and alpha of each star and filament, from state, chain, hover, pick, lens. */
   private paintInterior() {
     const it = this.interior;
     if (!it) return;
@@ -561,74 +989,93 @@ export class SkyScene {
     const col = it.starGeo.getAttribute("aColor") as THREE.BufferAttribute;
     const size = it.starGeo.getAttribute("aSize") as THREE.BufferAttribute;
     const alpha = it.starGeo.getAttribute("aAlpha") as THREE.BufferAttribute;
-    const kind = it.starGeo.getAttribute("aKind") as THREE.BufferAttribute;
-    for (let i = 0; i < kind.count; i++) {
-      if (kind.getX(i) === 1) {
-        col.setXYZ(i, 0.6, 0.68, 0.86);
-        size.setX(i, 15);
-        alpha.setX(i, lit ? 0.3 : 0.6);
-      }
-    }
+    const core = it.layout.gap * 0.4; // a magnitude-1 star's core radius, in ring units
     for (const s of it.stars) {
-      const look = starLook(s);
-      let c: [number, number, number] = s.state === "closed" ? [1, 0.93, 0.78] : [0.62, 0.74, 0.95];
-      if (s.inFlight) c = [0.4, 0.95, 0.85];
-      let sz = s.state === "closed" ? 13 : 12;
-      let a = look.opacity;
-      if (s.chain) {
-        c = [Math.min(1, c[0] + 0.1), c[1] * 0.92, c[2] * 0.6];
-        sz += 2;
-      }
+      let c: [number, number, number] = s.state === "closed" ? [1, 0.9, 0.72] : [0.62, 0.74, 0.98];
+      if (s.inFlight) c = [0.45, 1, 0.88];
+      let mag = s.size;
+      let a = s.inFlight ? 1 : s.state === "closed" ? 1 : 0.62;
+      if (s.chain) c = [Math.min(1, c[0] + 0.08), c[1] * 0.9, c[2] * 0.62];
       if (lit) {
         if (lit.has(s.number)) {
-          sz += 4;
-          a = Math.max(a, 0.95);
-        } else a *= 0.4;
+          mag *= 1.25;
+          a = Math.max(a, 1);
+        } else a *= 0.35;
       }
       if (this.picked === s.number) {
-        sz += 6;
+        mag *= 1.35;
         a = 1;
       }
+      a *= lensStar(this.lens, s);
       col.setXYZ(s.index, c[0], c[1], c[2]);
-      size.setX(s.index, sz);
+      // The sprite is drawn larger than the core (corona, spikes, beams): core at 0.28 of it.
+      size.setX(s.index, ((core * mag) / 0.28) * 2);
       alpha.setX(s.index, a);
     }
     col.needsUpdate = size.needsUpdate = alpha.needsUpdate = true;
 
+    const edgeLit = (a: number, b: number) => (lit ? (lit.has(a) && lit.has(b) ? 1.6 : 0.3) : 1);
+    const lensEdge = this.lens === "blocked" ? 1.8 : this.lens === "natural" ? 1 : 0.3;
     if (it.edgeGeo) {
       const ec = it.edgeGeo.getAttribute("color") as THREE.BufferAttribute;
       it.edges.forEach(([a, b], i) => {
-        let c = [0.24, 0.32, 0.46];
-        if (it.chainPairs.has(`${a}-${b}`)) c = [0.85, 0.62, 0.22];
-        if (lit) c = lit.has(a) && lit.has(b) ? [0.75, 0.92, 1] : [c[0] * 0.4, c[1] * 0.4, c[2] * 0.4];
-        ec.setXYZ(i * 2, c[0], c[1], c[2]);
-        ec.setXYZ(i * 2 + 1, c[0], c[1], c[2]);
+        const chain = it.chainPairs.has(`${a}-${b}`);
+        const k = edgeLit(a, b) * lensEdge;
+        const from = chain ? [0.35, 0.24, 0.08] : [0.08, 0.11, 0.18];
+        const to = chain ? [0.9, 0.66, 0.28] : [0.28, 0.38, 0.55];
+        ec.setXYZ(i * 2, from[0] * k, from[1] * k, from[2] * k);
+        ec.setXYZ(i * 2 + 1, to[0] * k, to[1] * k, to[2] * k);
       });
       ec.needsUpdate = true;
+    }
+    if (it.flowGeo) {
+      const hi = it.flowGeo.getAttribute("aHi") as THREE.BufferAttribute;
+      it.flowEdge.forEach((e, j) => hi.setX(j, edgeLit(it.edges[e][0], it.edges[e][1]) * lensEdge));
+      hi.needsUpdate = true;
     }
     this.dirty = true;
   }
 
+  private applyLens() {
+    const k = lensDisc(this.lens);
+    this.discMat.uniforms.uDim.value = k;
+    this.dustMat.uniforms.uDim.value = Math.max(k, 0.6);
+    for (const s of this.systems.values()) s.lens = lensSystem(this.lens, systemFacts(s.c));
+    if (this.debris) {
+      const a = this.debris.geo.getAttribute("aAlpha") as THREE.BufferAttribute;
+      const base = this.debris.geo.getAttribute("aBase") as THREE.BufferAttribute;
+      const m = lensDebris(this.lens);
+      for (let i = 0; i < a.count; i++) a.setX(i, base.getX(i) * m);
+      a.needsUpdate = true;
+    }
+    if (this.bridges) this.bridges.uniforms.uAlpha.value = this.lens === "natural" ? 0.7 : 0.15;
+    this.paintInterior();
+    this.dirty = true;
+  }
+
   // -- state from the overlay -----------------------------------------------------------------
+  /** Open a project (fly in unless the camera already zoomed there), or close it. */
   setOpen(repo: string | null) {
     if (repo === this.open) return;
-    const now = performance.now();
-    if (repo === null) {
-      this.open = null;
-      this.flight = flyTo(this.flight, now, 0, this.reducedMotion);
-    } else {
-      if (this.interior && this.interior.repo !== repo) {
-        this.dropInterior();
-        this.flight = rest(0);
-      }
-      this.open = repo;
-      this.zoom = 1;
-      this.userElev = 0;
-      if (!this.interior) this.buildInterior(repo);
-      this.flight = flyTo(this.flight, now, 1, this.reducedMotion);
-    }
+    const prev = this.open ? this.systems.get(this.open) : undefined;
+    this.open = repo;
     this.focusStar = null;
     this.picked = null;
+    if (repo === null) {
+      // Escape or Back: fly out, unless the camera already zoomed out past the edge.
+      const off = prev ? Math.hypot(this.goal.target.x - prev.place.x, this.goal.target.z - prev.place.z) : Infinity;
+      if (prev && this.goal.dist < 3.8 * prev.place.R && off < 2.2 * prev.place.R) this.flyTo(this.overviewPose());
+    } else {
+      const sys = this.systems.get(repo);
+      if (!sys) return;
+      if (this.interior?.repo !== repo) {
+        this.dropInterior();
+        this.buildInterior(repo);
+      }
+      const off = Math.hypot(this.goal.target.x - sys.place.x, this.goal.target.z - sys.place.z);
+      if (this.goal.dist > 3.0 * sys.place.R || off > 1.4 * sys.place.R) this.flyTo(this.systemPose(repo));
+    }
+    this.paintInterior();
     this.dirty = true;
   }
 
@@ -649,95 +1096,281 @@ export class SkyScene {
     this.paintInterior();
   }
 
+  setLens(lens: Lens) {
+    if (lens === this.lens) return;
+    this.lens = lens;
+    this.applyLens();
+  }
+
   setReducedMotion(on: boolean) {
     this.reducedMotion = on;
-    if (this.interior) this.interior.starMat.uniforms.uPulse.value = on ? 0 : 1;
-    if (on) this.flight = complete(this.flight);
+    const it = this.interior;
+    if (it) {
+      it.starMat.uniforms.uPulse.value = on ? 0 : 1;
+      if (it.flowMat) it.flowMat.uniforms.uFlow.value = on ? 0 : 1;
+    }
+    if (on) this.completeFlight();
     this.dirty = true;
   }
 
+  // -- the camera -----------------------------------------------------------------------------
+  private overDist(): number {
+    return fitDistance(GAL_R * 0.9, FOV, this.width / this.height);
+  }
+
+  overviewPose(): Pose {
+    // Aimed a little below the centre: the near side of a tilted disc looms larger, so this
+    // keeps the whole galaxy in the frame.
+    return { target: { x: 0, y: -GAL_R * 0.13, z: 0 }, dist: this.overDist(), az: this.goal.az, elev: OVER_ELEV };
+  }
+
+  systemPose(repo: string, k = SYS_DIST): Pose {
+    const s = this.systems.get(repo)!.place;
+    return { target: { x: s.x, y: s.y, z: s.z }, dist: k * s.R, az: this.goal.az, elev: SYS_ELEV };
+  }
+
+  /** Fly (about half a second; skippable) to a pose. */
+  flyTo(to: Pose) {
+    this.moved = true;
+    const ms = flightMs(this.cam, to, this.reducedMotion);
+    this.goal = { ...to, target: { ...to.target } };
+    if (ms <= 0) {
+      this.cam = { ...this.goal, target: { ...this.goal.target } };
+      this.tween = null;
+    } else this.tween = { from: { ...this.cam, target: { ...this.cam.target } }, to: this.goal, start: performance.now(), ms };
+    this.lastInput = performance.now();
+    this.dirty = true;
+  }
+
+  flyOverview() {
+    this.flyTo(this.overviewPose());
+  }
+
+  flyToSystem(repo: string) {
+    if (this.systems.has(repo)) this.flyTo(this.systemPose(repo));
+  }
+
+  private interiorWorld(p: Vec3): Vec3 {
+    const it = this.interior!;
+    const o = it.group.position;
+    return { x: o.x + p.x * it.R, y: o.y + p.y * it.R, z: o.z + p.z * it.R };
+  }
+
+  flyToFeature(id: string) {
+    const it = this.interior;
+    const f = it?.layout.features.get(id);
+    if (!it || !f) return;
+    this.flyTo({ target: this.interiorWorld(f), dist: Math.max(MIN_DIST * 2, f.r * it.R * 7), az: this.goal.az, elev: SYS_ELEV });
+  }
+
+  flyToStar(n: number) {
+    const it = this.interior;
+    const p = it?.layout.stars.get(n);
+    if (!it || !p) return;
+    this.flyTo({ target: this.interiorWorld(p), dist: Math.max(MIN_DIST * 1.5, it.layout.gap * it.R * 22), az: this.goal.az, elev: SYS_ELEV });
+  }
+
   isFlying(): boolean {
-    return inFlight(this.flight, performance.now());
+    return this.tween !== null;
   }
 
   /** Skip to the end of the flight in progress. */
   completeFlight() {
-    this.flight = complete(this.flight);
+    if (!this.tween) return;
+    this.cam = { ...this.tween.to, target: { ...this.tween.to.target } };
+    this.goal = { ...this.cam, target: { ...this.cam.target } };
+    this.tween = null;
     this.dirty = true;
   }
 
-  /** The open-ness of the view, 0 (overview) to 1 (inside a galaxy), eased. */
-  openBlend(): number {
-    return this.blend;
+  /** Inside the open project, deeper than its overview pose (Escape steps back to it first). */
+  deeperThanSystem(): boolean {
+    const s = this.open ? this.systems.get(this.open) : undefined;
+    return !!s && this.goal.dist < 1.25 * s.place.R;
+  }
+
+  private takeOver() {
+    this.moved = true;
+    // Input during a flight takes over from where the camera is.
+    if (this.tween) {
+      this.goal = { ...this.cam, target: { ...this.cam.target } };
+      this.tween = null;
+    }
+    this.lastInput = performance.now();
+    this.dirty = true;
+  }
+
+  /** The point on the disc plane (at the open project's height) under a screen point. */
+  private planePoint(sx: number, sy: number): Vec3 | null {
+    const s = this.open ? this.systems.get(this.open)?.place : undefined;
+    const py = s ? s.y : 0;
+    const ndc = new THREE.Vector3((sx / this.width) * 2 - 1, 1 - (sy / this.height) * 2, 0.5);
+    ndc.unproject(this.camera);
+    const o = this.camera.position;
+    const dir = ndc.sub(o).normalize();
+    if (Math.abs(dir.y) < 1e-4) return null;
+    const t = (py - o.y) / dir.y;
+    if (t <= 0) return null;
+    const p = { x: o.x + dir.x * t, y: py, z: o.z + dir.z * t };
+    // Far off the galaxy (a grazing ray): zoom about the centre of the view instead.
+    if (Math.hypot(p.x, p.z) > GAL_R * 2.2) return null;
+    return p;
+  }
+
+  /** Zoom by `factor` (above 1 out) toward a screen point, and enter or leave by distance. */
+  zoomAt(factor: number, sx: number, sy: number) {
+    this.takeOver();
+    const anchor = factor < 1 ? this.planePoint(sx, sy) : null;
+    this.goal = zoomToward(this.goal, factor, anchor ?? (factor < 1 ? null : { x: 0, y: 0, z: 0 }), MIN_DIST, this.overDist() * 1.6);
+    if (factor > 1 && this.goal.dist > this.overDist() * 0.9) {
+      // Backing out to the whole galaxy recentres it.
+      const k = Math.min(1, (this.goal.dist - this.overDist() * 0.9) / (this.overDist() * 0.4));
+      const home = this.overviewPose().target;
+      const t = this.goal.target;
+      this.goal.target = { x: t.x + (home.x - t.x) * k, y: t.y + (home.y - t.y) * k, z: t.z + (home.z - t.z) * k };
+    }
+    this.checkZone();
   }
 
   orbitBy(dx: number, dy: number) {
-    this.userAz = Math.max(-0.5, Math.min(0.5, this.userAz - dx * 0.004));
-    this.userElev = Math.max(-0.32, Math.min(0.32, this.userElev + dy * 0.003));
-    this.dirty = true;
+    this.takeOver();
+    this.goal.az -= dx * 0.005;
+    this.goal.elev = Math.max(0.2, Math.min(1.45, this.goal.elev + dy * 0.004));
   }
 
-  zoomBy(deltaY: number) {
-    this.zoom = Math.max(0.55, Math.min(1.45, this.zoom * Math.exp(deltaY * 0.0012)));
+  private checkZone() {
+    const zones = [...this.systems.values()].map((s) => ({ ...s.place, repo: s.c.repo }));
+    const z = zoneStep(this.open, this.goal, zones);
+    if (z) this.onZone?.(z);
+  }
+
+  /** Mark user input (stops the idle drift). */
+  poke() {
+    this.lastInput = performance.now();
     this.dirty = true;
   }
 
   resize(width: number, height: number) {
     this.width = Math.max(1, width);
     this.height = Math.max(1, height);
-    this.dpr = Math.min(2, window.devicePixelRatio || 1);
+    this.dpr = Math.min(1.5, window.devicePixelRatio || 1);
     this.renderer.setPixelRatio(this.dpr);
     this.renderer.setSize(this.width, this.height, false);
     this.camera.aspect = this.width / this.height;
     this.camera.updateProjectionMatrix();
-    this.field.uniforms.uDpr.value = this.dpr;
-    if (this.interior) this.interior.starMat.uniforms.uDpr.value = this.dpr;
+    // Until the camera has been moved, the overview follows the window's shape.
+    if (!this.moved && !this.open && !this.tween) {
+      this.cam = this.overviewPose();
+      this.goal = { ...this.cam, target: { ...this.cam.target } };
+    }
+    this.dirty = true;
+  }
+
+  /** The camera has left its starting pose (by input, a flight, or the DEV hook). */
+  hasMoved(): boolean {
+    return this.moved;
+  }
+
+  /** DEV only: put the camera somewhere at once (for screenshots without a mouse). */
+  devPlace(repo: string, k: number) {
+    if (!this.systems.has(repo)) return;
+    this.moved = true;
+    this.cam = this.systemPose(repo, k);
+    this.goal = { ...this.cam, target: { ...this.cam.target } };
+    this.tween = null;
     this.dirty = true;
   }
 
   // -- where things are on screen (CSS pixels in the canvas box) ----------------------------
-  private toScreen(v: THREE.Vector3, worldR: number): Screen {
-    this.tmp.copy(v).project(this.camera);
+  private toScreen(v: Vec3, worldR: number): Screen {
+    this.tmp.set(v.x, v.y, v.z).project(this.camera);
     const visible = this.tmp.z < 1 && this.tmp.z > -1;
     const x = ((this.tmp.x + 1) / 2) * this.width;
     const y = ((1 - this.tmp.y) / 2) * this.height;
-    this.right.set(1, 0, 0).applyQuaternion(this.camera.quaternion).multiplyScalar(worldR).add(v).project(this.camera);
+    this.right.set(1, 0, 0).applyQuaternion(this.camera.quaternion).multiplyScalar(worldR).add(this.tmp.set(v.x, v.y, v.z)).project(this.camera);
     const rx = ((this.right.x + 1) / 2) * this.width;
     const ry = ((1 - this.right.y) / 2) * this.height;
     return { x, y, r: Math.hypot(rx - x, ry - y), visible };
   }
 
   galaxyScreen(repo: string): Screen | null {
-    const g = this.galaxies.get(repo);
-    if (!g) return null;
-    return this.toScreen(g.group.position, g.place.scale);
-  }
-
-  private interiorPoint(p: Vec3, r: number): Screen | null {
-    const it = this.interior;
-    if (!it) return null;
-    const v = new THREE.Vector3(p.x, p.y, p.z).multiplyScalar(INTERIOR_R).add(it.group.position);
-    return this.toScreen(v, r * INTERIOR_R);
+    const s = this.systems.get(repo);
+    if (!s) return null;
+    return this.toScreen(s.place, s.place.centre ? HOLE.discOuter : s.place.scale * 0.8);
   }
 
   starScreen(n: number): Screen | null {
-    const p = this.interior?.layout.stars.get(n);
-    return p ? this.interiorPoint(p, 0.012) : null;
+    const it = this.interior;
+    const p = it?.layout.stars.get(n);
+    if (!it || !p) return null;
+    const mag = it.stars.find((s) => s.number === n)?.size ?? 1;
+    return this.toScreen(this.interiorWorld(p), it.layout.gap * 0.4 * mag * it.R);
   }
 
   featureScreen(id: string): Screen | null {
-    const p = this.interior?.layout.features.get(id);
-    return p ? this.interiorPoint(p, p.r) : null;
+    const it = this.interior;
+    const p = it?.layout.features.get(id);
+    return it && p ? this.toScreen(this.interiorWorld(p), p.r * it.R) : null;
   }
 
-  /** A point on a milestone ring at angle `a`, for the ring's name. */
-  ringScreen(release: string, a: number): Screen | null {
-    const ring = this.interior?.layout.rings.find((r) => r.release === release);
-    return ring ? this.interiorPoint({ x: ring.radius * Math.cos(a), y: 0, z: ring.radius * Math.sin(a) }, 0) : null;
+  /**
+   * Where a milestone ring's name goes: the point on the ring nearest the near-left side that is
+   * well inside the view, so all three names show even when a ring is larger than the screen.
+   * With no such point, the ring point nearest the view (the overlay clamps it in).
+   */
+  ringScreen(release: string): Screen | null {
+    const it = this.interior;
+    const ring = it?.layout.rings.find((r) => r.release === release);
+    if (!it || !ring) return null;
+    const a0 = Math.PI / 2 - this.cam.az + 0.5;
+    const W = this.width;
+    const H = this.height;
+    let best: Screen | null = null;
+    let bestCost = Infinity;
+    for (let i = 0; i < 72; i++) {
+      const da = ((i % 2 ? 1 : -1) * Math.ceil(i / 2) * Math.PI) / 36;
+      const a = a0 + da;
+      const sc = this.toScreen(this.interiorWorld({ x: ring.radius * Math.cos(a), y: 0, z: ring.radius * Math.sin(a) }), 0);
+      if (!sc.visible) continue;
+      const out = Math.max(0, 70 - sc.x, sc.x - (W - 70)) + Math.max(0, 100 - sc.y, sc.y - (H - 90));
+      const cost = out * 100 + Math.abs(da);
+      if (cost < bestCost) {
+        bestCost = cost;
+        best = sc;
+      }
+    }
+    return best;
   }
 
   interiorRepo(): string | null {
     return this.interior?.repo ?? null;
+  }
+
+  /** How much of the open constellation shows, 0..1 (the overlay fades its labels with it). */
+  detail(): number {
+    return this.interior ? this.interior.fade : 0;
+  }
+
+  /** The camera's distance over the overview's: 1 at the whole galaxy, small up close. */
+  zoomShare(): number {
+    return this.cam.dist / this.overDist();
+  }
+
+  /** The feature the camera has zoomed in on, if any (for the breadcrumb). */
+  nearFeature(): string | null {
+    const it = this.interior;
+    if (!it || it.repo !== this.open || this.goal.dist > 0.9 * it.R) return null;
+    let best: string | null = null;
+    let bd = Infinity;
+    for (const [id, f] of it.layout.features) {
+      const w = this.interiorWorld(f);
+      const d = Math.hypot(w.x - this.goal.target.x, w.z - this.goal.target.z);
+      if (d < Math.max(f.r * it.R * 2.5, MIN_DIST) && d < bd) {
+        bd = d;
+        best = id;
+      }
+    }
+    return best;
   }
 
   // -- the loop -------------------------------------------------------------------------------
@@ -764,94 +1397,131 @@ export class SkyScene {
 
   private frame() {
     const now = performance.now();
-    const flying = inFlight(this.flight, now);
-    if (this.reducedMotion && !this.dirty && !flying) return;
-    this.dirty = false;
-    const t = this.reducedMotion ? 0 : (now - this.clock0) / 1000;
-    const e = easeInOutCubic(flightValue(this.flight, now));
-    this.blend = e;
-    if (!flying && this.flight.to === 0 && this.interior && e === 0) this.dropInterior();
-
-    // Camera: the overview pose blended to the opened galaxy's pose.
-    const aspect = this.width / this.height;
-    const sway = this.reducedMotion ? 0 : 0.07 * Math.sin((t * 2 * Math.PI) / 90);
-    const az = sway + this.userAz;
-    const over: Pose = {
-      target: { x: 0, y: -4, z: 4 },
-      dist: fitDistance(104, FOV, aspect) * 0.74 * this.zoom,
-      az,
-      elev: OVERVIEW_ELEV + this.userElev,
-    };
-    let pose = over;
-    const it = this.interior;
-    const g = it ? this.galaxies.get(it.repo) : undefined;
-    if (g) {
-      const inside: Pose = {
-        target: { x: g.place.x, y: g.place.y, z: g.place.z },
-        dist: fitDistance(INTERIOR_R * 1.12, FOV, aspect) * (this.open ? this.zoom : 1),
-        az,
-        elev: GALAXY_ELEV + this.userElev * 0.5,
-      };
-      pose = blendPose(over, inside, e);
+    const dt = Math.min(0.05, Math.max(0, (now - this.last) / 1000));
+    this.last = now;
+    if (typeof document !== "undefined" && document.hidden) return;
+    const moving = this.tween !== null || settling(this.cam, this.goal);
+    if (this.reducedMotion && !this.dirty && !moving) return;
+    const idle = now - this.lastInput;
+    // Idle and still: half the frame rate is plenty for slow ambient motion.
+    if (!moving && !this.dirty && idle > 3000) {
+      this.skip = !this.skip;
+      if (this.skip) return;
     }
-    const eye = poseEye(pose);
+    this.dirty = false;
+    if (!this.reducedMotion) this.time += dt;
+    const t = this.time;
+
+    // The camera: a click flight, else easing toward the goal; after a while idle, a slow drift.
+    if (this.tween) {
+      const k = Math.min(1, (now - this.tween.start) / this.tween.ms);
+      this.cam = blendPose(this.tween.from, this.tween.to, easeInOutCubic(k));
+      if (k >= 1) {
+        this.cam = { ...this.tween.to, target: { ...this.tween.to.target } };
+        this.tween = null;
+      }
+    } else {
+      if (!this.reducedMotion && idle > IDLE_MS) this.goal.az += dt * 0.012;
+      this.cam = this.reducedMotion ? { ...this.goal, target: { ...this.goal.target } } : dampPose(this.cam, this.goal, dt);
+    }
+    const eye = poseEye(this.cam);
     this.camera.position.set(eye.x, eye.y, eye.z);
-    this.camera.lookAt(pose.target.x, pose.target.y, pose.target.z);
+    this.camera.lookAt(this.cam.target.x, this.cam.target.y, this.cam.target.z);
     this.camera.updateMatrixWorld();
 
-    // Galaxies: spin, light, hover; the opened one flattens and spreads into its constellation.
-    const pxScale = (this.height * this.dpr) / (2 * Math.tan((FOV * Math.PI) / 360));
-    for (const gal of this.galaxies.values()) {
-      const isOpen = !!it && gal.c.repo === it.repo;
-      const hover = gal.c.repo === this.hovered && e < 0.5 ? 1.35 : 1;
-      let alpha = gal.lit * hover * (1 - 0.88 * e);
-      let scale = gal.place.scale;
-      gal.tilt.quaternion.copy(gal.tiltQ);
-      if (isOpen) {
-        alpha = gal.lit * (1 - 0.84 * e);
-        scale = gal.place.scale + (INTERIOR_R * 1.18 - gal.place.scale) * e;
-        gal.tilt.quaternion.slerpQuaternions(gal.tiltQ, new THREE.Quaternion(), e);
-      }
-      gal.spinner.rotation.y = gal.spin * t;
-      gal.points.scale.setScalar(scale);
-      gal.mat.uniforms.uAlpha.value = alpha;
-      // Opened, the dust spreads but stays fine, so the constellation reads above it.
-      gal.mat.uniforms.uSize.value = 0.03 * (gal.place.scale + (scale - gal.place.scale) * 0.3);
-      gal.mat.uniforms.uPxScale.value = pxScale;
-      const coreMat = gal.core.material as THREE.SpriteMaterial;
-      coreMat.opacity = (0.22 + 0.7 * gal.c.brightness) * hover * (1 - (isOpen ? 0.85 : 0.9) * e);
-      gal.core.scale.setScalar(scale * (isOpen ? 0.7 : 0.95));
-      const flag = gal.group.getObjectByName("drift-flag") as THREE.Sprite | undefined;
-      if (flag) (flag.material as THREE.SpriteMaterial).opacity = 0.9 * (1 - e);
-    }
-    for (const line of this.reuseGroup.children as THREE.Line[]) {
-      const m = line.material as THREE.LineDashedMaterial;
-      m.visible = e < 0.98;
+    // Build the constellation of the project the camera approaches (lazily), drop it when far.
+    const want = this.open ?? this.approached(eye);
+    if (want !== (this.interior?.repo ?? null)) {
+      this.dropInterior();
+      if (want) this.buildInterior(want);
     }
 
-    // The constellation fades in over the second half of the flight.
-    if (it) {
-      const fade = Math.min(1, Math.max(0, (e - 0.35) / 0.65));
-      it.group.visible = fade > 0;
-      it.starMat.uniforms.uFade.value = fade;
-      it.starMat.uniforms.uTime.value = t;
-      for (const f of it.fadeMats) f.mat.opacity = f.base * fade;
+    const pxScale = (this.height * this.dpr) / (2 * Math.tan((FOV * Math.PI) / 360));
+    for (const m of [this.discMat, this.dustMat]) {
+      m.uniforms.uTime.value = t;
+      m.uniforms.uPx.value = pxScale;
+      m.uniforms.uDpr.value = this.dpr;
     }
     this.field.uniforms.uTime.value = t;
+    this.field.uniforms.uDpr.value = this.dpr;
+    const share = this.cam.dist / this.overDist();
+    (this.bulge.material as THREE.SpriteMaterial).opacity = (this.hole ? 0.22 : 0.4) * lensDisc(this.lens) * Math.min(1, 0.1 + share * share);
+
+    const it = this.interior;
+    for (const s of this.systems.values()) {
+      if (!s.mat || !s.core) continue;
+      const hover = s.c.repo === this.hovered ? 1.45 : 1;
+      const inside = it && it.repo === s.c.repo ? 1 - 0.75 * it.fade : 1;
+      s.mat.uniforms.uTime.value = t;
+      s.mat.uniforms.uPx.value = pxScale;
+      s.mat.uniforms.uDpr.value = this.dpr;
+      s.mat.uniforms.uAlpha.value = s.lens * hover * inside;
+      const cond = condensation(s.c);
+      (s.core.material as THREE.SpriteMaterial).opacity = (0.05 + 0.6 * cond) * s.lens * hover * inside;
+    }
+    if (this.hole) {
+      const d = Math.hypot(eye.x, eye.z);
+      this.hole.disc.uniforms.uTime.value = t;
+      this.hole.disc.uniforms.uView.value.set(eye.x / Math.max(d, 1e-6), -eye.z / Math.max(d, 1e-6));
+      this.hole.lens.uniforms.uTime.value = t;
+      this.hole.lensMesh.quaternion.copy(this.camera.quaternion);
+      const sw = this.systems.get([...this.systems.values()].find((s) => s.place.centre)!.c.repo)!;
+      const hover = sw.c.repo === this.hovered ? 1.3 : 1;
+      this.hole.disc.uniforms.uAlpha.value = Math.max(0.35, sw.lens) * hover * Math.min(1, 0.45 + share);
+      this.hole.lens.uniforms.uAlpha.value = Math.max(0.35, sw.lens) * hover;
+    }
+    if (this.debris) {
+      this.debris.mat.uniforms.uTime.value = t;
+      this.debris.mat.uniforms.uPx.value = pxScale;
+      this.debris.mat.uniforms.uDpr.value = this.dpr;
+    }
+    if (this.bridges) this.bridges.uniforms.uTime.value = t;
+
+    // The constellation fades in by distance, never pops.
+    if (it) {
+      const o = it.group.position;
+      it.fade = detailFade(Math.hypot(eye.x - o.x, eye.y - o.y, eye.z - o.z), it.R);
+      it.group.visible = it.fade > 0.001;
+      for (const m of [it.starMat, it.darkMat, it.flowMat]) {
+        if (!m) continue;
+        m.uniforms.uFade.value = it.fade;
+        m.uniforms.uTime.value = t;
+        m.uniforms.uPx.value = pxScale;
+        m.uniforms.uDpr.value = this.dpr;
+      }
+      for (const f of it.fadeMats) f.mat.opacity = f.base * it.fade;
+    }
 
     this.renderer.render(this.scene, this.camera);
     this.onFrame?.();
   }
 
+  /** The charted project the camera is closing in on, if near enough to start showing it. */
+  private approached(eye: Vec3): string | null {
+    let best: string | null = null;
+    let bd = Infinity;
+    for (const s of this.systems.values()) {
+      if (s.c.features.length === 0) continue;
+      const d = Math.hypot(eye.x - s.place.x, eye.y - s.place.y, eye.z - s.place.z) / s.place.R;
+      const off = Math.hypot(this.cam.target.x - s.place.x, this.cam.target.z - s.place.z) / s.place.R;
+      if (d < 5.4 && off < 1.6 && d < bd) {
+        bd = d;
+        best = s.c.repo;
+      }
+    }
+    return best;
+  }
+
   dispose() {
     this.stop();
     this.onFrame = null;
+    this.onZone = null;
     this.dropInterior();
     for (const d of this.skyDisposables) d.dispose();
     for (const d of this.disposables) d.dispose();
     this.skyDisposables = [];
     this.disposables = [];
-    this.galaxies.clear();
+    this.systems.clear();
     this.renderer.dispose();
     this.renderer.forceContextLoss();
   }
