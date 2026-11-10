@@ -4,6 +4,8 @@
 use crate::abilities::{AbilitiesIndex, FleetModels};
 use crate::autopilot::may_spend;
 use crate::fleet::FleetBridge;
+use crate::frontdoor::adapters::HttpChatTransport;
+use crate::frontdoor::labeller::{LlamaLabeller, SmallLabeller};
 use crate::frontdoor::router::{self, BudgetGate, Complexity, Pick, Route, Step};
 use crate::CoreError;
 use serde::Serialize;
@@ -203,13 +205,46 @@ pub fn route_message_on(
     Ok(ChatRoute::from(&picked))
 }
 
-/// FD-1: route one Chat message with the real router (#169).
+/// How long the labeller may take before the route goes on without it (a slow local model must
+/// not hold up Chat).
+pub const LABELLER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// The labeller for `machine`: its local qwen model on the server the fleet config names, over
+/// a transport that gives up after `LABELLER_TIMEOUT`. `None` without a model and a URL (rules
+/// only). A server that cannot be reached makes the labeller answer `None`, never an error.
+pub fn live_labeller(fleet: &FleetBridge, machine: Option<&str>) -> Option<LlamaLabeller> {
+    let (model, base_url) = FleetModels::read_qwen_endpoint(fleet, machine)?;
+    Some(LlamaLabeller::new(
+        &base_url,
+        &model,
+        Box::new(HttpChatTransport::with_timeout(LABELLER_TIMEOUT)),
+    ))
+}
+
+/// FD-1: route one Chat message with the real router (#169), the live labeller behind the
+/// rules (#293).
 pub fn route_message(
     fleet: &FleetBridge,
     message: &str,
     complexity: Complexity,
 ) -> Result<ChatRoute, CoreError> {
-    route_message_with(fleet, message, complexity, router::route)
+    let machine = FleetModels::local_machine();
+    let small = live_labeller(fleet, machine.as_deref());
+    route_message_on(
+        fleet,
+        machine.as_deref(),
+        message,
+        complexity,
+        |message, index, gate, complexity| {
+            router::route(
+                message,
+                index,
+                gate,
+                complexity,
+                small.as_ref().map(|s| s as &dyn SmallLabeller),
+            )
+        },
+    )
 }
 
 #[cfg(test)]

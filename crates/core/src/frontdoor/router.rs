@@ -309,8 +309,9 @@ fn budget_rule(index: &AbilitiesIndex, budget: &dyn BudgetGate, complexity: Comp
 }
 
 /// FD-1: route one message, stopping at the first step that matches: a trigger word (an
-/// agent's name, whole word, case-insensitive), an explicit ask, the labeller (rules only, no
-/// small model), then the budget and complexity rule. A braked pool is skipped, never called,
+/// agent's name, whole word, case-insensitive), an explicit ask, the labeller (rules first;
+/// `small`, when given, is asked only when the rules name nothing, and a `None` from it leaves
+/// the rules-only result), then the budget and complexity rule. A braked pool is skipped, never called,
 /// and the `Pick::Wait` says why. An ask whose `needs` tag a request kind carries takes that
 /// kind's pick; one only a job action carries (and the `claude` ask) is a Claude handoff; one
 /// nothing carries falls through to the next step.
@@ -319,6 +320,7 @@ pub fn route(
     index: &AbilitiesIndex,
     budget: &dyn BudgetGate,
     complexity: Complexity,
+    small: Option<&dyn super::labeller::SmallLabeller>,
 ) -> Route {
     if let Some(route) = trigger(message, index, budget) {
         return route;
@@ -327,7 +329,7 @@ pub fn route(
         return route;
     }
     let kinds: Vec<String> = index.request_kinds().iter().map(|a| a.id.clone()).collect();
-    if let Some(kind) = super::labeller::label(message, &kinds, None) {
+    if let Some(kind) = super::labeller::label(message, &kinds, small) {
         return Route {
             step: Step::Labeller { kind: kind.clone() },
             pick: pick_for_kind(index, &kind, budget),

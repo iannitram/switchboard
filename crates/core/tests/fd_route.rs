@@ -56,7 +56,13 @@ fn index_with(coding_kind: bool) -> AbilitiesIndex {
 }
 
 fn go(message: &str, braked: &[&'static str], complexity: Complexity) -> Route {
-    route(message, &index(), &Braked(braked.to_vec()), complexity)
+    route(
+        message,
+        &index(),
+        &Braked(braked.to_vec()),
+        complexity,
+        None,
+    )
 }
 
 fn service(service: &str, model: &str) -> Pick {
@@ -198,6 +204,7 @@ fn go_real(message: &str, braked: &[&'static str]) -> Route {
         &index_with(false),
         &Braked(braked.to_vec()),
         Complexity::Small,
+        None,
     )
 }
 
@@ -272,6 +279,7 @@ fn an_ask_whose_need_nothing_carries_falls_through() {
         &index,
         &Braked(vec![]),
         Complexity::Small,
+        None,
     );
     assert_ne!(
         r.step,
@@ -280,4 +288,114 @@ fn an_ask_whose_need_nothing_carries_falls_through() {
         }
     );
     assert_eq!(r.step, Step::BudgetRule);
+}
+
+// --- the small labeller behind the rules (#293) ---
+
+use switchboard_core::frontdoor::adapters::ChatTransport;
+use switchboard_core::frontdoor::labeller::{LlamaLabeller, SmallLabeller};
+use switchboard_core::CoreError;
+
+/// A labeller that always gives `answer` and counts its calls.
+struct Fake {
+    answer: Option<&'static str>,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl Fake {
+    fn new(answer: Option<&'static str>) -> Self {
+        Fake {
+            answer,
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+}
+
+impl SmallLabeller for Fake {
+    fn label(&self, _message: &str, _kinds: &[String]) -> Option<String> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.answer.map(str::to_string)
+    }
+}
+
+fn go_small(message: &str, small: &dyn SmallLabeller) -> Route {
+    route(
+        message,
+        &index(),
+        &Braked(vec![]),
+        Complexity::BigWithTools,
+        Some(small),
+    )
+}
+
+#[test]
+fn a_message_the_rules_cannot_label_routes_by_the_small_labellers_kind() {
+    let fake = Fake::new(Some("quick-lookup"));
+    let r = go_small("hello there", &fake);
+    assert_eq!(
+        r.step,
+        Step::Labeller {
+            kind: "quick-lookup".to_string()
+        }
+    );
+    assert_eq!(r.kind.as_deref(), Some("quick-lookup"));
+    assert_eq!(r.pick, service("qwen", QWEN_MODEL));
+    assert_eq!(fake.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[test]
+fn a_labeller_that_gives_nothing_leaves_the_rules_only_route() {
+    let fake = Fake::new(None);
+    let r = go_small("hello there", &fake);
+    assert_eq!(r, go("hello there", &[], Complexity::BigWithTools));
+    assert_eq!(r.step, Step::BudgetRule);
+    assert_eq!(fake.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[test]
+fn a_labeller_kind_the_index_does_not_have_is_dropped() {
+    let fake = Fake::new(Some("not-a-kind"));
+    let r = go_small("hello there", &fake);
+    assert_eq!(r.step, Step::BudgetRule);
+}
+
+#[test]
+fn a_message_the_rules_label_never_calls_the_small_labeller() {
+    let fake = Fake::new(Some("web-research"));
+    let r = go_small("what is a monad", &fake);
+    assert_eq!(r.kind.as_deref(), Some("quick-lookup"));
+    assert_eq!(fake.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+struct Down;
+
+impl ChatTransport for Down {
+    fn post_json(&self, url: &str, _body: &Value) -> Result<Value, CoreError> {
+        Err(CoreError::Refused(format!("POST {url}: unreachable")))
+    }
+}
+
+#[test]
+fn an_unreachable_local_server_leaves_the_rules_only_route() {
+    let llama = LlamaLabeller::new("http://localhost:1", "m", Box::new(Down));
+    let r = go_small("hello there", &llama);
+    assert_eq!(r, go("hello there", &[], Complexity::BigWithTools));
+}
+
+#[test]
+fn the_qwen_endpoint_is_the_model_and_the_server_url_without_its_models_tail() {
+    let config = json!({"machines": {"m1": {
+        "qwen_model": "qwen-x",
+        "qwen_server_url": "http://host:8080/v1/models"
+    }, "m2": {"qwen_model": "qwen-y"}, "m3": {
+        "qwen_model": " ", "qwen_server_url": "http://h/v1/models"
+    }}});
+    assert_eq!(
+        FleetModels::qwen_endpoint(&config, Some("m1")),
+        Some(("qwen-x".to_string(), "http://host:8080".to_string()))
+    );
+    assert_eq!(FleetModels::qwen_endpoint(&config, Some("m2")), None);
+    assert_eq!(FleetModels::qwen_endpoint(&config, Some("m3")), None);
+    assert_eq!(FleetModels::qwen_endpoint(&config, Some("nope")), None);
+    assert_eq!(FleetModels::qwen_endpoint(&config, None), None);
 }
