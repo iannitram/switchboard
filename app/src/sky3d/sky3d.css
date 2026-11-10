@@ -129,7 +129,13 @@
   font-weight: 500;
   letter-spacing: 0.01em;
   color: rgba(221, 230, 246, 0.86);
-  text-shadow: 0 0 6px rgba(2, 4, 12, 0.95), 0 1px 2px rgba(2, 4, 12, 0.95), 0 0 14px rgba(2, 4, 12, 0.8);
+  /* A dark halo hugging each glyph, so a name reads over bright gas as well as black sky. */
+  text-shadow:
+    0 0 1px rgba(1, 2, 8, 1),
+    0 0 3px rgba(1, 2, 8, 0.95),
+    0 1px 2px rgba(1, 2, 8, 0.95),
+    0 0 7px rgba(1, 2, 8, 0.9),
+    0 0 16px rgba(1, 2, 8, 0.75);
   will-change: transform;
 }
 .sky3d-label.is-top {
@@ -157,11 +163,12 @@
 .sky3d-feature {
   pointer-events: auto;
   font-size: 11.5px;
-  color: rgba(214, 226, 248, 0.82);
+  color: rgba(228, 236, 252, 0.94);
 }
+/* A feature with no issue yet: dimmer than a populated one, still upright and legible. */
 .sky3d-feature.is-dark {
-  color: var(--sky-faint);
-  font-style: italic;
+  color: rgba(178, 190, 214, 0.8);
+  font-weight: 400;
 }
 .sky3d-count {
   margin-left: 5px;
@@ -323,15 +330,23 @@
   background: rgba(10, 52, 72, 0.88);
   border-color: rgba(125, 211, 252, 0.35);
 }
+/* The title block keeps a clear band of its own: a soft dark scrim behind it, and (as a label
+   blocker) a margin round it that no feature or ring name may enter. */
 .sky3d-head {
   position: absolute;
-  top: 46px;
+  top: 44px;
   left: 50%;
   transform: translateX(-50%);
   text-align: center;
   pointer-events: none;
-  max-width: calc(100% - 640px);
+  max-width: calc(100% - 600px);
   min-width: 260px;
+  padding: 4px 26px 10px;
+  border-radius: 28px;
+  background: radial-gradient(ellipse at 50% 50%, rgba(2, 4, 12, 0.78) 0%, rgba(2, 4, 12, 0.6) 55%, rgba(2, 4, 12, 0) 100%);
+  text-shadow:
+    0 0 2px rgba(1, 2, 8, 1),
+    0 0 8px rgba(1, 2, 8, 0.9);
 }
 .sky3d-head h2 {
   margin: 0;
@@ -342,7 +357,7 @@
 .sky3d-head p {
   margin: 2px 0 0;
   font-size: 12px;
-  color: var(--sky-dim);
+  color: rgba(196, 208, 230, 0.92);
 }
 .sky3d-head [data-testid="chain-count"] {
   color: var(--sky-gold);
@@ -728,4 +743,16 @@
   .sky3d-lenses {
     bottom: 46px;
   }
+}
+
+/* DEV only: the frame-time readout (VITE_SKY_FPS=1). */
+.sky3d-devfps {
+  position: absolute;
+  top: 120px;
+  right: 16px;
+  margin: 0;
+  padding: 3px 8px;
+  font: 12px ui-monospace, monospace;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.8);
 }

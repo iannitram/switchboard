@@ -25,11 +25,12 @@ export function prefersReducedMotion(): boolean {
 // (git-ignored): VITE_SKY_OPEN=owner/repo opens a project, VITE_SKY_STAR=<issue> picks a star,
 // VITE_SKY_NEAR=owner/repo with VITE_SKY_DIST=<radii> parks the camera near one without opening,
 // VITE_SKY_LENS=<lens id> and VITE_SKY_SEARCH=<query> start with a lens or the search open;
-// VITE_SKY_STAGES=1 spreads the nebulae over every progress stage (the real data is mostly 0).
+// VITE_SKY_STAGES=1 spreads the nebulae over every progress stage (the real data is mostly 0);
+// VITE_SKY_FPS=1 measures the frame time (rAF delta over 5 s, every frame drawn) and shows it.
 // In a production build `import.meta.env.DEV` is false and this returns nothing set.
-export type DevStart = { open: string | null; star: number | null; near: string | null; dist: number | null; lens: string | null; search: string | null; stages: boolean };
+export type DevStart = { open: string | null; star: number | null; near: string | null; dist: number | null; lens: string | null; search: string | null; stages: boolean; fps: boolean };
 export function devSkyStart(): DevStart {
-  const none: DevStart = { open: null, star: null, near: null, dist: null, lens: null, search: null, stages: false };
+  const none: DevStart = { open: null, star: null, near: null, dist: null, lens: null, search: null, stages: false, fps: false };
   if (!import.meta.env.DEV || import.meta.env.MODE === "test") return none;
   const env = import.meta.env;
   const str = (v: unknown) => (typeof v === "string" && v ? v : null);
@@ -43,5 +44,6 @@ export function devSkyStart(): DevStart {
     lens: str(env.VITE_SKY_LENS),
     search: str(env.VITE_SKY_SEARCH),
     stages: env.VITE_SKY_STAGES === "1",
+    fps: env.VITE_SKY_FPS === "1",
   };
 }

@@ -155,6 +155,36 @@ export default function Sky3D({ sky, open, onOpen, onBack, picked, onPick, toolb
     scene.setSky(sky);
     if (dev.near && !scene.hasMoved()) scene.devPlace(dev.near, dev.dist ?? 4);
   }, [sky, dev]);
+  // DEV only: the frame time, as the rAF delta averaged over 5 s with every frame drawn.
+  const [devFps, setDevFps] = useState<string | null>(null);
+  useEffect(() => {
+    if (!dev.fps) return;
+    let raf = 0;
+    let first = 0;
+    let last = 0;
+    let n = 0;
+    let worst = 0;
+    const tick = (now: number) => {
+      sceneRef.current?.poke();
+      if (first === 0) first = last = now;
+      else {
+        worst = Math.max(worst, now - last);
+        n++;
+        last = now;
+      }
+      if (now - first >= 5000) {
+        const avg = (last - first) / Math.max(1, n);
+        setDevFps(`frame ${avg.toFixed(1)} ms avg over 5 s (${n} frames, worst ${worst.toFixed(1)} ms)`);
+        return;
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    const wait = window.setTimeout(() => (raf = requestAnimationFrame(tick)), 4000);
+    return () => {
+      window.clearTimeout(wait);
+      cancelAnimationFrame(raf);
+    };
+  }, [dev]);
   useEffect(() => {
     const scene = sceneRef.current;
     scene?.setOpen(open);
@@ -418,8 +448,10 @@ export default function Sky3D({ sky, open, onOpen, onBack, picked, onPick, toolb
       const gap = Math.min(s.r * 0.55, 90) + 8;
       const centre = isCentre(c.repo);
       const beside = s.x + gap + sz.width / 2;
-      const x = centre ? (coreOn ? core.x : beside) : coreOn ? outsideX({ x: s.x, r: gap }, core, sz.width, 0) : beside;
-      const y = centre && coreOn ? core.y + core.r + 4 : s.y - sz.height / 2;
+      // Close to the black hole its name hangs just under the shadow and photon ring, off the disc.
+      const x = centre ? (coreOn ? core.x : s.x) : coreOn ? outsideX({ x: s.x, r: gap }, core, sz.width, 0) : beside;
+      const shadow = centre && !coreOn ? scene.shadowScreen() : null;
+      const y = centre ? (shadow ? shadow.y + shadow.r * 1.08 + 6 : core.y + core.r + 4) : s.y - sz.height / 2;
       cands.push({ id: `g:${c.repo}`, x, y, ...sz, priority: centre ? -2 : c.rank, forced: c.repo === hovered });
     }
 
@@ -743,6 +775,7 @@ export default function Sky3D({ sky, open, onOpen, onBack, picked, onPick, toolb
           )}
         </aside>
 
+        {devFps && <p className="sky3d-devfps">{devFps}</p>}
         <p ref={blocker} className="sky3d-ages" data-testid="ages">
           {ageLine(sky)}
         </p>
