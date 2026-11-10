@@ -74,7 +74,7 @@ pub trait JobStarter {
     /// Start `job` with `brief` as its prompt. Does not wait for the job.
     fn start(&mut self, job: &Value, brief: &str) -> Result<(), CoreError>;
     /// Has the job started under `job_id` ended? `FleetStarter` says yes when the job has output,
-    /// has no job file, its launcher has exited 0, or its job file is older than
+    /// has no job file, its launcher has exited 0 or 75 ("not now"), or its job file is older than
     /// `PM_JOB_TIMEOUT_SECS`. An error means the job has ended with one: its launcher exited
     /// non-zero with no output (CORE-2, #379); the caller frees the job's slot and passes the
     /// error on.
@@ -815,11 +815,16 @@ impl JobStarter for FleetStarter {
             }
             return Ok(true);
         }
-        // No output: a launcher that has exited 0 is done; one that exited otherwise failed to
+        // No output: a launcher that has exited 0 or 75 is done; one that exited otherwise failed to
         // run the job, which is a fleet error with its exit code and stderr (CORE-2).
-        if let Ok(text) = std::fs::read_to_string(job_exit_file(&job_file)) {
+        // An exit file still empty is being written: asked again at the next pass.
+        if let Some(text) = std::fs::read_to_string(job_exit_file(&job_file))
+            .ok()
+            .filter(|text| !text.trim().is_empty())
+        {
             let code = text.trim().parse::<i32>().ok();
-            if code == Some(0) {
+            // 75 is the fleet's "not now" (CORE-1): an answer, not an error.
+            if code == Some(0) || code == Some(super::driver::NOT_NOW) {
                 return Ok(true);
             }
             let job_arg = job_file.to_string_lossy().into_owned();

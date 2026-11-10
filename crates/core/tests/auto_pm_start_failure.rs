@@ -118,3 +118,30 @@ fn a_launcher_still_running_is_not_finished() {
     starter.start(&job, "brief").unwrap();
     assert_eq!(starter.finished(&id), Ok(false));
 }
+
+#[test]
+fn a_launcher_that_says_not_now_with_no_output_is_finished_with_no_error() {
+    // Review of #379: exit 75 is the fleet's "not now" (CORE-1), an answer and not an error, so
+    // the slot is freed and nothing is recorded or filed.
+    let root = temp_dir("not-now");
+    let mut starter = starter(&root, "import sys\nsys.exit(75)\n");
+    let job = pm_job("o/a", "drift", 100, "claude");
+    let id = job["id"].as_str().unwrap().to_string();
+    starter.start(&job, "brief").unwrap();
+    wait_for_exit(&root.join("jobs"), &id);
+    assert_eq!(starter.finished(&id), Ok(true));
+}
+
+#[test]
+fn an_exit_file_still_being_written_is_not_an_error_yet() {
+    let root = temp_dir("half-written");
+    let mut starter = starter(&root, SILENT_OK);
+    let job = pm_job("o/a", "drift", 100, "claude");
+    let id = job["id"].as_str().unwrap().to_string();
+    let jobs = root.join("jobs");
+    std::fs::create_dir_all(&jobs).unwrap();
+    let job_file = jobs.join(format!("{id}.json"));
+    std::fs::write(&job_file, job.to_string()).unwrap();
+    std::fs::write(job_exit_file(&job_file), "").unwrap();
+    assert_eq!(starter.finished(&id), Ok(false));
+}
