@@ -87,6 +87,8 @@ type Interior = {
   edges: [number, number][];
   chainPairs: Set<string>;
   fadeMats: { mat: THREE.Material & { opacity: number }; base: number }[];
+  /** The feature figures' lines: base colours and the star at each vertex, for the search wink. */
+  fig: { geo: THREE.BufferGeometry; base: Float32Array; star: number[] } | null;
   own: { dispose(): void }[];
   fade: number;
 };
@@ -898,6 +900,7 @@ export class SkyScene {
     // Each feature: a faint glow and its figure (minimum spanning tree of its stars).
     const fig: number[] = [];
     const figCol: number[] = [];
+    const figStar: number[] = [];
     for (const f of c.features) {
       const at = layout.features.get(f.id)!;
       const closed = f.stars.filter((s) => s.state === "closed").length;
@@ -919,10 +922,13 @@ export class SkyScene {
         fig.push(pts[a].x, pts[a].y, pts[a].z, pts[b].x, pts[b].y, pts[b].z);
         const t = tints[f.release];
         figCol.push(t.r, t.g, t.b, t.r, t.g, t.b);
+        figStar.push(f.stars[a].number, f.stars[b].number);
       }
     }
+    let figure: Interior["fig"] = null;
     if (fig.length) {
       const geo = new THREE.BufferGeometry();
+      figure = { geo, base: new Float32Array(figCol), star: figStar };
       geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(fig), 3));
       geo.setAttribute("color", new THREE.BufferAttribute(new Float32Array(figCol), 3));
       const mat = new THREE.LineBasicMaterial({ vertexColors: true, opacity: 0.42, ...GLOW });
@@ -1046,7 +1052,7 @@ export class SkyScene {
     }
 
     this.skyGroup.add(group);
-    this.interior = { repo, group, layout, R, stars, starGeo, starMat, darkMat, flowGeo, flowMat, flowEdge, edgeGeo, edges: drawn, chainPairs, fadeMats, own, fade: 0 };
+    this.interior = { repo, group, layout, R, stars, starGeo, starMat, darkMat, flowGeo, flowMat, flowEdge, edgeGeo, edges: drawn, chainPairs, fadeMats, fig: figure, own, fade: 0 };
     this.syncWinks();
     this.paintInterior();
   }
@@ -1163,6 +1169,15 @@ export class SkyScene {
     }
     pick.needsUpdate = true;
     col.needsUpdate = size.needsUpdate = alpha.needsUpdate = true;
+    // A feature's figure lines wink out with its stars (additive: dimming the colour fades them).
+    if (it.fig) {
+      const fc = it.fig.geo.getAttribute("color") as THREE.BufferAttribute;
+      it.fig.star.forEach((n, v) => {
+        const k = this.winkOf(`s:${n}`).alpha;
+        fc.setXYZ(v, it.fig!.base[v * 3] * k, it.fig!.base[v * 3 + 1] * k, it.fig!.base[v * 3 + 2] * k);
+      });
+      fc.needsUpdate = true;
+    }
 
     const edgeLit = (a: number, b: number) => (lit ? (lit.has(a) && lit.has(b) ? 1.6 : 0.3) : 1);
     const lensEdge = this.lens === "blocked" ? 1.8 : this.lens === "natural" ? 1 : 0.3;

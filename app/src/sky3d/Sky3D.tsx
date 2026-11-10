@@ -708,7 +708,7 @@ export default function Sky3D({ sky, open, onOpen, onBack, picked, onPick, toolb
         </nav>
 
         {search !== null && (
-          <div id="sky3d-search" className="sky3d-search" role="dialog" aria-label="Search the sky">
+          <div ref={blocker} id="sky3d-search" className="sky3d-search" role="dialog" aria-label="Search the sky">
             <input
               autoFocus
               value={search}
