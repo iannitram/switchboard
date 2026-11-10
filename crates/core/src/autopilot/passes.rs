@@ -35,6 +35,8 @@ pub struct AutopilotState {
     pub weekly_last_run: Option<UnixSeconds>,
     /// AUTO-5: repos whose drift clear has not started yet (braked), oldest first.
     pub drift_pending: Vec<String>,
+    /// AUTO-2, AUTO-5: the id of the Project Manager job last started; no other starts until it ends.
+    pub pm_running: Option<String>,
 }
 
 impl AutopilotState {
@@ -67,6 +69,8 @@ pub trait JobStarter {
     fn may_spend(&mut self, lane: &str) -> Result<bool, CoreError>;
     /// Start `job` with `brief` as its prompt. Does not wait for the job.
     fn start(&mut self, job: &Value, brief: &str) -> Result<(), CoreError>;
+    /// Has the job started under `job_id` ended?
+    fn finished(&mut self, job_id: &str) -> Result<bool, CoreError>;
 }
 
 /// The fleet's canonical machine name: trimmed, lower case, old names mapped.
@@ -237,11 +241,35 @@ pub fn review_pass(
     Ok(started)
 }
 
-/// AUTO-2: the lane a Project Manager job runs on (`judgement-planning`'s first lane; the router's pick, FD-3, replaces it when it lands).
-pub const PM_LANE: &str = "claudeapi";
+/// AUTO-2, AUTO-5: the lanes a Project Manager job may run on, in the order they are asked: the
+/// local model first, then the smallest model with budget.
+pub const PM_LANES: [&str; 5] = ["qwen", "gemini", "chatgpt", "deepseek", "claudeapi"];
 
-/// AUTO-2: the Project Manager job for `what` in `repo`, read at `stamp`, on `PM_LANE`.
-pub fn pm_job(repo: &str, what: &str, stamp: UnixSeconds) -> Value {
+/// AUTO-2, AUTO-5: the first lane of `PM_LANES` that may spend now (AUTO-1); `None` when none
+/// may, so the job stays pending. A failed question is the error.
+fn pm_lane(starter: &mut dyn JobStarter) -> Result<Option<&'static str>, CoreError> {
+    for lane in PM_LANES {
+        if starter.may_spend(lane)? {
+            return Ok(Some(lane));
+        }
+    }
+    Ok(None)
+}
+
+/// AUTO-2, AUTO-5: may a Project Manager job start? Not while the one last started has not
+/// finished; once it has, that is forgotten.
+fn pm_free(state: &mut AutopilotState, starter: &mut dyn JobStarter) -> Result<bool, CoreError> {
+    if let Some(id) = state.pm_running.clone() {
+        if !starter.finished(&id)? {
+            return Ok(false);
+        }
+        state.pm_running = None;
+    }
+    Ok(true)
+}
+
+/// AUTO-2: the Project Manager job for `what` in `repo`, read at `stamp`, on `lane`.
+pub fn pm_job(repo: &str, what: &str, stamp: UnixSeconds, lane: &str) -> Value {
     let name = repo.rsplit_once('/').map_or(repo, |(_, name)| name);
     json!({
         "id": format!("pm-{what}-{}-{stamp}", id_part(name)),
@@ -254,7 +282,7 @@ pub fn pm_job(repo: &str, what: &str, stamp: UnixSeconds) -> Value {
         "no_issue": format!("Project Manager job ({what})"),
         "verify": [],
         "files_allowed": [],
-        "lane": PM_LANE,
+        "lane": lane,
         "brief": "open",
     })
 }
@@ -272,8 +300,10 @@ pub fn pm_brief(repo: &str, task: &str) -> String {
 pub const ROADMAP_TASK: &str = "ROADMAP.md changed since the last poll. Read it, SPEC.md and the open issues, then file or adjust the issues the change needs.";
 
 /// AUTO-2: start one Project Manager job for each repo whose ROADMAP.md changed since the text
-/// last acted on. A braked pool starts none and keeps the old text, so the change is tried at
-/// the next poll. A repo seen first is recorded and starts nothing; archived repos are skipped.
+/// last acted on, one at a time (`pm_running`) and at most one per call, on the first lane of
+/// `PM_LANES` that may spend. While one runs, or when no lane may spend, none starts and the old
+/// text is kept, so the change is tried at the next poll. A repo seen first is recorded and
+/// starts nothing; archived repos are skipped.
 pub fn roadmap_pass(
     snaps: &[RepoSnapshot],
     state: &mut AutopilotState,
@@ -293,13 +323,17 @@ pub fn roadmap_pass(
         if roadmap_changed(&state.roadmaps[i..=i], std::slice::from_ref(&next)).is_empty() {
             continue;
         }
-        if !starter.may_spend(PM_LANE)? {
+        if !started.is_empty() || !pm_free(state, starter)? {
             continue;
         }
-        let job = pm_job(&snap.repo, "roadmap", snap.read_at);
+        let Some(lane) = pm_lane(starter)? else {
+            continue;
+        };
+        let job = pm_job(&snap.repo, "roadmap", snap.read_at, lane);
         starter.start(&job, &pm_brief(&snap.repo, ROADMAP_TASK))?;
         state.roadmaps[i] = next;
         if let Some(id) = job["id"].as_str() {
+            state.pm_running = Some(id.to_string());
             started.push(id.to_string());
         }
     }
@@ -330,36 +364,32 @@ pub fn weekly_take(
     true
 }
 
-/// AUTO-5: start one drift clear for each pending repo, in order, on `PM_LANE`. A braked repo
-/// goes back on the list for a later check. A failed question or start keeps that repo and every
-/// one after it pending, and returns the error. Answers the job ids started.
+/// AUTO-5: start the drift clear of the first pending repo, on the first lane of `PM_LANES`
+/// that may spend. One at a time: nothing starts while the Project Manager job last started
+/// (`pm_running`) has not finished, and the other repos stay pending in order for a later check.
+/// When no lane may spend the repo stays pending. A failed question or start keeps every repo
+/// pending and returns the error. Answers the job ids started (none or one).
 pub fn drift_pass(
     now: UnixSeconds,
     state: &mut AutopilotState,
     starter: &mut dyn JobStarter,
 ) -> Result<Vec<String>, CoreError> {
-    let pending = std::mem::take(&mut state.drift_pending);
     let mut started = Vec::new();
-    for (i, repo) in pending.iter().enumerate() {
-        let job = pm_job(repo, "drift", now);
-        let open = match starter.may_spend(PM_LANE) {
-            Ok(open) => open,
-            Err(e) => {
-                state.drift_pending.extend_from_slice(&pending[i..]);
-                return Err(e);
-            }
-        };
-        if !open {
-            state.drift_pending.push(repo.clone());
-            continue;
-        }
-        if let Err(e) = starter.start(&job, &pm_brief(repo, DRIFT_TASK)) {
-            state.drift_pending.extend_from_slice(&pending[i..]);
-            return Err(e);
-        }
-        if let Some(id) = job["id"].as_str() {
-            started.push(id.to_string());
-        }
+    let Some(repo) = state.drift_pending.first().cloned() else {
+        return Ok(started);
+    };
+    if !pm_free(state, starter)? {
+        return Ok(started);
+    }
+    let Some(lane) = pm_lane(starter)? else {
+        return Ok(started);
+    };
+    let job = pm_job(&repo, "drift", now, lane);
+    starter.start(&job, &pm_brief(&repo, DRIFT_TASK))?;
+    state.drift_pending.remove(0);
+    if let Some(id) = job["id"].as_str() {
+        state.pm_running = Some(id.to_string());
+        started.push(id.to_string());
     }
     Ok(started)
 }
@@ -552,5 +582,14 @@ impl JobStarter for FleetStarter {
             let _ = child.wait();
         });
         Ok(())
+    }
+
+    fn finished(&mut self, job_id: &str) -> Result<bool, CoreError> {
+        let job_file = self.jobs_dir.join(format!("{job_id}.json"));
+        if !job_file.exists() {
+            return Ok(true);
+        }
+        let out = self.jobs_dir.join(format!("{job_id}.out"));
+        Ok(std::fs::metadata(out).is_ok_and(|m| m.len() > 0))
     }
 }

@@ -43,6 +43,10 @@ fn strings(items: &[&str]) -> Vec<String> {
 /// Says yes while `open`, logs every question and every start.
 struct FakeStarter {
     open: bool,
+    /// The only lane that may spend; any lane when `None` and `open`.
+    only: Option<&'static str>,
+    /// What `finished` answers.
+    done: bool,
     asked: Vec<String>,
     jobs: Vec<(Value, String)>,
 }
@@ -51,6 +55,8 @@ impl FakeStarter {
     fn new(open: bool) -> Self {
         FakeStarter {
             open,
+            only: None,
+            done: true,
             asked: Vec::new(),
             jobs: Vec::new(),
         }
@@ -60,11 +66,14 @@ impl FakeStarter {
 impl JobStarter for FakeStarter {
     fn may_spend(&mut self, lane: &str) -> Result<bool, CoreError> {
         self.asked.push(lane.to_string());
-        Ok(self.open)
+        Ok(self.open && self.only.map_or(true, |only| only == lane))
     }
     fn start(&mut self, job: &Value, brief: &str) -> Result<(), CoreError> {
         self.jobs.push((job.clone(), brief.to_string()));
         Ok(())
+    }
+    fn finished(&mut self, _: &str) -> Result<bool, CoreError> {
+        Ok(self.done)
     }
 }
 
@@ -137,7 +146,12 @@ fn sunday_559_starts_nothing_601_starts_one_drift_clear_and_one_backup() {
     assert_eq!(run.drift_started, vec![id.clone()]);
     assert_eq!(run.drift_error, None);
     assert_eq!(starter.jobs.len(), 1);
-    assert_eq!(starter.jobs[0].0, pm_job("iannitram/demo", "drift", reset));
+    assert_eq!(
+        starter.jobs[0].0,
+        pm_job("iannitram/demo", "drift", reset, "qwen")
+    );
+    assert_eq!(starter.jobs[0].0["lane"], "qwen");
+    assert_eq!(starter.asked, strings(&["qwen"]));
     assert_eq!(starter.jobs[0].1, pm_brief("iannitram/demo", DRIFT_TASK));
     assert_eq!(starter.jobs[0].0["id"], id.as_str());
     let state = AutopilotState::load(&data).unwrap();
@@ -174,7 +188,7 @@ fn a_second_tick_the_same_week_starts_neither_and_the_next_sunday_does() {
 }
 
 #[test]
-fn each_repo_not_archived_gets_its_own_drift_clear_in_store_order() {
+fn each_repo_not_archived_gets_its_own_drift_clear_in_store_order_one_per_check() {
     let data = data_with(
         "repos",
         &[
@@ -187,13 +201,10 @@ fn each_repo_not_archived_gets_its_own_drift_clear_in_store_order() {
     let reset = pacific(2026, 11, 8, 6, 1);
     let run = weekly_run(&data, reset, PACIFIC, &mut starter).unwrap();
     assert_eq!(run.backup, strings(&["iannitram/alpha", "iannitram/beta"]));
-    assert_eq!(
-        run.drift_started,
-        vec![
-            format!("pm-drift-alpha-{reset}"),
-            format!("pm-drift-beta-{reset}")
-        ]
-    );
+    assert_eq!(run.drift_started, vec![format!("pm-drift-alpha-{reset}")]);
+    let later = reset + 60;
+    let run = weekly_run(&data, later, PACIFIC, &mut starter).unwrap();
+    assert_eq!(run.drift_started, vec![format!("pm-drift-beta-{later}")]);
 }
 
 #[test]
@@ -204,7 +215,10 @@ fn a_braked_drift_clear_waits_but_the_backup_still_runs() {
     let run = weekly_run(&data, reset, PACIFIC, &mut braked).unwrap();
     assert_eq!(run.backup, strings(&["iannitram/demo"]));
     assert!(run.drift_started.is_empty());
-    assert_eq!(braked.asked, strings(&["claudeapi"]));
+    assert_eq!(
+        braked.asked,
+        strings(&["qwen", "gemini", "chatgpt", "deepseek", "claudeapi"])
+    );
     assert_eq!(
         AutopilotState::load(&data).unwrap().drift_pending,
         strings(&["iannitram/demo"])
@@ -219,6 +233,106 @@ fn a_braked_drift_clear_waits_but_the_backup_still_runs() {
         .unwrap()
         .drift_pending
         .is_empty());
+}
+
+#[test]
+fn the_drift_clear_runs_on_the_local_lane_and_falls_back_to_the_smallest_open_one() {
+    let mut state = AutopilotState {
+        drift_pending: strings(&["o/a"]),
+        ..Default::default()
+    };
+    let mut local = FakeStarter::new(true);
+    local.only = Some("qwen");
+    assert_eq!(drift_pass(100, &mut state, &mut local).unwrap().len(), 1);
+    assert_eq!(local.asked, strings(&["qwen"]), "no other lane was asked");
+    assert_eq!(local.jobs[0].0["lane"], "qwen");
+
+    for (open, asked) in [
+        ("gemini", &["qwen", "gemini"][..]),
+        ("deepseek", &["qwen", "gemini", "chatgpt", "deepseek"][..]),
+    ] {
+        let mut state = AutopilotState {
+            drift_pending: strings(&["o/a"]),
+            ..Default::default()
+        };
+        let mut starter = FakeStarter::new(true);
+        starter.only = Some(open);
+        assert_eq!(drift_pass(100, &mut state, &mut starter).unwrap().len(), 1);
+        assert_eq!(starter.asked, strings(asked));
+        assert_eq!(starter.jobs[0].0["lane"], open);
+    }
+}
+
+#[test]
+fn with_every_lane_closed_nothing_starts_and_the_repo_stays_pending() {
+    let mut state = AutopilotState {
+        drift_pending: strings(&["o/a", "o/b"]),
+        ..Default::default()
+    };
+    let mut starter = FakeStarter::new(false);
+    assert_eq!(drift_pass(100, &mut state, &mut starter), Ok(vec![]));
+    assert!(starter.jobs.is_empty());
+    assert_eq!(state.drift_pending, strings(&["o/a", "o/b"]));
+    assert_eq!(state.pm_running, None);
+}
+
+#[test]
+fn three_pending_repos_start_one_per_check_and_wait_for_the_last_to_finish() {
+    let mut state = AutopilotState {
+        drift_pending: strings(&["o/a", "o/b", "o/c"]),
+        ..Default::default()
+    };
+    let mut starter = FakeStarter::new(true);
+    assert_eq!(
+        drift_pass(100, &mut state, &mut starter),
+        Ok(strings(&["pm-drift-a-100"]))
+    );
+    assert_eq!(state.pm_running.as_deref(), Some("pm-drift-a-100"));
+    assert_eq!(state.drift_pending, strings(&["o/b", "o/c"]));
+
+    starter.done = false;
+    assert_eq!(drift_pass(101, &mut state, &mut starter), Ok(vec![]));
+    assert_eq!(starter.jobs.len(), 1, "the first job has not finished");
+    assert_eq!(state.drift_pending, strings(&["o/b", "o/c"]));
+
+    starter.done = true;
+    assert_eq!(
+        drift_pass(102, &mut state, &mut starter),
+        Ok(strings(&["pm-drift-b-102"]))
+    );
+    assert_eq!(state.pm_running.as_deref(), Some("pm-drift-b-102"));
+    assert_eq!(state.drift_pending, strings(&["o/c"]));
+}
+
+#[test]
+fn a_running_roadmap_job_blocks_a_drift_start() {
+    let mut state = AutopilotState {
+        drift_pending: strings(&["o/a"]),
+        pm_running: Some("pm-roadmap-x-1".into()),
+        ..Default::default()
+    };
+    let mut starter = FakeStarter::new(true);
+    starter.done = false;
+    assert_eq!(drift_pass(100, &mut state, &mut starter), Ok(vec![]));
+    assert!(
+        starter.asked.is_empty(),
+        "no budget question while one runs"
+    );
+    assert_eq!(state.drift_pending, strings(&["o/a"]));
+}
+
+#[test]
+fn an_old_state_file_without_pm_running_loads() {
+    let data = temp_dir("old-state");
+    std::fs::write(
+        data.join("autopilot.json"),
+        r#"{"reviews_started": [], "roadmaps": [], "weekly_last_run": 5, "drift_pending": ["o/a"]}"#,
+    )
+    .unwrap();
+    let state = AutopilotState::load(&data).unwrap();
+    assert_eq!(state.pm_running, None);
+    assert_eq!(state.drift_pending, strings(&["o/a"]));
+    assert_eq!(state.weekly_last_run, Some(5));
 }
 
 #[test]
@@ -252,6 +366,9 @@ impl JobStarter for FailsOnB {
     fn may_spend(&mut self, _: &str) -> Result<bool, CoreError> {
         Ok(true)
     }
+    fn finished(&mut self, _: &str) -> Result<bool, CoreError> {
+        Ok(true)
+    }
     fn start(&mut self, job: &Value, _: &str) -> Result<(), CoreError> {
         if job["repo"] == "o/b" {
             return Err(CoreError::Io("jobs: disk full".into()));
@@ -262,9 +379,9 @@ impl JobStarter for FailsOnB {
 }
 
 #[test]
-fn a_failed_start_keeps_that_repo_and_the_rest_pending() {
+fn a_failed_start_keeps_every_repo_pending() {
     let mut state = AutopilotState {
-        drift_pending: strings(&["o/a", "o/b", "o/c"]),
+        drift_pending: strings(&["o/b", "o/c"]),
         ..Default::default()
     };
     let mut starter = FailsOnB(Vec::new());
@@ -272,8 +389,9 @@ fn a_failed_start_keeps_that_repo_and_the_rest_pending() {
         drift_pass(100, &mut state, &mut starter),
         Err(CoreError::Io("jobs: disk full".into()))
     );
-    assert_eq!(starter.0, strings(&["o/a"]));
+    assert!(starter.0.is_empty());
     assert_eq!(state.drift_pending, strings(&["o/b", "o/c"]));
+    assert_eq!(state.pm_running, None);
 }
 
 #[test]
@@ -285,4 +403,21 @@ fn the_code_map_names_the_weekly_run_present() {
     assert!(map.contains(
         "- AUTO-5 weekly run (`weekly_run`, `drift_pass` in `passes.rs`; the drift clear and the backup after Sunday 6am, from the app's poll thread): present."
     ));
+}
+
+#[test]
+fn the_fleet_starter_calls_a_job_finished_when_its_out_file_has_text_or_it_is_unknown() {
+    let jobs = temp_dir("finished");
+    let mut starter = switchboard_core::autopilot::passes::FleetStarter {
+        fleet: switchboard_core::fleet::FleetBridge::with_root(&jobs),
+        jobs_dir: jobs.clone(),
+        dev_root: jobs.clone(),
+    };
+    assert_eq!(starter.finished("nope"), Ok(true), "no job file");
+    std::fs::write(jobs.join("a.json"), "{}").unwrap();
+    assert_eq!(starter.finished("a"), Ok(false), "no out file yet");
+    std::fs::write(jobs.join("a.out"), "").unwrap();
+    assert_eq!(starter.finished("a"), Ok(false), "empty out file");
+    std::fs::write(jobs.join("a.out"), "{\"state\":\"done\"}\n").unwrap();
+    assert_eq!(starter.finished("a"), Ok(true));
 }
