@@ -394,11 +394,26 @@ fn a_manifest_for_another_repo_than_the_backups_items_is_refused_wherever_it_sit
     )
     .unwrap();
     set_manifest(&f.backup, |m| m["repo"] = json!("other/zzz"));
+    // No `resolved_repo` in the manifest (hand-edited, or written before the manifest had the
+    // field): refused, with both names and what to do if the repo was renamed before the backup.
     refused_before_any_write(
         &f,
         &f.backup,
-        "the manifest is for other/zzz, the backup holds items of owner/demo",
+        "the manifest is for other/zzz, the backup holds items of owner/demo; if the repo was \
+         renamed or moved to owner/demo before this backup was taken, add \
+         \"resolved_repo\": \"owner/demo\" to its manifest.json and restore again",
     );
+    // A recorded rename covers that one name only.
+    set_manifest(&f.backup, |m| m["resolved_repo"] = json!("third/repo"));
+    refused_before_any_write(
+        &f,
+        &f.backup,
+        "the manifest is for other/zzz (GitHub answered for third/repo), the backup holds \
+         items of owner/demo",
+    );
+    set_manifest(&f.backup, |m| {
+        m.as_object_mut().unwrap().remove("resolved_repo");
+    });
 
     // With the manifest's own repo (any case) the same copy restores.
     set_manifest(&f.backup, |m| m["repo"] = json!("Owner/Demo"));
@@ -411,6 +426,81 @@ fn a_manifest_for_another_repo_than_the_backups_items_is_refused_wherever_it_sit
     );
     let report = restore_history_from(&f.fleet, &f.backup, NEW, &remote(&f, &api)).unwrap();
     assert_eq!(report.refs, 3);
+}
+
+/// #364: a repo renamed or moved before its backup, backed up under the old name. GitHub
+/// answered with the items of the new name; the backup recorded it, so the restore goes on.
+#[test]
+fn a_backup_that_followed_a_rename_restores() {
+    let f = fixture("renamed");
+    let at = |rest: &str| format!("https://api.github.com/repos/new-owner/renamed/{rest}");
+    let answers = RecordedAnswers {
+        repo: "owner/demo".to_string(),
+        labels: vec![
+            json!({"name": "bug", "url": at("labels/bug")}),
+            json!({"name": "size:Easy", "url": at("labels/size:Easy")}),
+        ],
+        milestones: vec![json!({"title": "1.0", "url": at("milestones/1")})],
+        comments: vec![json!({"body": "me too", "issue_url": at("issues/1")})],
+        ..RecordedAnswers::default()
+    };
+    let mut manifest = write_json(&answers, &f.backup, "2026-11-09T14:00:00Z").unwrap();
+    assert_eq!(manifest.repo, "owner/demo");
+    assert_eq!(manifest.resolved_repo.as_deref(), Some("new-owner/renamed"));
+    manifest.refs = 4;
+    std::fs::write(
+        f.backup.join("manifest.json"),
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            answer(404, json!({"message": "Not Found"})),
+            answer(200, json!({"full_name": NEW, "private": true})),
+        ],
+    );
+    let report = restore_history_from(&f.fleet, &f.backup, NEW, &remote(&f, &api)).unwrap();
+    assert_eq!((report.refs, report.labels, report.milestones), (3, 2, 1));
+
+    // The same backup with the recorded name taken out of the manifest is refused.
+    set_manifest(&f.backup, |m| {
+        m.as_object_mut().unwrap().remove("resolved_repo");
+    });
+    match restore_history_from(&f.fleet, &f.backup, NEW, &remote(&f, &api)) {
+        Err(CoreError::Parse(why)) => assert!(
+            why.contains(
+                "the manifest is for owner/demo, the backup holds items of new-owner/renamed"
+            ),
+            "{why}"
+        ),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
+/// Items of more than one other repo are no rename: the JSON is not written.
+#[test]
+fn answers_for_several_other_repos_are_not_written() {
+    let root = scratch("several");
+    let at = |repo: &str| format!("https://api.github.com/repos/{repo}/labels/x");
+    let answers = RecordedAnswers {
+        repo: "owner/demo".to_string(),
+        labels: vec![
+            json!({"name": "a", "url": at("one/repo")}),
+            json!({"name": "b", "url": at("two/repo")}),
+        ],
+        ..RecordedAnswers::default()
+    };
+    let out = root.join("backup");
+    match write_json(&answers, &out, "2026-11-09T14:00:00Z") {
+        Err(CoreError::GitHub(why)) => assert!(
+            why.contains("more than one other repo (one/repo, two/repo)"),
+            "{why}"
+        ),
+        other => panic!("expected an error, got {other:?}"),
+    }
+    assert!(!out.join("labels.json").exists());
 }
 
 /// #365: a label comes back with its colour and description, a milestone with its description

@@ -136,3 +136,9 @@ test("the time a backup was taken reads as 12-hour local time", () => {
   const line = backupLine(WRITTEN);
   expect(line).toMatch(/at \d{4}-\d{2}-\d{2} \d{1,2}(:\d{2})?(am|pm):/);
 });
+
+test("a backup that followed a rename says which repo GitHub answered for", () => {
+  const row: BackupRow = { ...WRITTEN, manifest: { ...manifest("owner/one"), resolved_repo: "new-owner/renamed" } };
+  expect(backupLine(row)).toMatch(/^owner\/one \(GitHub answered for new-owner\/renamed: renamed or moved\) backed up at /);
+  expect(backupLine(WRITTEN)).not.toContain("GitHub answered");
+});

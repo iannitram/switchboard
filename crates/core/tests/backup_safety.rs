@@ -24,6 +24,9 @@ const TAKEN_AT: &str = "2026-11-09T16:45:00Z";
 #[derive(Default)]
 struct ByPath {
     releases: Vec<Value>,
+    /// The repo the items' API addresses are for, when GitHub answers for another name than the
+    /// one asked for (a renamed or moved repo).
+    answers_for: Option<&'static str>,
     log: Mutex<Vec<String>>,
 }
 
@@ -35,14 +38,18 @@ impl GitHubTransport for ByPath {
     fn rest_get(&self, path: &str, _etag: Option<&str>) -> Result<RestAnswer, CoreError> {
         self.log.lock().unwrap().push(format!("GET {path}"));
         let list = path.split('?').next().unwrap().rsplit('/').next().unwrap();
+        let at = |rest: &str| match self.answers_for {
+            Some(repo) => json!(format!("https://api.github.com/repos/{repo}/{rest}")),
+            None => Value::Null,
+        };
         let body = match list {
             "issues" => json!([
-                {"number": 1, "state": "open", "labels": [{"name": "bug"}]},
+                {"number": 1, "state": "open", "labels": [{"name": "bug"}], "url": at("issues/1")},
                 {"number": 2, "state": "open", "labels": []},
             ]),
             "pulls" => json!([]),
-            "comments" => json!([{"id": 1, "body": "hi"}]),
-            "labels" => json!([{"name": "bug"}]),
+            "comments" => json!([{"id": 1, "body": "hi", "issue_url": at("issues/1")}]),
+            "labels" => json!([{"name": "bug", "url": at("labels/bug")}]),
             "milestones" => json!([{"number": 1, "title": "1.0"}]),
             "releases" => Value::Array(self.releases.clone()),
             other => return Err(CoreError::GitHub(format!("GET {path}: no list {other}"))),
@@ -296,7 +303,13 @@ fn two_processes_child() {
         return;
     };
     let root = PathBuf::from(root);
+    // A parent that died before it wrote `go` must not leave this child waiting for ever.
+    let waited = std::time::Instant::now();
     while !root.join("go").exists() {
+        if waited.elapsed() > std::time::Duration::from_secs(60) {
+            println!("child outcome: gave up, no go file");
+            return;
+        }
         std::thread::sleep(std::time::Duration::from_micros(200));
     }
     let api = ByPath::default();
@@ -390,6 +403,31 @@ fn backups_of_one_repo_from_several_processes_leave_one_whole_backup() {
 }
 
 /// #364: the manifest holds the hash of the bundle it was written for.
+#[test]
+fn a_backup_of_a_renamed_repo_records_the_name_github_answered_for() {
+    let root = scratch("renamed");
+    let server = server(&root, REPO, false);
+    let backups = root.join("Backups");
+    let api = ByPath {
+        answers_for: Some("new-owner/renamed"),
+        ..ByPath::default()
+    };
+    let manifest = back_up(&backups, &server, &api);
+    assert_eq!(manifest.repo, REPO, "kept under the name asked for");
+    assert_eq!(manifest.resolved_repo.as_deref(), Some("new-owner/renamed"));
+    assert_eq!(read_manifest(&folder(&backups, REPO)), manifest);
+
+    // The name asked for, in any case, is no rename; the field then stays out of the file.
+    let api = ByPath {
+        answers_for: Some("Owner/Demo"),
+        ..ByPath::default()
+    };
+    let manifest = back_up(&backups, &server, &api);
+    assert_eq!(manifest.resolved_repo, None);
+    let text = std::fs::read_to_string(folder(&backups, REPO).join("manifest.json")).unwrap();
+    assert!(!text.contains("resolved_repo"), "{text}");
+}
+
 #[test]
 fn the_manifest_holds_the_bundles_hash() {
     let root = scratch("hash");

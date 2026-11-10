@@ -145,7 +145,11 @@ fn autopilot_after_poll(
                                     use switchboard_core::backup::BackupOutcome;
                                     for (repo, outcome) in outcomes {
                                         match outcome {
-                                            Ok(BackupOutcome::Written(_)) => {}
+                                            Ok(BackupOutcome::Written(manifest)) => {
+                                                if let Some(now) = manifest.resolved_repo {
+                                                    eprintln!("weekly backup: {repo}: GitHub answered for {now}: renamed or moved");
+                                                }
+                                            }
                                             Ok(BackupOutcome::Refused(why)) => {
                                                 eprintln!("weekly backup: {repo} refused: {why}");
                                             }

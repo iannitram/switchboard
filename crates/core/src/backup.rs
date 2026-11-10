@@ -42,6 +42,11 @@ pub struct Manifest {
     /// `git hash-object` of `repo.bundle`; empty in a backup written before the manifest had it.
     #[serde(default)]
     pub bundle_hash: String,
+    /// The repo GitHub answered for, when it is not `repo`: the repo was renamed or moved before
+    /// this backup, and GitHub answered its old name with the items of the new one. A restore
+    /// accepts items of either name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_repo: Option<String>,
 }
 
 /// The recorded answers `write_json` writes out, as the REST JSON arrays GitHub returned. Issues
@@ -67,7 +72,8 @@ pub fn write_json(
     out_dir: &Path,
     taken_at: &str,
 ) -> Result<Manifest, CoreError> {
-    let manifest = manifest_for(answers, taken_at);
+    let mut manifest = manifest_for(answers, taken_at);
+    manifest.resolved_repo = resolved_repo(answers)?;
     let files = [
         ("issues.json", pretty(&answers.issues)?),
         ("pulls.json", pretty(&answers.pulls)?),
@@ -96,7 +102,36 @@ pub fn write_json(
     Ok(manifest)
 }
 
-/// The counts for `answers`. `refs`, `releases` and `wiki` are left at their defaults.
+/// The repo the API addresses in `answers` are for, when it is not `answers.repo`: GitHub answers
+/// the old name of a renamed or moved repo with the items of the new one. Items of more than one
+/// other repo are an error, because no restore could tell which repo the backup is of.
+fn resolved_repo(answers: &RecordedAnswers) -> Result<Option<String>, CoreError> {
+    let mut others: Vec<String> = [
+        &answers.issues,
+        &answers.pulls,
+        &answers.comments,
+        &answers.labels,
+        &answers.milestones,
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(repo_of)
+    .filter(|of| !of.eq_ignore_ascii_case(&answers.repo))
+    .collect();
+    others.sort();
+    others.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+    if others.len() > 1 {
+        return Err(CoreError::GitHub(format!(
+            "{}: GitHub answered with items of more than one other repo ({})",
+            answers.repo,
+            others.join(", ")
+        )));
+    }
+    Ok(others.pop())
+}
+
+/// The counts for `answers`. `refs`, `releases`, `wiki` and `resolved_repo` are left at their
+/// defaults.
 fn manifest_for(answers: &RecordedAnswers, taken_at: &str) -> Manifest {
     let closed_by_merged_pr: HashSet<u64> = answers
         .pulls
@@ -871,8 +906,21 @@ enum LastBackup {
 }
 
 /// BAK-2: the last backup in `folder`. A folder with a damaged manifest, or with files and no
-/// manifest, cannot be compared with a new backup, so it is never replaced silently.
+/// manifest, cannot be compared with a new backup, so it is never replaced silently. A backup in
+/// another process may be swapping its folder in between this one's two reads, which looks
+/// damaged for a moment, so a damaged folder is looked at twice more before it is called that.
 fn last_backup(folder: &Path) -> Result<LastBackup, CoreError> {
+    for _ in 0..2 {
+        match last_backup_now(folder)? {
+            LastBackup::Damaged(_) => std::thread::sleep(std::time::Duration::from_millis(100)),
+            other => return Ok(other),
+        }
+    }
+    last_backup_now(folder)
+}
+
+/// `last_backup`, one look.
+fn last_backup_now(folder: &Path) -> Result<LastBackup, CoreError> {
     const TO_DO: &str = "check the folder, then move it away or remove it to let a new backup \
                          be written";
     let path = folder.join("manifest.json");
@@ -1164,7 +1212,7 @@ struct Backup {
 /// BAK-3: the backup in `dir`, checked against its manifest: the manifest names an `owner/name`
 /// repo, the one this folder is the backup of when the folder is `.../github/<owner>/<name>`,
 /// and the one every API address in the JSON files is for (so the check holds for a copy kept
-/// anywhere); `labels.json` and `milestones.json` hold the manifest's counts;
+/// anywhere), or the manifest's `resolved_repo` when the backup followed a rename; `labels.json` and `milestones.json` hold the manifest's counts;
 /// `repo.bundle` has the manifest's hash (a manifest written before it held one has none to
 /// check; `check_refs` still counts the refs).
 fn read_backup(dir: &Path) -> Result<Backup, CoreError> {
@@ -1206,15 +1254,26 @@ fn read_backup(dir: &Path) -> Result<Backup, CoreError> {
             .and_then(|text| serde_json::from_str::<Vec<Value>>(&text).ok());
         items.extend(more.unwrap_or_default());
     }
-    let other = items
-        .iter()
-        .filter_map(repo_of)
-        .find(|of| !of.eq_ignore_ascii_case(&manifest.repo));
+    // A repo renamed or moved before the backup: the manifest holds the name GitHub answered for.
+    let resolved = manifest.resolved_repo.as_deref();
+    let other = items.iter().filter_map(repo_of).find(|of| {
+        !of.eq_ignore_ascii_case(&manifest.repo)
+            && !resolved.is_some_and(|name| of.eq_ignore_ascii_case(name))
+    });
     if let Some(other) = other {
-        return Err(wrong(format!(
-            "the manifest is for {}, the backup holds items of {other}",
-            manifest.repo
-        )));
+        return Err(wrong(match resolved {
+            Some(name) => format!(
+                "the manifest is for {} (GitHub answered for {name}), the backup holds items \
+                 of {other}",
+                manifest.repo
+            ),
+            None => format!(
+                "the manifest is for {}, the backup holds items of {other}; if the repo was \
+                 renamed or moved to {other} before this backup was taken, add \
+                 \"resolved_repo\": \"{other}\" to its manifest.json and restore again",
+                manifest.repo
+            ),
+        }));
     }
     if !manifest.bundle_hash.is_empty() {
         let hash = bundle_hash(dir)?;
