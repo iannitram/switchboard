@@ -19,6 +19,12 @@ export type Pick =
   | { ClaudeHandoff: string }
   | { Wait: string };
 
+/** The route's pick as the core serialises it on the wire (`ChatPick` in `frontdoor/chat.rs`). */
+export type RoutePick =
+  | { to: "service"; service: string; model: string }
+  | { to: "claude-handoff"; reason: string }
+  | { to: "wait"; reason: string };
+
 export type ChatHandoffProps = {
   pick: Pick;
   /** The packet as `as_prompt` builds it (FD-8). */
@@ -97,7 +103,7 @@ export function ChatHeld({ held, send = sendAsJob }: ChatHeldProps) {
 export type ChatRoute = {
   step: string;
   kind: string | null;
-  pick: unknown;
+  pick: RoutePick | null;
   text?: string;
   service?: string;
   model?: string;
@@ -127,6 +133,8 @@ export function Chat({
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [route, setRoute] = useState<ChatRoute | null>(null);
+  // FD-8: the handoff the last route made, with the message that made it. The `handoff` prop wins.
+  const [routed, setRouted] = useState<{ reason: string; prompt: string } | null>(null);
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [errors, setErrors] = useState<CoreError[]>([]);
   // One rating per turn: the last press. Keyed by the turn's index in the thread.
@@ -167,6 +175,8 @@ export function Chat({
     }
     setErrors([]);
     setRoute(result.ok);
+    const pick = result.ok.pick;
+    setRouted(pick && pick.to === "claude-handoff" ? { reason: pick.reason, prompt: message } : null);
     const answer = result.ok;
     if (answer.text !== undefined) {
       const { text, service, model, step, handoff: moved } = answer;
@@ -179,9 +189,13 @@ export function Chat({
   return (
     <div>
       <ErrorBanner errors={errors} />
-      {handoff || held ? (
+      {handoff || routed || held ? (
         <section aria-label="Chat">
-          {handoff && <ChatHandoff {...handoff} />}
+          {handoff ? (
+            <ChatHandoff {...handoff} />
+          ) : (
+            routed && <ChatHandoff pick={{ ClaudeHandoff: routed.reason }} prompt={routed.prompt} />
+          )}
           {held && <ChatHeld held={held} />}
         </section>
       ) : turns.length === 0 ? (

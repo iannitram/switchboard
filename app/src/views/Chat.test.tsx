@@ -6,7 +6,7 @@ import { vi } from "vitest";
 import { Chat, type ChatRoute } from "./Chat";
 import type { CoreResult } from "../core";
 
-const ROUTE: ChatRoute = { step: "rules", kind: "fits the budget", pick: { Service: { service: "gemini", model: "flash" } } };
+const ROUTE: ChatRoute = { step: "rules", kind: "fits the budget", pick: { to: "service", service: "gemini", model: "flash" } };
 const OK: CoreResult<ChatRoute> = { ok: ROUTE };
 
 function box() {
