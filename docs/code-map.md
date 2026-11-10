@@ -195,6 +195,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - FD-11 answer a routed turn (`answer_route`, `AnswerContext`, `ChatReply`, `qwen_base_url`, `key_var`; `chat_route` returns `ChatReply`: the route plus `text`, `service`, `model`, `handoff`, `handoff_id` when answered): present. Keys come from one environment variable per paid service: `DEEPSEEK_API_KEY` (deepseek), `OPENAI_API_KEY` (chatgpt), `GEMINI_API_KEY` (gemini), `ANTHROPIC_API_KEY` (claudeapi); qwen needs none and takes its URL from `machines.<machine>.qwen_server_url` in the fleet config. A missing key is the turn's error (`no key for <service>: set <VAR>`), never another service. A chat turn's thread row carries `role` and `text`.
 - FD-3 queued ask (`answer_route` stores a wait's ask marked `queued` and the reply's `queued` says why; `queued_asks`; the Chat view shows "Queued: <reason>"): present.
 - FD-5 sticky signals (`signals`): present.
+- FD-5, FD-6, FD-7, FD-10 sticky chat and move (#378: `route_in_thread` keeps an open thread on its model, step `sticky chat`, until `move_signals` finds a signal or its pool is braked; `answer_route` sends a move the packet and the turns since, the outgoing model's summary checked by `checked_summary`, stores the `summary` and `move` rows, marks a moving thumbs down `moved`, and a Claude handoff's reply carries the `packet` for Open in Claude): present.
 - FD-3 pick for a kind (`pick_for_kind`): present.
 - FD-1 router (`route`): present.
 - FD-1 Chat composer (`PromptComposer`): present.

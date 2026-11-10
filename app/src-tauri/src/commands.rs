@@ -506,9 +506,11 @@ mod tests;
 
 /// FD-1, FD-11: route one Chat message (the composer's Send, #177), then answer it: a service
 /// pick is sent through its adapter and both turns are stored in the thread (`handoff_id` names
-/// an open thread; none starts one). A Claude handoff is not answered. The reply is the route
-/// (`step`, `kind`, `pick`) with `text`, `service`, `model`, `handoff` and `handoff_id` when
-/// answered. It runs off the main thread: it calls a model.
+/// an open thread; none starts one). FD-5: an open thread stays on its model until a signal
+/// moves it, and a move carries the packet (#378). A Claude handoff is not answered. The reply
+/// is the route (`step`, `kind`, `pick`) with `text`, `service`, `model`, `handoff` and
+/// `handoff_id` when answered, `moved_from` on a move and `packet` on a Claude handoff that
+/// moves an open chat. It runs off the main thread: it calls a model.
 #[tauri::command(async)]
 pub fn chat_route(
     app: tauri::AppHandle,
@@ -523,15 +525,20 @@ pub fn chat_route(
         .map_err(|e| CoreError::Io(format!("app data dir: {e}")));
     bridge(&state.settings_path)
         .and_then(|fleet| {
-            let routed =
-                chat::route_message(&fleet, &message, chat::estimate_complexity(&message))?;
+            let data = data?;
+            let routed = chat::route_in_thread(
+                &fleet,
+                &data,
+                handoff_id.as_deref(),
+                &message,
+                chat::estimate_complexity(&message),
+            )?;
             let machine = switchboard_core::abilities::FleetModels::local_machine();
             let qwen = answer::qwen_base_url(&fleet, machine.as_deref());
             let env = |name: &str| std::env::var(name).ok();
             let transport = || -> Box<dyn switchboard_core::frontdoor::adapters::ChatTransport> {
                 Box::new(switchboard_core::frontdoor::adapters::HttpChatTransport::new())
             };
-            let data = data?;
             let ctx = answer::AnswerContext {
                 data_dir: &data,
                 qwen_base_url: qwen.as_deref(),

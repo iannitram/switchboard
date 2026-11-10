@@ -112,6 +112,10 @@ export type ChatRoute = {
   handoff?: string | null;
   /** FD-3: nothing was in budget, so the ask is queued in its thread (`handoff_id`); why. */
   queued?: string;
+  /** FD-6 (#378): this turn moved the chat off another model, named `<service> <model>`. */
+  moved_from?: string;
+  /** FD-8 (#378): a Claude handoff that moved an open chat: the packet the Claude session starts from. */
+  packet?: string;
 };
 
 /** One turn in the thread: the person's message, or the answer to it. */
@@ -198,7 +202,7 @@ export function Chat({
     setErrors([]);
     setRoute(result.ok);
     const pick = result.ok.pick;
-    setRouted(pick && pick.to === "claude-handoff" ? { reason: pick.reason, prompt: message } : null);
+    setRouted(pick && pick.to === "claude-handoff" ? { reason: pick.reason, prompt: result.ok.packet ?? message } : null);
     const answer = result.ok;
     // Any reply that names its thread continues it, a queued ask's too (FD-3).
     if (answer.handoff_id) setThreadId(answer.handoff_id);
