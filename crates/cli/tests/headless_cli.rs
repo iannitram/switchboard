@@ -424,6 +424,30 @@ fn budget_refresh_prints_the_rows_read_again() {
 }
 
 #[test]
+fn budget_refresh_asks_fleet_to_re_read_and_plain_budget_does_not() {
+    // The stub answers both the same way, so the argv it was given is the evidence.
+    let d = dirs("refresh-argv");
+    let calls = d.data.join("fleet-calls.txt");
+    std::fs::write(
+        d.root.join("tools/fleet/fleet.py"),
+        format!(
+            "import pathlib, sys\n\
+             here = pathlib.Path(__file__).resolve().parent\n\
+             with open({calls:?}, 'a') as f:\n    f.write(' '.join(sys.argv[1:]) + '\\n')\n\
+             sys.stdout.write((here.parent.parent / 'answers' / 'budget.json').read_text())\n"
+        ),
+    )
+    .unwrap();
+    assert_eq!(run(&["budget"], &d).status.code(), Some(0));
+    assert_eq!(run(&["budget", "--refresh"], &d).status.code(), Some(0));
+    let calls = std::fs::read_to_string(&calls).unwrap();
+    let calls: Vec<&str> = calls.lines().collect();
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert!(!calls[0].contains("--refresh"), "{calls:?}");
+    assert!(calls[1].starts_with("budget --refresh"), "{calls:?}");
+}
+
+#[test]
 fn budget_refresh_needs_no_role_and_is_refused_on_other_commands() {
     let d = dirs("refresh-bad");
     let out = run(&["waiting", "--refresh"], &d);
