@@ -252,3 +252,26 @@ fn the_code_map_lists_the_loadout_command_present() {
         "{section:?}"
     );
 }
+
+/// #339: a probe that runs past the limit is killed and has no exit code; a quick one still
+/// answers. The slow program is `sleep`, so this runs on unix only.
+#[cfg(unix)]
+#[test]
+fn a_slow_probe_is_killed_at_the_time_limit() {
+    use std::time::{Duration, Instant};
+    use switchboard_core::it::run_probe_within;
+    const SLOW: Probe = Probe {
+        name: "slow",
+        program: "sleep",
+        args: &["30"],
+    };
+    let start = Instant::now();
+    let result = run_probe_within(&SLOW, Duration::from_millis(300));
+    assert!(start.elapsed() < Duration::from_secs(5));
+    assert_eq!(result.name, "slow");
+    assert_eq!(result.exit_code, None);
+
+    let fast = run_probe_within(&CARGO_VERSION, Duration::from_secs(30));
+    assert_eq!(fast.exit_code, Some(0));
+    assert!(fast.stdout.contains("cargo"));
+}
