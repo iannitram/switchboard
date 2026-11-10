@@ -16,9 +16,13 @@ void main() {
 }`;
 
 /**
- * Gravitational lensing as a thin lens: a pixel at apparent radius r shows the scene from
- * r - E^2 / r (inside the Einstein radius E that is the far side, mirrored), black inside the
- * shadow, and a thin sharp photon ring on its edge. The bend fades out well away from the hole.
+ * The black hole on screen. Gravitational lensing as a thin lens: a pixel at apparent radius r
+ * shows the scene from r - E^2 / r, so the horizon (radius uRs) grows into a shadow of radius
+ * S = uRs * XS, edged by a thin, sharp photon ring. The accretion disc is drawn here too, in
+ * screen space, so it and its lensed image agree: a thin hot band seen nearly edge-on, its near
+ * side crossing in front of the shadow, white-hot within, orange outward, the approaching side
+ * brighter and bluer (Doppler beaming); its far side, hidden behind the hole, bent up into an arc
+ * over the top of the shadow (and a faint one under it). Calm: no flicker, no flare.
  */
 const LENS_FS = /* glsl */ `
 uniform sampler2D tDiffuse;
@@ -26,7 +30,31 @@ uniform vec2 uRes;
 uniform vec2 uC;
 uniform float uRs;
 uniform float uOn;
+uniform float uDisc;
+uniform float uTime;
 varying vec2 vUv;
+const float E2 = 2.2;
+const float XS = 2.06;      // the shadow's edge, where r - E2 / r = 1 (in horizon radii)
+const float RIN = 2.3;      // the disc's inner edge, just outside the shadow
+const float ROUT = 6.0;
+const float TILT = 0.1;     // sine of the angle we see the disc at: nearly edge-on
+vec3 heat(float k) {
+  vec3 c = mix(vec3(0.9, 0.24, 0.05), vec3(1.0, 0.56, 0.2), smoothstep(0.0, 0.35, k));
+  c = mix(c, vec3(1.0, 0.84, 0.62), smoothstep(0.3, 0.75, k));
+  c = mix(c, vec3(1.0, 0.97, 0.93), smoothstep(0.7, 1.05, k));
+  return mix(c, vec3(0.82, 0.9, 1.0), smoothstep(1.05, 1.35, k));
+}
+// Light from the disc at radius rd (horizon radii); side: +1 coming toward us, -1 going away.
+vec3 disc(float rd, float side, float ang) {
+  if (rd < RIN || rd > ROUT) return vec3(0.0);
+  float temp = pow(rd / RIN, -0.75);
+  float beta = 0.36 * sqrt(RIN / rd);
+  float D = 1.0 / (1.0 - beta * side);
+  float lum = pow(temp, 2.4) * pow(D, 3.0);
+  float edge = smoothstep(RIN, RIN * 1.04, rd) * smoothstep(ROUT, RIN * 1.25, rd);
+  float grain = 0.86 + 0.14 * sin(ang * 5.0 - log(rd) * 9.0 + uTime * 0.25);
+  return heat(temp * D * 0.8) * min(lum, 2.0) * edge * grain;
+}
 void main() {
   vec2 px = vUv * uRes;
   vec2 d = px - uC;
@@ -37,16 +65,40 @@ void main() {
     return;
   }
   vec3 col = vec3(0.0);
+  float e2 = E2 * smoothstep(14.0, 5.0, x);
   if (x > 1.0) {
-    float e2 = 2.2 * smoothstep(14.0, 5.0, x);
     float src = r - uRs * uRs * e2 / max(r, 1e-3);
     vec2 uv = (uC + d / max(r, 1e-3) * src) / uRes;
     col = texture2D(tDiffuse, clamp(uv, vec2(0.0), vec2(1.0))).rgb;
-    // Light that skims the horizon piles up into a thin, sharp ring.
-    float ring = exp(-pow((x - 1.035) / 0.014, 2.0));
-    col += vec3(1.0, 0.86, 0.66) * ring * 1.6 * uOn;
-    // The edge of the shadow is soft by a pixel or so, not a cut-out disc.
-    col *= smoothstep(1.0, 1.0 + 1.5 / max(uRs, 1.0), x);
+  }
+  // The shadow, soft by a pixel at its edge, and the photon ring hugging it.
+  float px1 = 1.0 / max(uRs, 1.0);
+  col *= smoothstep(XS, XS + 1.5 * px1, x);
+  col += vec3(1.0, 0.88, 0.7) * exp(-pow((x - XS - 0.6 * px1) / max(0.02, 0.8 * px1), 2.0)) * 1.6;
+  if (uDisc > 0.0) {
+    vec2 q = d / max(uRs, 1e-3);   // in horizon radii, y up
+    float ang = atan(q.y, q.x);
+    // The far side, lensed up over the shadow (a bright arc) and, fainter, under it.
+    float over = x - XS;
+    if (over > 0.0) {
+      float up = q.y / x;
+      float rdTop = RIN + over * 9.0;
+      vec3 top = disc(rdTop, -q.x / x, ang) * smoothstep(0.0, 0.6, up) * 1.1;
+      float rdLow = RIN + over * 10.0;
+      vec3 low = disc(rdLow, -q.x / x, ang) * smoothstep(-0.1, 0.7, -up) * 0.3;
+      col += (top + low) * uDisc;
+    }
+    // The near side: the band itself, below the centre, in front of everything.
+    if (q.y < 0.0) {
+      float zd = q.y / TILT;
+      float rd = length(vec2(q.x, zd));
+      col += disc(rd, -q.x / max(rd, 1e-3), ang) * uDisc * 1.5;
+    } else {
+      // The band's far half, where it shows beside the shadow.
+      float zd = q.y / TILT;
+      float rd = length(vec2(q.x, zd));
+      col += disc(rd, -q.x / max(rd, 1e-3), ang) * uDisc * smoothstep(XS, XS + 1.5 * px1, x);
+    }
   }
   gl_FragColor = vec4(col, 1.0);
 }`;
@@ -106,7 +158,15 @@ export function makeOptics(renderer: THREE.WebGLRenderer, scene: THREE.Scene, ca
     new THREE.ShaderMaterial({
       vertexShader: VS,
       fragmentShader: LENS_FS,
-      uniforms: { tDiffuse: { value: null }, uRes: { value: new THREE.Vector2(1, 1) }, uC: { value: new THREE.Vector2() }, uRs: { value: 0 }, uOn: { value: 0 } },
+      uniforms: {
+        tDiffuse: { value: null },
+        uRes: { value: new THREE.Vector2(1, 1) },
+        uC: { value: new THREE.Vector2() },
+        uRs: { value: 0 },
+        uOn: { value: 0 },
+        uDisc: { value: 0 },
+        uTime: { value: 0 },
+      },
     }),
   );
   lens.enabled = false;

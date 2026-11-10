@@ -88,3 +88,32 @@ export function nebulaStage(progress: number): NebulaStage {
     protostars: Math.round(7 * (1 - smooth(0.15, 0.7, p))),
   };
 }
+
+/**
+ * An issue star's core on screen, in CSS pixels, from its magnitude (the `size:` label: 0.9
+ * unsized .. 2 hard): a point of light 3 to 9 px across, never larger. The halo is the bloom's.
+ */
+export const STAR_CORE_MIN = 3;
+export const STAR_CORE_MAX = 9;
+export function starCorePx(mag: number): number {
+  const t = clamp(((Number.isFinite(mag) ? mag : 0.9) - 0.9) / 1.1, 0, 1);
+  return STAR_CORE_MIN + (STAR_CORE_MAX - STAR_CORE_MIN) * t;
+}
+
+/**
+ * Inside a project the stars are the subject, so everything behind them is hushed by how far
+ * the camera is in (`inside`, 0 outside .. 1 in): the host glow (galaxy gas, bulge, the black
+ * hole's halo, other projects) dims toward a tenth to a fifth of its light, and the bloom only
+ * takes light well above that background, so nothing but star cores and the photon ring clips.
+ */
+export type Hush = { gas: number; stars: number; others: number; bloomThreshold: number; bloomStrength: number };
+export function interiorHush(inside: number): Hush {
+  const h = clamp(Number.isFinite(inside) ? inside : 0, 0, 1);
+  return {
+    gas: 1 - 0.8 * h,
+    stars: 1 - 0.5 * h,
+    others: 1 - 0.6 * h,
+    bloomThreshold: 0.72 + 1.1 * h,
+    bloomStrength: 0.62 - 0.17 * h,
+  };
+}

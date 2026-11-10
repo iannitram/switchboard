@@ -32,7 +32,9 @@ export function galaxyPlacement(c: Pick<Constellation, "repo" | "radius" | "angl
 export const RELEASES: readonly Release[] = ["1.0", "after-1.0", "after-2.0"];
 export const RING_NAMES: Record<Release, string> = { "1.0": "1.0", "after-1.0": "After 1.0", "after-2.0": "After 2.0" };
 
-const STAR_GAP = 0.042;
+const STAR_GAP = 0.046;
+/** The least distance between two stars of one figure, before scaling: room for the lines. */
+const STAR_SEP = STAR_GAP * 1.45;
 const DARK_R = 0.03;
 const CLUSTER_GAP = 0.05;
 
@@ -47,7 +49,48 @@ export type InteriorLayout = {
   stars: Map<number, Vec3>;
   /** The distance between neighbouring stars in a cluster, in the same units. */
   gap: number;
+  /** No two stars of a figure are closer than this (same units). */
+  minSep: number;
 };
+
+/**
+ * Push apart any two points closer than `sep`, keeping each within `radius` of the centre
+ * (cx, cz): a few rounds of pairwise relaxation in the plane. Returns the points moved in place.
+ */
+export function relaxCluster(pts: { x: number; z: number }[], cx: number, cz: number, radius: number, sep: number, rounds = 24) {
+  for (let k = 0; k < rounds; k++) {
+    let moved = false;
+    for (let i = 0; i < pts.length; i++)
+      for (let j = i + 1; j < pts.length; j++) {
+        const a = pts[i];
+        const b = pts[j];
+        let dx = b.x - a.x;
+        let dz = b.z - a.z;
+        let d = Math.hypot(dx, dz);
+        if (d >= sep) continue;
+        if (d < 1e-9) {
+          dx = Math.cos(i + j);
+          dz = Math.sin(i + j);
+          d = 1;
+        }
+        const push = (sep - d) / 2 / d;
+        a.x -= dx * push;
+        a.z -= dz * push;
+        b.x += dx * push;
+        b.z += dz * push;
+        moved = true;
+      }
+    for (const p of pts) {
+      const r = Math.hypot(p.x - cx, p.z - cz);
+      if (r > radius) {
+        p.x = cx + ((p.x - cx) * radius) / r;
+        p.z = cz + ((p.z - cz) * radius) / r;
+      }
+    }
+    if (!moved) break;
+  }
+  return pts;
+}
 
 export function layoutInterior(c: { repo: string; features: { id: string; release: Release; stars: { number: number }[] }[] }): InteriorLayout {
   const groups = RELEASES.map((release) => c.features.filter((f) => f.release === release));
@@ -78,14 +121,17 @@ export function layoutInterior(c: { repo: string; features: { id: string; releas
       features.set(f.id, { x: fx * k, y: 0, z: fz * k, r: cr * k });
       const rand = seeded(`cluster:${c.repo}:${f.id}`);
       const turn = rand() * Math.PI * 2;
-      f.stars.forEach((s, j) => {
+      // A sunflower, then relaxed so no two stars crowd closer than STAR_SEP.
+      const pts = f.stars.map((_, j) => {
         const rr = STAR_GAP * 0.9 * Math.sqrt(j + 0.5);
         const t = turn + j * 2.39996;
-        stars.set(s.number, { x: (fx + rr * Math.cos(t)) * k, y: (rand() - 0.5) * 0.04 * k, z: (fz + rr * Math.sin(t)) * k });
+        return { x: fx + rr * Math.cos(t), z: fz + rr * Math.sin(t) };
       });
+      relaxCluster(pts, fx, fz, cr, STAR_SEP);
+      f.stars.forEach((s, j) => stars.set(s.number, { x: pts[j].x * k, y: (rand() - 0.5) * 0.02 * k, z: pts[j].z * k }));
     });
   });
-  return { rings: RELEASES.map((release, i) => ({ release, radius: radii[i] * k })), features, stars, gap: STAR_GAP * 0.9 * k };
+  return { rings: RELEASES.map((release, i) => ({ release, radius: radii[i] * k })), features, stars, gap: STAR_GAP * 0.9 * k, minSep: STAR_SEP * k * 0.999 };
 }
 
 // ---- The camera ---------------------------------------------------------------------------

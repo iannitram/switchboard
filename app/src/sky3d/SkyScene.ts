@@ -12,7 +12,7 @@ import { dampPose, detailFade, flightMs, MIN_DIST, settling, zoneStep, zoomOutTo
 import { easeInOutCubic } from "./motion";
 import { condensation, debrisCount, lensDebris, lensDisc, lensStar, lensSystem, starPhysics, systemFacts, type Lens } from "./physics";
 import { spanningTree } from "./wayfind";
-import { blackbody, exposureForZoom, nebulaStage, populationTemp, powerLawBrightness } from "./optics";
+import { blackbody, exposureForZoom, interiorHush, nebulaStage, populationTemp, powerLawBrightness, STAR_CORE_MAX, starCorePx } from "./optics";
 import { makeOptics, type Optics } from "./post";
 import { gauss, seeded } from "./random";
 
@@ -23,7 +23,7 @@ const SYS_ELEV = 1.05;
 const SYS_DIST = 2.35;
 const IDLE_MS = 20000;
 const DISC_COUNT = 64000;
-const DUST_COUNT = 3800;
+const DUST_COUNT = 5600;
 const AMBER = new THREE.Color("#f5a524");
 const REUSE = new THREE.Color("#93c5fd");
 
@@ -73,7 +73,7 @@ type Interior = {
   group: THREE.Group;
   layout: InteriorLayout;
   R: number;
-  stars: { number: number; index: number; state: "open" | "closed"; inFlight: boolean; chain: boolean; edged: boolean; size: number }[];
+  stars: { number: number; index: number; state: "open" | "closed"; inFlight: boolean; chain: boolean; edged: boolean; size: number; temp: number }[];
   starGeo: THREE.BufferGeometry;
   starMat: THREE.ShaderMaterial;
   darkMat: THREE.ShaderMaterial | null;
@@ -96,6 +96,7 @@ uniform float uPx;
 uniform float uDpr;
 uniform float uSpin;
 uniform float uDim;
+uniform vec2 uHush;
 attribute vec4 aOrbit;
 attribute vec3 aColor;
 attribute float aPhase;
@@ -128,7 +129,8 @@ void main() {
   gl_PointSize = px;
   vColor = aColor;
   vKind = aKind;
-  vAlpha = a * uDim;
+  // Inside a project the galaxy behind it steps back (x: its stars, y: its glowing gas).
+  vAlpha = a * uDim * (aKind > 0.5 && aKind < 2.5 ? uHush.y : uHush.x);
   vOp = aPhase;
 }`;
 
@@ -341,42 +343,57 @@ void main() {
   float D = 1.0 / (1.0 - beta * cosT);
   vec3 col = heatColour(temp * D);
   float lum = pow(temp, 2.2) * pow(D, 3.0);
-  float edge = smoothstep(0.0, 0.05, t) * smoothstep(1.0, 0.35, t);
+  // Thin: the light sits in the inner part of the ring, falling away well before its edge.
+  float edge = smoothstep(0.0, 0.04, t) * smoothstep(0.62, 0.1, t);
   gl_FragColor = vec4(col * min(lum, 2.4) * 1.05 * n * edge * uAlpha, 1.0);
 }`;
 
+// An issue star is a point of light, as a telescope records one: a tight gaussian core 3 to 9 px
+// across (by its size label, never larger, and never more than a third of the spacing to its
+// neighbours, so a figure stays separate points with its lines showing between them), a faint
+// halo, and the rest of the glow left to the bloom. Only the biggest class gets thin spikes.
+// Closed: steady, bright, coloured by temperature. Open: a dim, redder protostar in a faint
+// dusty halo. In flight: it pulses. A PR verdict is a thin ring, never a filled disc.
 const STAR_VS = /* glsl */ `
 uniform float uPx;
 uniform float uDpr;
 uniform float uScale;
 uniform float uTime;
 uniform float uPulse;
+uniform float uSep;
 attribute vec3 aColor;
 attribute float aSize;
 attribute float aAlpha;
 attribute float aKind;
 attribute float aCorona;
 attribute float aPhase;
-attribute float aGlow;
-varying float vGlow;
+attribute float aSpike;
+attribute float aPick;
 varying vec3 vColor;
 varying float vAlpha;
 varying float vKind;
 varying float vCorona;
-varying float vSpin;
+varying float vSpike;
+varying float vPick;
+varying float vRoom;
+varying float vCorePx;
 void main() {
   vec4 mv = modelViewMatrix * vec4(position, 1.0);
   gl_Position = projectionMatrix * mv;
-  float px = aSize * uScale * uPx / max(-mv.z, 0.001);
-  float pulse = aKind > 1.5 ? uPulse * (0.5 + 0.5 * sin(uTime * 3.2 + aPhase * 6.283)) : 0.0;
-  // Drawn a little smaller than the figure's spacing, so neighbours never melt together.
-  gl_PointSize = clamp(px * 0.7 * (1.0 + 0.12 * pulse), 8.0 * uDpr, 200.0 * uDpr);
+  float sep = uSep * uScale * uPx / max(-mv.z, 0.001);
+  float core = max(1.6 * uDpr, min(aSize * uDpr, sep * 0.34));
+  float pulse = aKind > 1.5 ? uPulse * (0.5 + 0.5 * sin(uTime * 2.6 + aPhase * 6.283)) : 0.0;
+  // Room round the core for the halo, the dust, the verdict ring, the spikes.
+  float room = aSpike > 0.5 ? 9.0 : aKind > 0.5 && aKind < 1.5 ? 6.0 : 5.0;
+  gl_PointSize = core * room;
+  vRoom = room;
+  vCorePx = core;
   vColor = aColor;
-  vAlpha = aAlpha * (1.0 + 0.55 * pulse);
+  vAlpha = aAlpha * (aKind > 1.5 ? 0.55 + 0.75 * pulse + 0.45 * (1.0 - uPulse) : 1.0);
   vKind = aKind;
   vCorona = aCorona;
-  vSpin = uTime * 1.5 * uPulse + aPhase * 6.283;
-  vGlow = aGlow;
+  vSpike = aSpike;
+  vPick = aPick;
 }`;
 
 const STAR_FS = /* glsl */ `
@@ -385,37 +402,38 @@ varying vec3 vColor;
 varying float vAlpha;
 varying float vKind;
 varying float vCorona;
-varying float vSpin;
-varying float vGlow;
+varying float vSpike;
+varying float vPick;
+varying float vRoom;
+varying float vCorePx;
 void main() {
-  vec2 p = gl_PointCoord - 0.5;
-  float d = length(p) * 2.0;
-  if (d > 1.0) discard;
+  // q: distance from the centre in core radii (the sprite's edge is at vRoom).
+  vec2 q = (gl_PointCoord - 0.5) * 2.0 * vRoom;
+  float x = length(q);
+  if (x > vRoom) discard;
+  float core = exp(-x * x * 1.8);
+  float halo = exp(-x * 1.5) * 0.05;
   vec3 col;
-  if (vKind < 0.5) {
-    // Closed: a steady warm star with soft spikes.
-    // A small sharp core and a tight halo, so a crowded figure stays separate points under bloom.
-    float core = smoothstep(0.2, 0.08, d);
-    float glow = exp(-d * d * 16.0) * 0.32;
-    float spikes = (exp(-abs(p.x) * 90.0) + exp(-abs(p.y) * 90.0)) * smoothstep(0.9, 0.1, d) * 0.18;
-    col = vColor * (core * 0.95 + (glow + spikes) * vGlow);
-  } else if (vKind < 1.5) {
-    // Open: a dim protostar inside a faint dust halo.
-    float core = smoothstep(0.2, 0.1, d) * 0.85;
-    float halo = exp(-pow((d - 0.46) / 0.16, 2.0)) * 0.24;
-    col = vColor * (core + exp(-d * d * 14.0) * 0.25) + vec3(0.62, 0.4, 0.26) * halo;
+  if (vKind > 0.5 && vKind < 1.5) {
+    // A protostar: dim and red, still wrapped in the dust it formed from.
+    float dust = exp(-pow((x - 2.6) / 1.5, 2.0)) * 0.05;
+    col = vColor * (core * 0.9 + halo) + vec3(0.5, 0.3, 0.18) * dust;
   } else {
-    // In flight: a pulsar, two beams sweeping round; still under reduced motion.
-    float core = smoothstep(0.22, 0.1, d) * 1.3;
-    float ang = atan(p.y, p.x) - vSpin;
-    float beam = pow(abs(cos(ang)), 28.0) * smoothstep(1.0, 0.15, d) * 0.85;
-    float ring = smoothstep(0.045, 0.0, abs(d - 0.72)) * 0.55;
-    col = vColor * (core + beam + ring + exp(-d * d * 10.0) * 0.5 * vGlow);
+    col = vColor * (core * 3.2 + halo * 3.0);
   }
+  if (vSpike > 0.5) {
+    vec2 a = abs(q);
+    float len = vRoom * 0.95;
+    float spikes = exp(-a.y * 4.0) * pow(max(0.0, 1.0 - a.x / len), 2.0) + exp(-a.x * 4.0) * pow(max(0.0, 1.0 - a.y / len), 2.0);
+    col += vColor * spikes * 0.22;
+  }
+  // Rings stay a pixel or so wide however small the core is.
+  float w = max(0.16, 0.8 / max(vCorePx * 0.5, 0.5));
   if (vCorona > 0.5) {
-    vec3 cc = vCorona < 1.5 ? vec3(0.35, 0.95, 0.55) : vec3(1.0, 0.36, 0.36);
-    col += cc * smoothstep(0.035, 0.0, abs(d - 0.36)) * 0.95;
+    vec3 cc = vCorona < 1.5 ? vec3(0.3, 1.0, 0.5) : vec3(1.0, 0.32, 0.3);
+    col += cc * exp(-pow((x - 2.3) / w, 2.0)) * 0.28;
   }
+  if (vPick > 0.5) col += vec3(0.9, 0.95, 1.0) * exp(-pow((x - 3.4) / w, 2.0)) * 0.7;
   gl_FragColor = vec4(col * vAlpha * uFade, 1.0);
 }`;
 
@@ -528,7 +546,7 @@ export class SkyScene {
   private discMat: THREE.ShaderMaterial;
   private dustMat: THREE.ShaderMaterial;
   private bulge: THREE.Sprite;
-  private hole: { group: THREE.Group; disc: THREE.ShaderMaterial } | null = null;
+  private hole: { group: THREE.Group; disc: THREE.ShaderMaterial; discMesh: THREE.Mesh; core: THREE.SpriteMaterial } | null = null;
   private optics: Optics;
   private nebulae: Nebulae;
   private debris: { geo: THREE.BufferGeometry; mat: THREE.ShaderMaterial } | null = null;
@@ -631,7 +649,7 @@ export class SkyScene {
 
   // -- the galaxy: stars and glowing gas, then dark dust lanes over them ------------------------
   private buildDisc(): [THREE.ShaderMaterial, THREE.ShaderMaterial] {
-    const uniforms = () => ({ uTime: { value: 0 }, uPx: { value: 900 }, uDpr: { value: 1 }, uSpin: { value: 1 }, uDim: { value: 1 } });
+    const uniforms = () => ({ uTime: { value: 0 }, uPx: { value: 900 }, uDpr: { value: 1 }, uSpin: { value: 1 }, uDim: { value: 1 }, uHush: { value: new THREE.Vector2(1, 1) } });
     const make = (p: ReturnType<typeof discParticles>) => {
       const geo = new THREE.BufferGeometry();
       geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(p.count * 3), 3));
@@ -679,7 +697,7 @@ export class SkyScene {
     own.push(horizonGeo, horizonMat, ringGeo, disc, coreMat);
     this.skyGroup.add(group);
     this.skyDisposables.push(...own);
-    this.hole = { group, disc };
+    this.hole = { group, disc, discMesh, core: coreMat };
   }
 
   // -- the projects ---------------------------------------------------------------------------
@@ -876,7 +894,8 @@ export class SkyScene {
       const closed = f.stars.filter((s) => s.state === "closed").length;
       const share = f.stars.length ? closed / f.stars.length : 0;
       if (f.stars.length) {
-        const base = 0.1 + 0.18 * share;
+        // A whisper of the cluster's unresolved light, never a haze over its stars.
+        const base = 0.03 + 0.06 * share;
         const mat = new THREE.SpriteMaterial({ map: this.glow, color: tints[f.release], opacity: base, ...GLOW });
         const s = new THREE.Sprite(mat);
         s.position.set(at.x, at.y, at.z);
@@ -913,30 +932,30 @@ export class SkyScene {
       for (const s of f.stars) {
         const p = layout.stars.get(s.number)!;
         sp.push(p.x, p.y, p.z);
-        stars.push({ number: s.number, index: stars.length, state: s.state, inFlight: s.inFlight, chain: c.chain.includes(s.number), edged: edged.has(s.number), size: 0 });
+        stars.push({ number: s.number, index: stars.length, state: s.state, inFlight: s.inFlight, chain: c.chain.includes(s.number), edged: edged.has(s.number), size: 0, temp: 5800 });
       }
     const n = stars.length;
     const starGeo = new THREE.BufferGeometry();
     starGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(sp), 3));
-    for (const [name, k] of [["aColor", 3], ["aSize", 1], ["aAlpha", 1], ["aKind", 1], ["aCorona", 1], ["aPhase", 1], ["aGlow", 1]] as const)
+    for (const [name, k] of [["aColor", 3], ["aSize", 1], ["aAlpha", 1], ["aKind", 1], ["aCorona", 1], ["aPhase", 1], ["aSpike", 1], ["aPick", 1]] as const)
       starGeo.setAttribute(name, new THREE.BufferAttribute(new Float32Array(n * k), k));
     const all = c.features.flatMap((f) => f.stars);
     const kind = starGeo.getAttribute("aKind") as THREE.BufferAttribute;
     const corona = starGeo.getAttribute("aCorona") as THREE.BufferAttribute;
     const phase = starGeo.getAttribute("aPhase") as THREE.BufferAttribute;
-    // A crowded figure's glows add up to a white blot, so each star's glow is shared out.
-    const glow = starGeo.getAttribute("aGlow") as THREE.BufferAttribute;
-    const crowd = c.features.flatMap((f) => f.stars.map(() => Math.min(1, Math.sqrt(8 / Math.max(1, f.stars.length)))));
-    crowd.forEach((g, i) => glow.setX(i, g));
+    const spike = starGeo.getAttribute("aSpike") as THREE.BufferAttribute;
     const pr = seeded(`stars:${repo}`);
     all.forEach((s, i) => {
       const ph = starPhysics(s);
       kind.setX(i, ph.kind === "closed" ? 0 : ph.kind === "open" ? 1 : 2);
       corona.setX(i, ph.corona === "pass" ? 1 : ph.corona === "fail" ? 2 : 0);
       phase.setX(i, pr());
+      // Only the brightest magnitude class (hard, and done) shows diffraction spikes.
+      spike.setX(i, ph.kind === "closed" && ph.magnitude >= 2 ? 1 : 0);
       stars[i].size = ph.magnitude;
+      stars[i].temp = ph.kind === "open" ? 2500 + pr() * 900 : 4300 + Math.pow(pr(), 1.6) * 6200;
     });
-    const unif = () => ({ uPx: { value: 900 }, uDpr: { value: this.dpr }, uScale: { value: R }, uTime: { value: 0 }, uPulse: { value: this.reducedMotion ? 0 : 1 }, uFade: { value: 0 } });
+    const unif = () => ({ uPx: { value: 900 }, uDpr: { value: this.dpr }, uScale: { value: R }, uTime: { value: 0 }, uPulse: { value: this.reducedMotion ? 0 : 1 }, uFade: { value: 0 }, uSep: { value: layout.minSep } });
     const starMat = new THREE.ShaderMaterial({ vertexShader: STAR_VS, fragmentShader: STAR_FS, uniforms: unif(), ...LIGHT });
     group.add(pointsOf(starGeo, starMat, 10));
     own.push(starGeo, starMat);
@@ -1037,29 +1056,29 @@ export class SkyScene {
     const col = it.starGeo.getAttribute("aColor") as THREE.BufferAttribute;
     const size = it.starGeo.getAttribute("aSize") as THREE.BufferAttribute;
     const alpha = it.starGeo.getAttribute("aAlpha") as THREE.BufferAttribute;
-    const core = it.layout.gap * 0.4; // a magnitude-1 star's core radius, in ring units
+    const pick = it.starGeo.getAttribute("aPick") as THREE.BufferAttribute;
     for (const s of it.stars) {
-      let c: [number, number, number] = s.state === "closed" ? [1, 0.9, 0.72] : [0.62, 0.74, 0.98];
-      if (s.inFlight) c = [0.45, 1, 0.88];
-      let mag = s.size;
-      let a = s.inFlight ? 1 : s.state === "closed" ? 1 : 0.62;
-      if (s.chain) c = [Math.min(1, c[0] + 0.08), c[1] * 0.9, c[2] * 0.62];
+      // Colour by temperature: closed stars burn white to yellow to blue-white, protostars red.
+      let c = blackbody(s.temp);
+      let a = s.inFlight ? 1 : s.state === "closed" ? 1 : 0.55;
+      if (s.inFlight) c = [0.55, 1, 0.9];
+      let px = starCorePx(s.size);
+      if (s.chain) c = [Math.min(1, c[0] + 0.05), c[1] * 0.86, c[2] * 0.55];
       if (lit) {
-        if (lit.has(s.number)) {
-          mag *= 1.25;
-          a = Math.max(a, 1);
-        } else a *= 0.35;
+        if (lit.has(s.number)) a = Math.max(a, 1);
+        else a *= 0.3;
       }
       if (this.picked === s.number) {
-        mag *= 1.35;
-        a = 1;
+        a = Math.max(a, 1.15);
+        px = Math.max(px, STAR_CORE_MAX * 0.8);
       }
       a *= lensStar(this.lens, s);
       col.setXYZ(s.index, c[0], c[1], c[2]);
-      // The sprite is drawn larger than the core (corona, spikes, beams): core at 0.28 of it.
-      size.setX(s.index, ((core * mag) / 0.28) * 2);
+      size.setX(s.index, px);
       alpha.setX(s.index, a);
+      pick.setX(s.index, this.picked === s.number ? 1 : 0);
     }
+    pick.needsUpdate = true;
     col.needsUpdate = size.needsUpdate = alpha.needsUpdate = true;
 
     const edgeLit = (a: number, b: number) => (lit ? (lit.has(a) && lit.has(b) ? 1.6 : 0.3) : 1);
@@ -1355,6 +1374,11 @@ export class SkyScene {
     return this.toScreen({ x: 0, y: 0, z: 0 }, GAL_R * 0.13);
   }
 
+  /** The black hole's shadow on screen (the lens's dark disc, edge radius 2.06 horizons). */
+  shadowScreen(): Screen {
+    return this.toScreen({ x: 0, y: 0, z: 0 }, HOLE.horizon * (this.hole?.group.scale.x ?? 1) * 2.06);
+  }
+
   galaxyScreen(repo: string): Screen | null {
     const s = this.systems.get(repo);
     if (!s) return null;
@@ -1507,13 +1531,23 @@ export class SkyScene {
     this.field.uniforms.uTime.value = t;
     this.field.uniforms.uDpr.value = this.dpr;
     const share = this.cam.dist / this.overDist();
-    (this.bulge.material as THREE.SpriteMaterial).opacity = (this.hole ? 0.22 : 0.4) * lensDisc(this.lens) * Math.min(1, 0.1 + share * share);
-
     const it = this.interior;
+    // Inside a project its stars are the subject: the host glow behind them steps back.
+    if (it) {
+      const o = it.group.position;
+      it.fade = detailFade(Math.hypot(eye.x - o.x, eye.y - o.y, eye.z - o.z), it.R);
+    }
+    const hush = interiorHush(it ? it.fade : 0);
+    const inCentre = it ? (this.systems.get(it.repo)?.place.centre ?? false) : false;
+    for (const m of [this.discMat, this.dustMat]) m.uniforms.uHush.value.set(hush.stars, hush.gas);
+    this.optics.bloom.threshold = hush.bloomThreshold;
+    this.optics.bloom.strength = hush.bloomStrength;
+    (this.bulge.material as THREE.SpriteMaterial).opacity = (this.hole ? 0.22 : 0.4) * lensDisc(this.lens) * Math.min(1, 0.1 + share * share) * hush.gas;
+
     for (const s of this.systems.values()) {
       if (!s.mat || !s.core) continue;
       const hover = s.c.repo === this.hovered ? 1.45 : 1;
-      const inside = it && it.repo === s.c.repo ? 1 - 0.75 * it.fade : 1;
+      const inside = it && it.repo === s.c.repo ? 1 - 0.85 * it.fade : hush.others;
       s.mat.uniforms.uTime.value = t;
       s.mat.uniforms.uPx.value = pxScale;
       s.mat.uniforms.uDpr.value = this.dpr;
@@ -1530,14 +1564,23 @@ export class SkyScene {
       // Calm from afar: at the overview the disc is a few pixels, and a full-strength one blooms
       // into a white donut; it comes up to full heat as the camera closes in.
       this.hole.disc.uniforms.uAlpha.value = Math.max(0.35, sw.lens) * hover * (1 - 0.7 * Math.min(1, share * 1.4));
+      this.hole.core.opacity = 0.12 * hush.gas;
+      // Inside switchboard the hole draws in, small beside the figures round it: they are the subject.
+      const k = inCentre ? 1 - 0.6 * it!.fade : 1;
+      this.hole.group.scale.setScalar(k);
       // The lens: where the horizon falls on screen, and how big. Off when it is out of view
       // or too small to bend anything visibly.
-      const sc = this.toScreen({ x: 0, y: 0, z: 0 }, HOLE.horizon);
+      const sc = this.toScreen({ x: 0, y: 0, z: 0 }, HOLE.horizon * k);
       const pass = this.optics.lens;
       pass.enabled = sc.visible && sc.r > 1.5 && sc.x > -sc.r * 14 && sc.x < this.width + sc.r * 14 && sc.y > -sc.r * 14 && sc.y < this.height + sc.r * 14;
       pass.uniforms.uC.value.set(sc.x * this.dpr, (this.height - sc.y) * this.dpr);
       pass.uniforms.uRs.value = sc.r * this.dpr;
       pass.uniforms.uOn.value = 1;
+      // Once the hole is big enough to lens, the lens pass draws the disc and its lensed arc
+      // (they must agree); the scene's own disc stands in only while it is a few pixels.
+      pass.uniforms.uDisc.value = this.hole.disc.uniforms.uAlpha.value;
+      pass.uniforms.uTime.value = t;
+      this.hole.discMesh.visible = !pass.enabled;
     } else this.optics.lens.enabled = false;
     if (this.debris) {
       this.debris.mat.uniforms.uTime.value = t;
@@ -1548,8 +1591,6 @@ export class SkyScene {
 
     // The constellation fades in by distance, never pops.
     if (it) {
-      const o = it.group.position;
-      it.fade = detailFade(Math.hypot(eye.x - o.x, eye.y - o.y, eye.z - o.z), it.R);
       it.group.visible = it.fade > 0.001;
       for (const m of [it.starMat, it.darkMat, it.flowMat]) {
         if (!m) continue;

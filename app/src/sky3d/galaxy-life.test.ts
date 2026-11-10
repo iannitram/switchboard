@@ -5,8 +5,8 @@ import { damp, dampPose, detailFade, ENTER, EXIT, labelBudget, MIN_DIST, pinchFa
 import { condensation, DEBRIS_MAX, debrisCount, lensMatches, lensStar, lensSystem, magnitude, starPhysics, type SystemFacts } from "./physics";
 import { outsideX } from "./labels";
 import { breadcrumbs, searchSky, spanningTree } from "./wayfind";
-import type { Pose } from "./layout";
-import { blackbody, exposureForZoom, EXPOSURE_FAR, EXPOSURE_NEAR, nebulaStage, populationTemp, powerLawBrightness } from "./optics";
+import { layoutInterior, relaxCluster, type Pose } from "./layout";
+import { blackbody, exposureForZoom, EXPOSURE_FAR, EXPOSURE_NEAR, interiorHush, nebulaStage, populationTemp, powerLawBrightness, starCorePx, STAR_CORE_MAX, STAR_CORE_MIN } from "./optics";
 
 const star = (number: number, extra: Partial<Star> = {}): Star => ({
   number,
@@ -421,5 +421,49 @@ describe("one galaxy: light as a telescope sees it", () => {
     expect(nebulaStage(-2)).toEqual(young);
     expect(nebulaStage(NaN)).toEqual(young);
     expect(nebulaStage(9)).toEqual(done);
+  });
+});
+
+describe("pass 4: inside a project, stars are points and the backdrop steps back", () => {
+  test("a star's core is 3 to 9 px by its size label, never larger", () => {
+    expect(starCorePx(magnitude(null))).toBe(STAR_CORE_MIN);
+    expect(starCorePx(magnitude("hard"))).toBe(STAR_CORE_MAX);
+    expect(starCorePx(magnitude("easy"))).toBeLessThan(starCorePx(magnitude("medium")));
+    expect(starCorePx(magnitude("medium"))).toBeLessThan(starCorePx(magnitude("hard")));
+    expect(starCorePx(40)).toBe(STAR_CORE_MAX);
+    expect(starCorePx(NaN)).toBe(STAR_CORE_MIN);
+  });
+
+  test("no two stars of a crowded figure sit closer than the minimum separation, all inside their cluster", () => {
+    const feature = (id: string, n: number, first: number) => ({ id, release: "1.0" as const, stars: Array.from({ length: n }, (_, i) => ({ number: first + i })) });
+    const features = [feature("big", 33, 1), feature("mid", 23, 100), feature("small", 4, 200), feature("one", 1, 300)];
+    const l = layoutInterior({ repo: "owner/a", features });
+    expect(l.minSep).toBeGreaterThan(l.gap);
+    for (const f of features) {
+      const at = l.features.get(f.id)!;
+      const pts = f.stars.map((s) => l.stars.get(s.number)!);
+      for (const p of pts) expect(Math.hypot(p.x - at.x, p.z - at.z)).toBeLessThanOrEqual(at.r + 1e-9);
+      for (let i = 0; i < pts.length; i++)
+        for (let j = i + 1; j < pts.length; j++) expect(Math.hypot(pts[i].x - pts[j].x, pts[i].z - pts[j].z)).toBeGreaterThanOrEqual(l.minSep);
+    }
+  });
+
+  test("relaxing a clump pushes its points apart and keeps them in the circle", () => {
+    const pts = Array.from({ length: 7 }, (_, i) => ({ x: 0.001 * i, z: 0 }));
+    relaxCluster(pts, 0, 0, 1, 0.3, 200);
+    for (const p of pts) expect(Math.hypot(p.x, p.z)).toBeLessThanOrEqual(1 + 1e-9);
+    for (let i = 0; i < pts.length; i++) for (let j = i + 1; j < pts.length; j++) expect(Math.hypot(pts[i].x - pts[j].x, pts[i].z - pts[j].z)).toBeGreaterThan(0.29);
+  });
+
+  test("the hush: outside nothing changes; inside the host glow drops to a tenth to a fifth and the bloom takes only bright light", () => {
+    const out = interiorHush(0);
+    expect(out).toEqual({ gas: 1, stars: 1, others: 1, bloomThreshold: 0.72, bloomStrength: 0.62 });
+    const inside = interiorHush(1);
+    expect(inside.gas).toBeGreaterThanOrEqual(0.1);
+    expect(inside.gas).toBeLessThanOrEqual(0.2);
+    expect(inside.bloomThreshold).toBeGreaterThan(out.bloomThreshold + 0.8);
+    expect(interiorHush(0.5).gas).toBeGreaterThan(inside.gas);
+    expect(interiorHush(0.5).gas).toBeLessThan(out.gas);
+    expect(interiorHush(NaN)).toEqual(out);
   });
 });
