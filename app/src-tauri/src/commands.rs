@@ -338,22 +338,46 @@ pub fn budget_save_edit(
 }
 
 /// REP-1, REP-3: the reports, newest first, narrowed by `filter` when the face sends one.
-/// Chat threads join when FD-13 (#113) fills the thread store.
+/// The chat threads join from the thread store in the app data folder (REP follow-up, #286).
 #[tauri::command]
 pub fn reports(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     filter: Option<Filter>,
 ) -> Result<Vec<Report>, FaceError> {
     bridge(&state.settings_path)
         .and_then(|fleet| {
             let env = std::env::var_os(FLEET_STATE_DIR_ENV);
-            reports::load(&fleet, env.as_deref(), &[], filter.as_ref())
+            let data = app
+                .path()
+                .app_data_dir()
+                .map_err(|e| CoreError::Io(format!("app data dir: {e}")))?;
+            let threads = thread_rows(&data);
+            reports::load(&fleet, env.as_deref(), &threads, filter.as_ref())
         })
         .map_err(|e| {
             record_fleet_error(&state, &e);
             FaceError::new("reports", &e)
         })
 }
+
+/// REP follow-up (#286): each chat thread in the thread store under `data` (the folder
+/// `ThreadStore::new` takes, the same one the chat commands write to), in the store's sorted id
+/// order. A missing store folder gives none. A thread that cannot be read is skipped, so the
+/// other threads still show.
+fn thread_rows(data: &Path) -> Vec<(String, Vec<switchboard_core::joblog::JobRow>)> {
+    let store = switchboard_core::frontdoor::thread::ThreadStore::new(data);
+    store
+        .list()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|id| store.read(&id).ok().map(|rows| (id, rows)))
+        .collect()
+}
+
+#[cfg(test)]
+#[path = "reports_threads_tests.rs"]
+mod reports_threads_tests;
 
 /// FD-9: log an implicit chat signal (FD-8's press sends `opened-in-claude`) as its own row in
 /// the chat's thread, in the thread store in the app data folder.

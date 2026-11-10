@@ -146,6 +146,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - REP-3 filter (`filter`, `Filter`): present.
 - REP-3 filter bar (`FilterBar`, `Reports`): present.
 - REP-W command (`state_dir_from`, `read_done_cards`, `assemble`, `load`, `reports`): present.
+- REP follow-up, chat threads in reports (`thread_rows` in `app/src-tauri/src/commands.rs`, read from the thread store in the app data folder): present.
 
 ### budget
 `crates/core/src/budget.rs`, `app/src/views/Budget.tsx` · BUD-1 to BUD-4 · planned. Rows from `fleet budget --json`, edits to `config.json` with a ledger row (U5: landed through review), refresh on a timer, Claude's pool as reading plus a labelled estimate from local session logs.
