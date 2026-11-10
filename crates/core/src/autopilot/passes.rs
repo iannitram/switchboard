@@ -69,7 +69,9 @@ pub trait JobStarter {
     fn may_spend(&mut self, lane: &str) -> Result<bool, CoreError>;
     /// Start `job` with `brief` as its prompt. Does not wait for the job.
     fn start(&mut self, job: &Value, brief: &str) -> Result<(), CoreError>;
-    /// Has the job started under `job_id` ended?
+    /// Has the job started under `job_id` ended? `FleetStarter` says yes when the job has output,
+    /// has no job file, or its job file is older than `PM_JOB_TIMEOUT_SECS` (a launcher that died
+    /// leaves an empty output, and the queue must not wait for it forever).
     fn finished(&mut self, job_id: &str) -> Result<bool, CoreError>;
 }
 
@@ -562,6 +564,14 @@ pub fn job_log_files(job_path: &Path) -> Result<(std::fs::File, std::fs::File), 
     ))
 }
 
+/// How long a job with no output may run before the queue stops waiting for it: 2 hours.
+pub const PM_JOB_TIMEOUT_SECS: u64 = 7_200;
+
+/// Has a job whose job file is `age_secs` old run past `PM_JOB_TIMEOUT_SECS`? Exactly at the limit is not.
+pub fn job_timed_out(age_secs: u64) -> bool {
+    age_secs > PM_JOB_TIMEOUT_SECS
+}
+
 /// The app's starter: AUTO-1 through the bridge, and `fleet run <job file> --json` in the
 /// background. The launcher's stdout goes to `<job id>.out` and its stderr to `<job id>.err`,
 /// beside the job file, so a crash leaves its reason on disk.
@@ -601,6 +611,14 @@ impl JobStarter for FleetStarter {
             return Ok(true);
         }
         let out = self.jobs_dir.join(format!("{job_id}.out"));
-        Ok(std::fs::metadata(out).is_ok_and(|m| m.len() > 0))
+        if std::fs::metadata(out).is_ok_and(|m| m.len() > 0) {
+            return Ok(true);
+        }
+        let age = std::fs::metadata(&job_file)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .map_or(0, |d| d.as_secs());
+        Ok(job_timed_out(age))
     }
 }

@@ -421,3 +421,12 @@ fn the_fleet_starter_calls_a_job_finished_when_its_out_file_has_text_or_it_is_un
     std::fs::write(jobs.join("a.out"), "{\"state\":\"done\"}\n").unwrap();
     assert_eq!(starter.finished("a"), Ok(true));
 }
+
+#[test]
+fn a_job_with_no_output_is_finished_only_past_the_timeout() {
+    use switchboard_core::autopilot::passes::{job_timed_out, PM_JOB_TIMEOUT_SECS};
+    assert_eq!(PM_JOB_TIMEOUT_SECS, 7_200);
+    assert!(!job_timed_out(0), "a fresh job file");
+    assert!(!job_timed_out(PM_JOB_TIMEOUT_SECS), "exactly at the limit");
+    assert!(job_timed_out(PM_JOB_TIMEOUT_SECS + 1), "over the limit");
+}
