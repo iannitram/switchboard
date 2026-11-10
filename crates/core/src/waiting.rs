@@ -77,7 +77,8 @@ fn has_label(labels: &[String], label: &str) -> bool {
 }
 
 /// WAIT-1: the items GitHub's snapshot gives (needing-me labels, review FAILs without a fix,
-/// ladders at Fable), for every repo.
+/// ladders at Fable), for every repo. A FAIL counts only while it names the PR's head: a
+/// commit after it answered it (#342).
 pub fn from_snapshots(snaps: &[RepoSnapshot]) -> Vec<Item> {
     let mut items = Vec::new();
     for snap in snaps.iter().filter(|s| !s.archived) {
@@ -118,7 +119,7 @@ pub fn from_snapshots(snaps: &[RepoSnapshot]) -> Vec<Item> {
             if pr
                 .verdicts
                 .last()
-                .is_some_and(|v| v.verdict == "FAIL" && v.needs_me)
+                .is_some_and(|v| v.verdict == "FAIL" && v.needs_me && v.sha == pr.head_sha)
             {
                 items.push(Item {
                     what: what.clone(),

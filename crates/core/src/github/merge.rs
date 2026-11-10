@@ -46,6 +46,22 @@ pub fn eligibility(pr: &PullRequest, carried_over: bool) -> MergeEligibility {
     }
 }
 
+/// SKY-8 (#342): the PR's latest R25 verdict as `star` shows it: `PASS` or `FAIL` when it names
+/// the PR's head, `PASS on an older commit` or `FAIL on an older commit` when a commit came
+/// after it (GH-5 refuses such a PASS unless it carries over by patch-id). `None` when the
+/// latest verdict is neither PASS nor FAIL, or there is none.
+pub fn review_text(pr: &PullRequest) -> Option<String> {
+    let latest = pr
+        .verdicts
+        .last()
+        .filter(|v| matches!(v.verdict.as_str(), "PASS" | "FAIL"))?;
+    if latest.sha == pr.head_sha {
+        Some(latest.verdict.clone())
+    } else {
+        Some(format!("{} on an older commit", latest.verdict))
+    }
+}
+
 /// One merge: the pipeline and the clone it merges in, the PR, and whether a PASS on an older
 /// head was carried over by patch-id (see `eligibility`).
 pub struct MergeJob<'a> {
