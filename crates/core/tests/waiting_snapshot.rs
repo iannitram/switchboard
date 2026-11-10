@@ -33,6 +33,8 @@ fn pull(number: u64, state: &str, labels: &[&str], verdicts: Vec<ReviewVerdict>)
         state: state.to_string(),
         labels: labels.iter().map(|l| l.to_string()).collect(),
         verdicts,
+        // The verdicts name the head (#342: a FAIL on an older commit is no item).
+        head_sha: "abc123".to_string(),
         ..PullRequest::default()
     }
 }

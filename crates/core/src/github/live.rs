@@ -17,7 +17,8 @@ pub const SNAPSHOT_EVENT: &str = "snapshot";
 pub const TICK_EVERY_SECS: u64 = 60;
 
 /// GH-1: the repos to read: the priority copy's order (each once), then every other repo in
-/// the snapshot store, by name. No copy and no snapshot is no repos.
+/// the snapshot store, by name, a snapshot file that does not read included. No copy and no
+/// snapshot is no repos.
 pub fn repos(data_dir: &Path) -> Result<Vec<String>, CoreError> {
     let mut out: Vec<String> = Vec::new();
     let path = data_dir.join(PRIORITY_FILE);
@@ -32,9 +33,15 @@ pub fn repos(data_dir: &Path) -> Result<Vec<String>, CoreError> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(CoreError::Io(format!("{}: {e}", path.display()))),
     }
-    for snapshot in SnapshotStore::new(data_dir).load_all()? {
-        if !out.contains(&snapshot.repo) {
-            out.push(snapshot.repo);
+    // A snapshot file that does not read is still a repo to read, so the next read replaces it
+    // (#350).
+    let (snaps, unreadable) = SnapshotStore::new(data_dir).load_each()?;
+    let mut stored: Vec<String> = snaps.into_iter().map(|snap| snap.repo).collect();
+    stored.extend(unreadable.into_iter().map(|bad| bad.repo));
+    stored.sort();
+    for repo in stored {
+        if !out.contains(&repo) {
+            out.push(repo);
         }
     }
     Ok(out)

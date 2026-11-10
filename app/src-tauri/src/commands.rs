@@ -186,14 +186,63 @@ pub fn fleet_errors(state: tauri::State<'_, AppState>) -> Vec<FleetErrorRow> {
     log.errors.iter().map(FleetErrorRow::from).collect()
 }
 
-/// SKY-W: the sky the Sky view paints, from the snapshot in the app data folder.
+/// SKY-W: the sky the Sky view paints (`sky_at` in the app data folder, now). A ledger or
+/// settings file that does not read is named on stderr; the sky shows without jobs.
 #[tauri::command]
-pub fn sky(app: tauri::AppHandle) -> Result<switchboard_core::sky::model::SkyModel, FaceError> {
+pub fn sky(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<switchboard_core::sky::model::SkyModel, FaceError> {
+    let env = std::env::var_os(FLEET_STATE_DIR_ENV);
     app.path()
         .app_data_dir()
         .map_err(|e| CoreError::Io(format!("app data dir: {e}")))
-        .and_then(|data| switchboard_core::sky::model::load(&data, SystemClock.now()))
+        .and_then(|data| {
+            sky_at(
+                &state.settings_path,
+                env.as_deref(),
+                &data,
+                SystemClock.now(),
+            )
+        })
+        .map(|(model, jobs_error)| {
+            if let Some(e) = jobs_error {
+                eprintln!("sky: the jobs in flight could not be read, so none are shown: {e}");
+            }
+            model
+        })
         .map_err(|e| FaceError::new("sky", &e))
+}
+
+/// SKY-W, SKY-4 (#343): the sky from the snapshot in `data`, with the jobs in flight from the
+/// fleet ledger (`ledger_events`). A ledger or settings file that does not read leaves the sky
+/// without jobs, and its error comes back beside the sky; only the sky's own read fails it.
+pub fn sky_at(
+    settings_path: &Path,
+    env: Option<&std::ffi::OsStr>,
+    data: &Path,
+    now: UnixSeconds,
+) -> Result<(switchboard_core::sky::model::SkyModel, Option<CoreError>), CoreError> {
+    let (events, jobs_error) = match ledger_events(settings_path, env) {
+        Ok(events) => (events, None),
+        Err(e) => (Vec::new(), Some(e)),
+    };
+    let model = switchboard_core::sky::model::load_with_ledger(data, &events, now)?;
+    Ok((model, jobs_error))
+}
+
+/// SKY-4 (#343): the fleet ledger's events, from the fleet state `reports` reads; none while
+/// the settings name no pipeline repo, as the CLI has none without its pipeline checkout.
+pub fn ledger_events(
+    settings_path: &Path,
+    env: Option<&std::ffi::OsStr>,
+) -> Result<Vec<serde_json::Value>, CoreError> {
+    let settings = settings::load(settings_path)?;
+    let Ok(root) = settings.pipeline_repo() else {
+        return Ok(Vec::new());
+    };
+    let state = reports::state_dir(root, env);
+    switchboard_core::joblog::read_ledger(&switchboard_core::joblog::ledger_files(root, &state))
 }
 
 /// The fleet bridge over the pipeline repo the settings file names.
@@ -486,6 +535,9 @@ mod it_tickets_tests;
 #[cfg(test)]
 #[path = "loadout_tests.rs"]
 mod loadout_tests;
+#[cfg(test)]
+#[path = "sky_ledger_tests.rs"]
+mod sky_ledger_tests;
 #[cfg(test)]
 #[path = "commands_tests.rs"]
 mod tests;

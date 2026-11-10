@@ -4,10 +4,11 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::clock::UnixSeconds;
+use crate::clock::{Clock, SystemClock, UnixSeconds};
 use crate::github::snapshot::SnapshotStore;
 use crate::github::RepoSnapshot;
 use crate::rules::GuardedAction;
+use crate::sky::model::PRIORITY_FILE;
 use crate::sky::priority::{self, PriorityCopy, STALE_DAYS};
 use crate::CoreError;
 
@@ -77,7 +78,8 @@ fn has_label(labels: &[String], label: &str) -> bool {
 }
 
 /// WAIT-1: the items GitHub's snapshot gives (needing-me labels, review FAILs without a fix,
-/// ladders at Fable), for every repo.
+/// ladders at Fable), for every repo. A FAIL counts only while it names the PR's head: a
+/// commit after it answered it (#342).
 pub fn from_snapshots(snaps: &[RepoSnapshot]) -> Vec<Item> {
     let mut items = Vec::new();
     for snap in snaps.iter().filter(|s| !s.archived) {
@@ -118,7 +120,7 @@ pub fn from_snapshots(snaps: &[RepoSnapshot]) -> Vec<Item> {
             if pr
                 .verdicts
                 .last()
-                .is_some_and(|v| v.verdict == "FAIL" && v.needs_me)
+                .is_some_and(|v| v.verdict == "FAIL" && v.needs_me && v.sha == pr.head_sha)
             {
                 items.push(Item {
                     what: what.clone(),
@@ -218,6 +220,33 @@ pub fn stale_priority_item(copy: &PriorityCopy, path: &Path, now: UnixSeconds) -
         action: "Refresh in Claude".to_string(),
         since: copy.updated_at + STALE_DAYS * 86_400,
     })
+}
+
+/// WAIT-1, SKY-9 (#344): the priority copy's item from `<data>/priority.json`: none without a
+/// copy or while it is fresh; one when it is stale, or when it does not read (a copy the sky
+/// cannot use is no more trusted than a stale one).
+pub fn priority_items(data_dir: &Path, now: UnixSeconds) -> Vec<Item> {
+    let path = data_dir.join(PRIORITY_FILE);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(e) => return vec![unreadable_priority_item(&path, &e.to_string(), now)],
+    };
+    match priority::parse(&text) {
+        Ok(copy) => stale_priority_item(&copy, &path, now).into_iter().collect(),
+        Err(e) => vec![unreadable_priority_item(&path, &e.to_string(), now)],
+    }
+}
+
+fn unreadable_priority_item(path: &Path, why: &str, now: UnixSeconds) -> Item {
+    Item {
+        what: "Refresh the priority copy".to_string(),
+        why: format!("The priority copy does not read ({why}); the sky cannot use it."),
+        source: Source::StalePriority,
+        link: path.display().to_string(),
+        action: "Refresh in Claude".to_string(),
+        since: now,
+    }
 }
 
 /// WAIT-1: the items no snapshot holds, kept in `<data>/waiting/local.json`.
@@ -349,9 +378,18 @@ pub fn assemble(snaps: &[RepoSnapshot], local: &[Item]) -> Vec<Item> {
     merge(vec![from_snapshots(snaps), local.to_vec()])
 }
 
-/// WAIT-W: `assemble` over the snapshot store and the local items in the app data folder.
+/// WAIT-W: `load_at` now.
 pub fn load(data_dir: &Path) -> Result<Vec<Item>, CoreError> {
+    load_at(data_dir, SystemClock.now())
+}
+
+/// WAIT-W: `assemble` over the snapshot store and the local items in the app data folder, with
+/// the priority copy's item at `now` (`priority_items`, #344).
+pub fn load_at(data_dir: &Path, now: UnixSeconds) -> Result<Vec<Item>, CoreError> {
     let snaps = SnapshotStore::new(data_dir).load_all()?;
     let local = LocalItems::new(data_dir).load()?;
-    Ok(assemble(&snaps, &local))
+    Ok(merge(vec![
+        assemble(&snaps, &local),
+        priority_items(data_dir, now),
+    ]))
 }

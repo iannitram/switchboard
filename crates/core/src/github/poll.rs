@@ -289,13 +289,9 @@ impl Poller<'_> {
         let mut read = Vec::new();
         let mut first_error = None;
         for repo in &self.repos {
-            let stored = match self.store.load(repo) {
-                Ok(stored) => stored,
-                Err(e) => {
-                    first_error.get_or_insert(e);
-                    continue;
-                }
-            };
+            // A stored snapshot that does not read is read again as if it were missing, so the
+            // new read replaces it (#350).
+            let stored = self.store.load(repo).ok().flatten();
             let due = match &stored {
                 None => true,
                 Some(snap) => now - snap.read_at >= POLL_SECONDS,
