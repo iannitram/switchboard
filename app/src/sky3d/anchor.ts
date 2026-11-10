@@ -9,13 +9,15 @@ export function anchorPanel(
   view: { width: number; height: number },
   gap = 14,
   margin = 12,
+  prefer: "right" | "left" = "right",
 ): { left: number; top: number; side: Side } {
   const maxLeft = view.width - margin - panel.width;
   const maxTop = view.height - margin - panel.height;
   const midTop = clamp(target.y - panel.height / 2, margin, maxTop);
   const right = target.x + target.r + gap;
-  if (right <= maxLeft) return { left: right, top: midTop, side: "right" };
   const left = target.x - target.r - gap - panel.width;
+  if (prefer === "left" && left >= margin) return { left, top: midTop, side: "left" };
+  if (right <= maxLeft) return { left: right, top: midTop, side: "right" };
   if (left >= margin) return { left, top: midTop, side: "left" };
   const midLeft = clamp(target.x - panel.width / 2, margin, maxLeft);
   const below = target.y + target.r + gap;

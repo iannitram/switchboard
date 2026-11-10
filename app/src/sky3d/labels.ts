@@ -57,6 +57,14 @@ export function overviewLabelRepos(cs: { repo: string; rank: number }[], n: numb
   return out;
 }
 
+/**
+ * A label's centre x on the outer side of its object: right of it when the object is right of
+ * the hub (or level with it), left of it otherwise, `gap` pixels clear of its radius.
+ */
+export function outsideX(obj: { x: number; r: number }, hub: { x: number }, width: number, gap: number): number {
+  return obj.x >= hub.x ? obj.x + obj.r + gap + width / 2 : obj.x - obj.r - gap - width / 2;
+}
+
 /** A long title cut at a word boundary with an ellipsis; short titles unchanged. */
 export function truncate(title: string, max: number): string {
   if (title.length <= max) return title;

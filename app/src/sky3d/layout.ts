@@ -45,6 +45,8 @@ export type InteriorLayout = {
   rings: { release: Release; radius: number }[];
   features: Map<string, Vec3 & { r: number }>;
   stars: Map<number, Vec3>;
+  /** The distance between neighbouring stars in a cluster, in the same units. */
+  gap: number;
 };
 
 export function layoutInterior(c: { repo: string; features: { id: string; release: Release; stars: { number: number }[] }[] }): InteriorLayout {
@@ -83,7 +85,7 @@ export function layoutInterior(c: { repo: string; features: { id: string; releas
       });
     });
   });
-  return { rings: RELEASES.map((release, i) => ({ release, radius: radii[i] * k })), features, stars };
+  return { rings: RELEASES.map((release, i) => ({ release, radius: radii[i] * k })), features, stars, gap: STAR_GAP * 0.9 * k };
 }
 
 // ---- The camera ---------------------------------------------------------------------------
