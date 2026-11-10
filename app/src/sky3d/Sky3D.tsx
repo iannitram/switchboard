@@ -670,7 +670,7 @@ export default function Sky3D({ sky, open, onOpen, onBack, picked, onPick, toolb
               </li>
             ))}
           </ol>
-          <button className="sky3d-search-open" aria-label="Search the sky" aria-keyshortcuts="/" onClick={() => setSearch("")}>
+          <button className="btn sky3d-search-open" aria-label="Search the sky" aria-keyshortcuts="/" onClick={() => setSearch("")}>
             ⌕
           </button>
         </nav>
@@ -733,13 +733,17 @@ export default function Sky3D({ sky, open, onOpen, onBack, picked, onPick, toolb
               <dt>Progress to 1.0</dt>
               <dd>{Math.round(zoomed.brightness * 100)}%</dd>
             </dl>
-            {zoomed.drift.length > 0 && <button onClick={() => setDrawer(true)}>Show drift</button>}
+            {zoomed.drift.length > 0 && (
+              <button className="btn" onClick={() => setDrawer(true)}>
+                Show drift
+              </button>
+            )}
           </div>
         )}
 
         <div ref={blocker} className="sky3d-toolbar">
           {zoomed && (
-            <button className="sky3d-back" onClick={onBack}>
+            <button className="btn primary sky3d-back" onClick={onBack}>
               ← Back to the sky
             </button>
           )}
@@ -747,9 +751,9 @@ export default function Sky3D({ sky, open, onOpen, onBack, picked, onPick, toolb
           {toolbar}
         </div>
 
-        <div ref={blocker} className="sky3d-lenses" role="group" aria-label="Lens">
+        <div ref={blocker} className="seg-group sky3d-lenses" role="group" aria-label="Lens">
           {LENSES.map((l) => (
-            <button key={l.id} aria-pressed={lens === l.id} aria-keyshortcuts={l.key} title={`${l.asks} (${l.key})`} onClick={() => setLens(l.id)}>
+            <button key={l.id} className="seg" aria-pressed={lens === l.id} aria-keyshortcuts={l.key} title={`${l.asks} (${l.key})`} onClick={() => setLens(l.id)}>
               {l.name}
             </button>
           ))}
@@ -757,17 +761,17 @@ export default function Sky3D({ sky, open, onOpen, onBack, picked, onPick, toolb
 
         <button
           ref={blocker}
-          className={`sky3d-drawer-toggle${drift.length ? " has-drift" : ""}`}
+          className={`btn sky3d-drawer-toggle${drift.length ? " has-drift" : ""}`}
           aria-expanded={drawer}
           aria-controls="sky3d-drawer"
           onClick={() => setDrawer((d) => !d)}
         >
-          Drift <span>{drift.length}</span>
+          Drift <b>{drift.length}</b>
         </button>
         <aside id="sky3d-drawer" className={`sky3d-drawer${drawer ? " is-open" : ""}`} aria-hidden={!drawer}>
           {drawer && (
             <>
-              <button className="sky3d-drawer-close" aria-label="Close drift" onClick={() => setDrawer(false)}>
+              <button className="btn sky3d-drawer-close" aria-label="Close drift" onClick={() => setDrawer(false)}>
                 ×
               </button>
               <DriftList drift={drift} />
@@ -807,13 +811,13 @@ function ProjectActions({ url, repo }: { url: string; repo: string }) {
   const base = (url || `https://github.com/${repo}`).replace(/\/+$/, "");
   return (
     <nav className="sky3d-actions" aria-label={`${repo} on GitHub`}>
-      <a href={`${base}/issues/new`} target="_blank" rel="noreferrer">
+      <a className="btn" href={`${base}/issues/new`} target="_blank" rel="noreferrer">
         New issue
       </a>
-      <a href={base} target="_blank" rel="noreferrer">
+      <a className="btn" href={base} target="_blank" rel="noreferrer">
         Open on GitHub
       </a>
-      <a href={`${base}/pulls`} target="_blank" rel="noreferrer">
+      <a className="btn" href={`${base}/pulls`} target="_blank" rel="noreferrer">
         Pull requests
       </a>
     </nav>
@@ -843,7 +847,11 @@ function ProjectCard({ c }: { c: Constellation }) {
         <span style={{ width: `${pct}%` }} />
       </div>
       <p>Progress to 1.0 · {pct}%</p>
-      <p className={c.drift.length ? "is-warn" : undefined}>Drift · {c.drift.length}</p>
+      <p>
+        <span className="badge">
+          Drift <b>{c.drift.length}</b>
+        </span>
+      </p>
       <p className="sky3d-dim">{c.features.length ? `${c.features.length} features · ${stars} stars` : "Uncharted: a nebula, no features yet"}</p>
     </>
   );

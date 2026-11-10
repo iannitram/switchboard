@@ -50,35 +50,63 @@
   pointer-events: none;
 }
 
-.sky3d button,
-.sky3d .sky3d-actions a {
-  font: inherit;
-  color: var(--sky-ink);
-  background: var(--glass-hi, rgba(22, 31, 52, 0.86));
-  border: 1px solid var(--sky-line);
-  border-radius: var(--sky-radius);
-  padding: 5px 11px;
-  cursor: pointer;
-  transition: background 0.12s, border-color 0.12s;
-}
-.sky3d .sky3d-actions a {
-  display: inline-block;
+/* Controls wear the shell's Astrolabe plates (theme.css .btn, .seg, .badge). Rows (crumbs,
+   search hits) and the invisible hit targets shed the plate the pane gives every button. */
+.sky3d a.btn {
+  color: var(--brass-hi);
   text-decoration: none;
   white-space: nowrap;
 }
-.sky3d button:hover,
-.sky3d .sky3d-actions a:hover {
-  background: rgba(51, 65, 99, 0.85);
-  border-color: rgba(148, 163, 184, 0.4);
+.sky3d .sky3d-hit,
+.sky3d .sky3d-star,
+.sky3d .sky3d-crumbs li button,
+.sky3d .sky3d-search li button {
+  font: inherit;
+  letter-spacing: normal;
+  text-shadow: none;
+  box-shadow: none;
+  background: transparent;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  transition: none;
 }
-.sky3d button:focus-visible,
-.sky3d .sky3d-actions a:focus-visible {
-  outline: 2px solid var(--sky-accent);
-  outline-offset: 2px;
+.sky3d .sky3d-hit:active,
+.sky3d .sky3d-star:active,
+.sky3d .sky3d-crumbs li button:active,
+.sky3d .sky3d-search li button:active {
+  box-shadow: none;
 }
-.sky3d button:disabled {
-  opacity: 0.55;
-  cursor: progress;
+.sky3d .sky3d-crumbs li button:active,
+.sky3d .sky3d-search li button:active {
+  transform: none;
+}
+/* The lens rail: .seg inside the pane, where the pane's plate would otherwise win. */
+.sky3d button.seg {
+  padding: 5px 13px;
+  font: 400 12px/1.2 var(--font-engraved);
+  letter-spacing: 0.1em;
+  color: var(--brass-idle);
+  border: 1px solid transparent;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+  text-shadow: none;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+.sky3d button.seg:hover {
+  color: var(--brass-hi);
+  border-color: transparent;
+}
+.sky3d button.seg:active {
+  transform: none;
+  box-shadow: none;
+}
+.sky3d button.seg[aria-pressed="true"] {
+  color: var(--brass-lit);
+  border-color: var(--brass-hi);
+  background: rgba(143, 227, 255, 0.1);
+  box-shadow: 0 0 6px rgba(143, 227, 255, 0.2);
 }
 
 /* Hit targets: invisible until hovered or focused, then a thin ring. */
@@ -205,12 +233,14 @@
   left: 0;
   top: 0;
   visibility: hidden;
-  background: var(--sky-glass);
+  background: linear-gradient(180deg, rgba(24, 34, 58, 0.86) 0%, rgba(11, 17, 32, 0.92) 100%);
   -webkit-backdrop-filter: blur(10px);
   backdrop-filter: blur(10px);
-  border: 1px solid var(--sky-line);
-  border-radius: 10px;
-  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.45);
+  border: 1px solid var(--brass-lo);
+  border-radius: var(--radius);
+  box-shadow:
+    inset 0 1px 0 rgba(243, 223, 166, 0.08),
+    0 10px 40px rgba(0, 0, 0, 0.45);
   pointer-events: auto;
   user-select: text;
   -webkit-user-select: text;
@@ -266,9 +296,9 @@
 .sky3d-starpanel li {
   font-size: 11px;
   padding: 1px 7px;
-  border-radius: 9px;
-  background: rgba(96, 165, 250, 0.14);
-  border: 1px solid rgba(96, 165, 250, 0.25);
+  border-radius: var(--radius-sm);
+  background: rgba(201, 162, 90, 0.08);
+  border: 1px solid var(--brass-rule);
 }
 .sky3d a {
   color: var(--sky-accent);
@@ -276,6 +306,9 @@
 .sky3d-starpanel aside > a {
   display: inline-block;
   margin: 6px 12px 0 0;
+}
+.sky3d-starpanel aside > .btn {
+  margin-top: 6px;
 }
 
 /* Fixed chrome: controls top-left, galaxy title top-centre, drift top-right, ages bottom. */
@@ -317,18 +350,14 @@
   display: flex;
   gap: 6px;
 }
-.sky3d .sky3d-actions a {
-  font-size: 12px;
-  padding: 4px 9px;
+.sky3d .sky3d-actions a.btn {
+  padding: 5px 12px;
+  font-size: 11.5px;
 }
 .sky3d-actions a::after {
-  content: " ↗";
-  color: var(--sky-dim);
+  content: "↗";
+  color: var(--brass-idle);
   font-size: 11px;
-}
-.sky3d .sky3d-back {
-  background: rgba(10, 52, 72, 0.88);
-  border-color: rgba(125, 211, 252, 0.35);
 }
 /* The title block keeps a clear band of its own: a soft dark scrim behind it, and (as a label
    blocker) a margin round it that no feature or ring name may enter. */
@@ -398,13 +427,13 @@
   right: 12px;
   z-index: 3;
 }
-.sky3d-drawer-toggle span {
-  margin-left: 4px;
-  font-weight: 600;
+.sky3d-drawer-toggle b {
+  font-weight: 400;
   font-variant-numeric: tabular-nums;
+  color: var(--brass-lit);
 }
-.sky3d-drawer-toggle.has-drift span {
-  color: var(--sky-amber);
+.sky3d-drawer-toggle.has-drift b {
+  color: var(--amber);
 }
 .sky3d-drawer {
   position: absolute;
@@ -471,7 +500,7 @@
   position: absolute;
   top: 12px;
   left: 14px;
-  padding: 2px 10px;
+  padding: 3px 11px;
 }
 
 /* Wayfinding: the breadcrumb and search, top centre. */
@@ -494,9 +523,9 @@
   margin: 0;
   padding: 3px 10px;
   list-style: none;
-  border-radius: 16px;
-  background: rgba(9, 14, 28, 0.55);
-  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: var(--radius);
+  background: rgba(14, 11, 7, 0.72);
+  border: 1px solid var(--brass-lo);
   white-space: nowrap;
   overflow: hidden;
 }
@@ -510,28 +539,28 @@
 .sky3d-crumbs li + li::before {
   content: "›";
   margin: 0 7px;
-  color: var(--sky-faint);
+  color: var(--brass-lo);
 }
 .sky3d .sky3d-crumbs li button {
   padding: 2px 4px;
   background: transparent;
   border: 0;
-  color: var(--sky-dim);
+  border-radius: 0;
+  color: var(--brass-idle);
 }
 .sky3d .sky3d-crumbs li button:hover {
-  color: var(--sky-ink);
+  color: var(--brass-hi);
   background: transparent;
 }
 .sky3d-crumbs [aria-current] {
+  color: var(--brass-lit);
   padding: 2px 4px;
   font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .sky3d .sky3d-search-open {
-  padding: 3px 10px;
-  border-radius: 16px;
-  background: rgba(9, 14, 28, 0.55);
+  padding: 4px 11px;
   font-size: 14px;
   line-height: 1;
 }
@@ -547,8 +576,8 @@
   background: rgba(9, 14, 28, 0.92);
   -webkit-backdrop-filter: blur(12px);
   backdrop-filter: blur(12px);
-  border: 1px solid var(--sky-line);
-  border-radius: 10px;
+  border: 1px solid var(--brass-lo);
+  border-radius: var(--radius);
   box-shadow: 0 14px 50px rgba(0, 0, 0, 0.5);
   cursor: default;
 }
@@ -559,9 +588,9 @@
   font: inherit;
   font-size: 14px;
   color: var(--sky-ink);
-  background: rgba(30, 41, 66, 0.6);
-  border: 1px solid rgba(125, 211, 252, 0.35);
-  border-radius: 7px;
+  background: rgba(2, 5, 12, 0.7);
+  border: 1px solid var(--brass-lo);
+  border-radius: var(--radius-sm);
   outline: none;
   user-select: text;
 }
@@ -579,13 +608,16 @@
   gap: 0 8px;
   width: 100%;
   text-align: left;
+  color: var(--sky-ink);
   background: transparent;
   border: 0;
-  border-radius: 6px;
+  border-left: 2px solid transparent;
+  border-radius: 0;
   padding: 5px 8px;
 }
 .sky3d .sky3d-search li[aria-selected="true"] button {
-  background: rgba(51, 65, 99, 0.7);
+  background: rgba(201, 162, 90, 0.12);
+  border-left-color: var(--brass);
 }
 .sky3d-search b {
   font-weight: 500;
@@ -604,7 +636,7 @@
   font-size: 10px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: var(--sky-faint);
+  color: var(--brass-idle);
   padding-top: 2px;
 }
 
@@ -614,25 +646,8 @@
   bottom: 10px;
   left: 50%;
   transform: translateX(-50%);
-  display: flex;
-  gap: 2px;
-  padding: 3px;
-  border-radius: 18px;
-  background: rgba(9, 14, 28, 0.6);
-  border: 1px solid rgba(148, 163, 184, 0.14);
+  flex-wrap: nowrap;
   cursor: default;
-}
-.sky3d .sky3d-lenses button {
-  padding: 3px 11px;
-  font-size: 11.5px;
-  border-radius: 14px;
-  border: 0;
-  background: transparent;
-  color: var(--sky-dim);
-}
-.sky3d .sky3d-lenses button[aria-pressed="true"] {
-  color: #0b1020;
-  background: rgba(221, 230, 246, 0.88);
 }
 
 .sky3d-ages,
@@ -649,9 +664,13 @@
 }
 .sky3d-hint {
   right: 14px;
+  padding: 6px 10px;
   color: var(--sky-dim);
   text-align: right;
-  text-shadow: 0 0 4px #000, 0 0 10px rgba(0, 0, 0, 0.85);
+  background: linear-gradient(180deg, rgba(24, 34, 58, 0.72) 0%, rgba(11, 17, 32, 0.82) 100%);
+  border: 1px solid var(--brass-lo);
+  border-radius: var(--radius);
+  box-shadow: inset 0 1px 0 rgba(243, 223, 166, 0.08);
 }
 .sky3d-hint p {
   margin: 2px 0 0;
@@ -741,7 +760,7 @@
    steps up above them instead of sitting on the legend. */
 @media (max-width: 1320px) {
   .sky3d-lenses {
-    bottom: 46px;
+    bottom: 68px;
   }
 }
 

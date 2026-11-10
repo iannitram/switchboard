@@ -82,7 +82,7 @@ function BackUp({ repo }: { repo?: string }) {
 
   return (
     <div data-testid="backup">
-      <button onClick={run} disabled={busy}>
+      <button className="btn" onClick={run} disabled={busy}>
         {repo === undefined ? "Back up all" : "Back up"}
       </button>
       {busy && <p role="status">Backing up…</p>}
@@ -112,7 +112,7 @@ function Refresh({ onDone }: { onDone: () => void }) {
 
   return (
     <div data-testid="refresh">
-      <button onClick={run} disabled={busy}>
+      <button className="btn" onClick={run} disabled={busy}>
         Refresh
       </button>
       {busy && <p role="status">Refreshing…</p>}

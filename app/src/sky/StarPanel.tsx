@@ -23,7 +23,9 @@ export function StarPanel({ star, onClose }: { star: Star; onClose: () => void }
       <p>{`Review: ${pr?.verdict ?? "not reviewed"}`}</p>
       <p>{`Job: ${star.job ?? "none"}`}</p>
       <a href={star.url} target="_blank" rel="noreferrer">Open on GitHub</a>
-      <button onClick={() => onClose()}>Close</button>
+      <button className="btn" onClick={() => onClose()}>
+        Close
+      </button>
     </aside>
   );
 }
