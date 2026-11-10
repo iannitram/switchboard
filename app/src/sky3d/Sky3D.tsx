@@ -151,6 +151,7 @@ export default function Sky3D({ sky, open, onOpen, onBack, picked, onPick, toolb
   useEffect(() => {
     const scene = sceneRef.current;
     if (!scene) return;
+    if (dev.stages) scene.devSpreadProgress();
     scene.setSky(sky);
     if (dev.near && !scene.hasMoved()) scene.devPlace(dev.near, dev.dist ?? 4);
   }, [sky, dev]);
@@ -403,12 +404,23 @@ export default function Sky3D({ sky, open, onOpen, onBack, picked, onPick, toolb
         .slice(0, budget)
         .map((o) => o.c.repo),
     );
+    // The bright core keeps clear of names: each sits on the side of its project away from the
+    // core, and the black hole's own name sits just below the core's glow. (Close in, the core
+    // fills the view and stops being an obstacle.)
+    const core = scene.coreScreen();
+    const coreOn = core.visible && core.r > 6 && core.r < Math.min(W, H) * 0.3;
+    const coreRect = { left: core.x - core.r, top: core.y - core.r, width: core.r * 2, height: core.r * 2 };
+    const labelBlockers: Rect[] = coreOn ? [coreRect] : [];
     for (const { c, s } of onScreen) {
       const label = E.label.get(c.repo);
       if (!label || !(labelled.has(c.repo) || c.repo === hovered)) continue;
       const sz = size(label);
       const gap = Math.min(s.r * 0.55, 90) + 8;
-      cands.push({ id: `g:${c.repo}`, x: s.x + gap + sz.width / 2, y: s.y - sz.height / 2, ...sz, priority: isCentre(c.repo) ? -2 : c.rank, forced: c.repo === hovered });
+      const centre = isCentre(c.repo);
+      const beside = s.x + gap + sz.width / 2;
+      const x = centre ? (coreOn ? core.x : beside) : coreOn ? outsideX({ x: s.x, r: gap }, core, sz.width, 0) : beside;
+      const y = centre && coreOn ? core.y + core.r + 4 : s.y - sz.height / 2;
+      cands.push({ id: `g:${c.repo}`, x, y, ...sz, priority: centre ? -2 : c.rank, forced: c.repo === hovered });
     }
 
     // Inside a project: stars, feature names, the three ring names, the star tip.
@@ -476,7 +488,7 @@ export default function Sky3D({ sky, open, onOpen, onBack, picked, onPick, toolb
       anchorAt(unchartedRef.current, s && { x: s.x, y: s.y, r: Math.min(s.r * 0.7, 200) }, true);
     }
 
-    const placed = placeLabels(cands, view, [...blockers, ...panelRects]);
+    const placed = placeLabels(cands, view, [...blockers, ...panelRects, ...labelBlockers]);
     const show = (id: string, el: HTMLElement | undefined | null) => {
       if (!el) return;
       const p = placed.get(id);
@@ -699,6 +711,7 @@ export default function Sky3D({ sky, open, onOpen, onBack, picked, onPick, toolb
               ← Back to the sky
             </button>
           )}
+          {zoomed && <ProjectActions url={zoomed.url} repo={zoomed.repo} />}
           {toolbar}
         </div>
 
@@ -753,6 +766,24 @@ export default function Sky3D({ sky, open, onOpen, onBack, picked, onPick, toolb
         </div>
       </section>
     </>
+  );
+}
+
+/** The open project on GitHub: file an issue, see the repo, see its pull requests (new tabs). */
+function ProjectActions({ url, repo }: { url: string; repo: string }) {
+  const base = (url || `https://github.com/${repo}`).replace(/\/+$/, "");
+  return (
+    <nav className="sky3d-actions" aria-label={`${repo} on GitHub`}>
+      <a href={`${base}/issues/new`} target="_blank" rel="noreferrer">
+        New issue
+      </a>
+      <a href={base} target="_blank" rel="noreferrer">
+        Open on GitHub
+      </a>
+      <a href={`${base}/pulls`} target="_blank" rel="noreferrer">
+        Pull requests
+      </a>
+    </nav>
   );
 }
 
