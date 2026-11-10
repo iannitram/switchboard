@@ -1,6 +1,6 @@
 // Pass 2 of the 3D sky: one living galaxy. The pure parts: placement, zoom, physics, wayfinding.
 import type { Constellation, SkyModel, Star } from "../sky/model";
-import { centreRepo, discParticles, GAL_R, HOLE, isCentre, nebulaStyle, placeSystems, R0, remapRadius, systemParticles } from "./milkyway";
+import { centreRepo, discParticles, GAL_R, HOLE, isCentre, NEBULA_TYPES, nebulaStyle, placeSystems, R0, remapRadius, systemParticles } from "./milkyway";
 import { damp, dampPose, detailFade, ENTER, EXIT, labelBudget, MIN_DIST, pinchFactor, wheelFactor, zoneStep, zoomOutToward, zoomToward, flightMs, FLIGHT_MAX_MS, FLIGHT_MIN_MS } from "./camera";
 import { condensation, DEBRIS_MAX, debrisCount, lensMatches, lensStar, lensSystem, magnitude, starPhysics, type SystemFacts } from "./physics";
 import { outsideX } from "./labels";
@@ -97,24 +97,40 @@ describe("one galaxy: where systems sit", () => {
       expect(a.orbit[i * 4]).toBeLessThan(GAL_R * 1.6);
       expect(a.orbit[i * 4 + 3]).toBeGreaterThan(0);
     }
-    expect(Array.from(a.colors).every((c) => c >= 0 && c <= 1)).toBe(true);
+    // Linear HDR light: never negative, the brightest few above 1 (they bloom), capped.
+    expect(Array.from(a.colors).every((c) => c >= 0 && c <= 6.5)).toBe(true);
+    expect(Array.from(a.colors).some((c) => c > 1.5)).toBe(true);
+    const spiked = Array.from(a.kind).filter((k) => k === 3).length;
+    expect(spiked).toBeLessThan(a.count * 0.002);
   });
 });
 
 describe("one galaxy: nebulae to clusters", () => {
-  test("roadmap-less projects no longer look alike: forms and colours vary", () => {
+  test("roadmap-less projects no longer look alike: types, gases and slices vary by seed", () => {
     const styles = Array.from({ length: 52 }, (_, i) => nebulaStyle(`o/repo-${i}`));
-    expect(new Set(styles.map((s) => s.form)).size).toBe(4);
-    expect(new Set(styles.map((s) => s.a.join() + s.b.join())).size).toBeGreaterThan(10);
-    for (const s of styles) expect(s.a).not.toEqual(s.b);
+    expect(new Set(styles.map((s) => s.type)).size).toBe(NEBULA_TYPES.length);
+    expect(new Set(styles.map((s) => s.a.join() + s.b.join())).size).toBeGreaterThan(5);
+    for (const s of styles) {
+      expect(s.a).not.toEqual(s.b);
+      expect(s.slices).toBeGreaterThanOrEqual(3);
+      expect(s.slices).toBeLessThanOrEqual(5);
+    }
+    expect(nebulaStyle("o/same")).toEqual(nebulaStyle("o/same"));
   });
 
   test("condensation: uncharted is a nebula, progress condenses it", () => {
     expect(condensation({ brightness: 0.9, features: [] })).toBe(0);
     expect(condensation({ brightness: 0.4, features: [{ id: "a", title: "", release: "1.0", stars: [] }] })).toBe(0.4);
     expect(condensation({ brightness: 3, features: [{ id: "a", title: "", release: "1.0", stars: [] }] })).toBe(1);
-    const gas = (c: number) => Array.from(systemParticles("o/x", c, 2000).kind).filter((k) => k === 1).length;
-    expect(gas(0)).toBeGreaterThan(gas(1));
+    // Progress builds the young cluster: more stars, and hotter (bluer) on the whole.
+    const blue = (c: number) => {
+      const p = systemParticles("o/x", c, 400);
+      let rb = 0;
+      for (let i = 0; i < p.count; i++) rb += p.colors[i * 3 + 2] - p.colors[i * 3];
+      return rb;
+    };
+    expect(systemParticles("o/x", 1, 400).count).toBeGreaterThan(systemParticles("o/x", 0, 400).count);
+    expect(blue(1)).toBeGreaterThan(blue(0));
   });
 });
 

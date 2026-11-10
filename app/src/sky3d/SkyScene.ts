@@ -11,7 +11,7 @@ import { dampPose, detailFade, flightMs, MIN_DIST, settling, zoneStep, zoomOutTo
 import { easeInOutCubic } from "./motion";
 import { condensation, debrisCount, lensDebris, lensDisc, lensStar, lensSystem, starPhysics, systemFacts, type Lens } from "./physics";
 import { spanningTree } from "./wayfind";
-import { exposureForZoom } from "./optics";
+import { blackbody, exposureForZoom, populationTemp, powerLawBrightness } from "./optics";
 import { makeOptics, type Optics } from "./post";
 import { gauss, seeded } from "./random";
 
@@ -42,6 +42,17 @@ const LIGHT = {
 const GLOW = { ...LIGHT, blendSrc: THREE.SrcAlphaFactor } as const;
 /** Dust and dark knots: real occlusion, darkening what is behind. */
 const SHADE = { transparent: true, depthWrite: false, blending: THREE.NormalBlending } as const;
+/** Absorption: dst *= (1 - src colour). Dust darkens the light behind it instead of painting black. */
+const ABSORB = {
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.CustomBlending,
+  blendEquation: THREE.AddEquation,
+  blendSrc: THREE.ZeroFactor,
+  blendDst: THREE.OneMinusSrcColorFactor,
+  blendSrcAlpha: THREE.ZeroFactor,
+  blendDstAlpha: THREE.OneFactor,
+} as const;
 
 export type Screen = { x: number; y: number; r: number; visible: boolean };
 export type ZoneEvent = { enter: string } | { leave: true };
@@ -103,11 +114,11 @@ void main() {
   float depth = max(-mv.z, 0.001);
   float px = aOrbit.w * uPx / depth;
   float a = 1.0;
-  if (aKind < 0.5) {
-    // A star stays a point: farther is dimmer, not smaller.
+  if (aKind < 0.5 || aKind > 2.5) {
+    // A star stays a point: farther is dimmer, not smaller. A spiked star gets room for its spikes.
     a = clamp(px * 0.8, 0.22, 1.0);
-    px = clamp(px, 1.0 * uDpr, 3.0 * uDpr);
-    float tw = 0.8 + 0.2 * sin(uTime * (0.6 + aPhase * 1.5) + aPhase * 60.0);
+    px = aKind > 2.5 ? clamp(px * 6.0, 14.0 * uDpr, 34.0 * uDpr) : clamp(px, 1.0 * uDpr, 2.6 * uDpr);
+    float tw = 0.95 + 0.05 * sin(uTime * (0.6 + aPhase * 1.5) + aPhase * 60.0);
     a *= mix(1.0, tw, step(0.55, aPhase));
   } else {
     px = min(px, 200.0 * uDpr);
@@ -127,7 +138,16 @@ varying float vAlpha;
 void main() {
   float d = length(gl_PointCoord - 0.5) * 2.0;
   if (d > 1.0) discard;
-  float a = vKind < 0.5 ? exp(-d * d * 4.0) * 0.6 + smoothstep(0.55, 0.0, d) * 0.55 : exp(-d * d * 3.4) * 0.42;
+  float a;
+  if (vKind > 2.5) {
+    // The brightest few: a sharp core, a faint halo and four thin diffraction spikes.
+    vec2 q = abs(gl_PointCoord - 0.5) * 2.0;
+    float spikes = (exp(-q.y * 90.0) * pow(1.0 - q.x, 3.0) + exp(-q.x * 90.0) * pow(1.0 - q.y, 3.0)) * 0.55;
+    a = exp(-d * d * 260.0) * 1.6 + exp(-d * d * 30.0) * 0.12 + spikes;
+  } else if (vKind < 0.5) {
+    // A sharp core; the halo comes from the bloom, in proportion to how bright the star is.
+    a = exp(-d * d * 7.0) * 0.85 + exp(-d * d * 2.0) * 0.12;
+  } else a = exp(-d * d * 3.4) * 0.42;
   gl_FragColor = vec4(vColor * a * vAlpha, 1.0);
 }`;
 
@@ -138,7 +158,10 @@ varying float vOp;
 void main() {
   float d = length(gl_PointCoord - 0.5) * 2.0;
   if (d > 1.0) discard;
-  gl_FragColor = vec4(vColor, exp(-d * d * 3.0) * vOp * min(vAlpha, 1.0));
+  // Absorption: the blend multiplies what is behind by (1 - this), reddening it a little,
+  // as dust takes more blue than red.
+  float k = exp(-d * d * 2.6) * vOp * min(vAlpha, 1.0) * 2.4;
+  gl_FragColor = vec4(min(vec3(0.92), k * vec3(0.78, 0.88, 1.0)), 1.0);
 }`;
 
 const SYS_VS = /* glsl */ `
@@ -200,22 +223,37 @@ uniform float uTime;
 attribute float aSize;
 attribute vec3 aColor;
 attribute float aPhase;
+attribute vec2 aShape;
 varying vec3 vColor;
+varying vec2 vShape;
 void main() {
   vec4 mv = modelViewMatrix * vec4(position, 1.0);
   gl_Position = projectionMatrix * mv;
   gl_PointSize = aSize * uDpr;
-  float tw = 0.85 + 0.15 * sin(uTime * (0.5 + aPhase) + aPhase * 40.0);
+  float tw = aShape.y > 0.0 ? 1.0 : 0.96 + 0.04 * sin(uTime * (0.5 + aPhase) + aPhase * 40.0);
   vColor = aColor * tw;
+  vShape = aShape;
 }`;
 
+// A far star is a sharp point. A background galaxy (aShape.y > 0: its axis ratio, aShape.x its
+// angle) is a tiny faint elliptical smudge with a brighter nucleus.
 const FIELD_FS = /* glsl */ `
 varying vec3 vColor;
+varying vec2 vShape;
 void main() {
-  float d = length(gl_PointCoord - 0.5) * 2.0;
+  vec2 p = gl_PointCoord - 0.5;
+  if (vShape.y > 0.0) {
+    float c = cos(vShape.x);
+    float s = sin(vShape.x);
+    vec2 q = vec2(c * p.x - s * p.y, (s * p.x + c * p.y) / vShape.y) * 2.0;
+    float r2 = dot(q, q);
+    if (r2 > 1.0) discard;
+    gl_FragColor = vec4(vColor * (exp(-r2 * 5.0) * 0.8 + exp(-r2 * 40.0) * 0.6), 1.0);
+    return;
+  }
+  float d = length(p) * 2.0;
   if (d > 1.0) discard;
-  float a = smoothstep(1.0, 0.0, d);
-  gl_FragColor = vec4(vColor * a * a, 1.0);
+  gl_FragColor = vec4(vColor * (exp(-d * d * 9.0) + exp(-d * d * 2.5) * 0.08), 1.0);
 }`;
 
 const DEBRIS_VS = /* glsl */ `
@@ -527,22 +565,34 @@ export class SkyScene {
   // -- background: a far star shell -----------------------------------------------------------
   private buildField(): THREE.ShaderMaterial {
     const r = seeded("switchboard-sky-field");
-    const n = 3600;
+    const stars = 3600;
+    const galaxies = 16;
+    const n = stars + galaxies;
     const pos = new Float32Array(n * 3);
     const col = new Float32Array(n * 3);
     const size = new Float32Array(n);
     const phase = new Float32Array(n);
+    const shape = new Float32Array(n * 2);
     for (let i = 0; i < n; i++) {
       const u = r() * 2 - 1;
       const t = r() * Math.PI * 2;
       const s = Math.sqrt(1 - u * u);
       const rad = 2400 + r() * 1200;
       pos.set([rad * s * Math.cos(t), rad * u, rad * s * Math.sin(t)], i * 3);
-      const temp = r();
-      const c = temp < 0.15 ? [1, 0.82, 0.66] : temp < 0.55 ? [0.78, 0.86, 1] : [0.92, 0.94, 1];
-      const b = 0.25 + Math.pow(r(), 3) * 0.6;
-      col.set([c[0] * b, c[1] * b, c[2] * b], i * 3);
-      size[i] = 1.1 + Math.pow(r(), 6) * 2.4;
+      if (i < stars) {
+        // Foreground stars of our own sky: colour by temperature, a power law in brightness.
+        const c = blackbody(populationTemp(r() < 0.25 ? "young" : "disc", r()));
+        const b = powerLawBrightness(r(), 0.14, 1.5, 3.5);
+        col.set([c[0] * b, c[1] * b, c[2] * b], i * 3);
+        size[i] = 2.2 + Math.min(1, b / 3) * 2.5;
+      } else {
+        // Far-off galaxies: faint, warm-white, a few pixels across, at random tilts.
+        const b = 0.05 + r() * 0.07;
+        const c = blackbody(4600 + r() * 2400);
+        col.set([c[0] * b, c[1] * b, c[2] * b], i * 3);
+        size[i] = 6 + r() * 7;
+        shape.set([r() * Math.PI, 0.25 + r() * 0.6], i * 2);
+      }
       phase[i] = r();
     }
     const geo = new THREE.BufferGeometry();
@@ -550,6 +600,7 @@ export class SkyScene {
     geo.setAttribute("aColor", new THREE.BufferAttribute(col, 3));
     geo.setAttribute("aSize", new THREE.BufferAttribute(size, 1));
     geo.setAttribute("aPhase", new THREE.BufferAttribute(phase, 1));
+    geo.setAttribute("aShape", new THREE.BufferAttribute(shape, 2));
     const mat = new THREE.ShaderMaterial({ vertexShader: FIELD_VS, fragmentShader: FIELD_FS, uniforms: { uDpr: { value: 1 }, uTime: { value: 0 } }, ...LIGHT });
     this.scene.add(pointsOf(geo, mat, 0));
     this.disposables.push(geo, mat);
@@ -570,7 +621,7 @@ export class SkyScene {
       return geo;
     };
     const discMat = new THREE.ShaderMaterial({ vertexShader: DISC_VS, fragmentShader: DISC_FS, uniforms: uniforms(), ...LIGHT });
-    const dustMat = new THREE.ShaderMaterial({ vertexShader: DISC_VS, fragmentShader: DUST_FS, uniforms: uniforms(), ...SHADE });
+    const dustMat = new THREE.ShaderMaterial({ vertexShader: DISC_VS, fragmentShader: DUST_FS, uniforms: uniforms(), ...ABSORB });
     this.scene.add(pointsOf(make(discParticles("milky-way", DISC_COUNT)), discMat, 1));
     this.scene.add(pointsOf(make(dustParticles("milky-way", DUST_COUNT)), dustMat, 2));
     this.disposables.push(discMat, dustMat);
