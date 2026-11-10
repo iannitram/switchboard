@@ -10,7 +10,7 @@ use switchboard_core::fleet::{FleetBridge, FleetError, FleetErrorLog};
 use switchboard_core::frontdoor::implicit_log::log_implicit;
 use switchboard_core::it::{self, Loadout, ProbeRunner};
 use switchboard_core::platform::{current_os, loadout_probes, Probe};
-use switchboard_core::reports::{self, Filter, Report, FLEET_STATE_DIR_ENV};
+use switchboard_core::reports::{self, thread_rows, Filter, Report, FLEET_STATE_DIR_ENV};
 use switchboard_core::settings::{self, Settings};
 use switchboard_core::waiting::LocalItems;
 use switchboard_core::CoreError;
@@ -359,20 +359,6 @@ pub fn reports(
             record_fleet_error(&state, &e);
             FaceError::new("reports", &e)
         })
-}
-
-/// REP follow-up (#286): each chat thread in the thread store under `data` (the folder
-/// `ThreadStore::new` takes, the same one the chat commands write to), in the store's sorted id
-/// order. A missing store folder gives none. A thread that cannot be read is skipped, so the
-/// other threads still show.
-fn thread_rows(data: &Path) -> Vec<(String, Vec<switchboard_core::joblog::JobRow>)> {
-    let store = switchboard_core::frontdoor::thread::ThreadStore::new(data);
-    store
-        .list()
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|id| store.read(&id).ok().map(|rows| (id, rows)))
-        .collect()
 }
 
 #[cfg(test)]

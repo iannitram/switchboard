@@ -227,7 +227,13 @@ fn each_save_appends_one_ledger_row_with_before_and_after() {
     let want =
         json!({"at": NOW, "pool": "deepseek", "set": {"cap_usd": 25.0}, "before": {"cap_usd": 10}});
     assert_eq!(saved.ledger_row, want);
-    save_edit(&fleet, &cap("claude", 5.0), &log, &FixedClock::at(NOW + 60)).unwrap();
+    save_edit(
+        &fleet,
+        &cap("deepseek", 5.0),
+        &log,
+        &FixedClock::at(NOW + 60),
+    )
+    .unwrap();
     let text = std::fs::read_to_string(&log).unwrap();
     let lines: Vec<Value> = text
         .lines()
@@ -237,7 +243,7 @@ fn each_save_appends_one_ledger_row_with_before_and_after() {
     assert_eq!(lines[0], want);
     assert_eq!(
         lines[1],
-        json!({"at": NOW + 60, "pool": "claude", "set": {"cap_usd": 5.0}, "before": {"cap_usd": null}})
+        json!({"at": NOW + 60, "pool": "deepseek", "set": {"cap_usd": 5.0}, "before": {"cap_usd": 25.0}})
     );
 }
 
