@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use switchboard_core::frontdoor::implicit_log::{implicit_from_name, log_implicit};
 use switchboard_core::frontdoor::sticky::{implicit_row, Implicit};
 use switchboard_core::frontdoor::thread::ThreadStore;
-use switchboard_core::joblog::{read_all, RowSource};
+use switchboard_core::joblog::{read_all, JobRow, RowSource};
 use switchboard_core::CoreError;
 
 /// A fresh, empty data folder for one test.
@@ -17,6 +17,19 @@ fn scratch(name: &str) -> PathBuf {
     let _ = fs::remove_dir_all(&d);
     fs::create_dir_all(&d).unwrap();
     d
+}
+
+/// Seed thread `id` with one question (#372: a signal needs a thread that exists); returns it.
+fn seeded(data: &std::path::Path, id: &str) -> JobRow {
+    let row = JobRow {
+        role: Some("user".to_string()),
+        text: Some("a question".to_string()),
+        handoff_id: Some(id.to_string()),
+        source: RowSource::Chat,
+        ..JobRow::default()
+    };
+    ThreadStore::new(data).append(id, &row).unwrap();
+    row
 }
 
 const ALL: [Implicit; 4] = [
@@ -63,6 +76,7 @@ fn any_other_text_is_no_signal() {
 #[test]
 fn a_press_appends_the_implicit_row_to_its_thread_and_returns_it() {
     let data = scratch("press");
+    let question = seeded(&data, "handoff-7");
     let row = log_implicit(
         &data,
         "handoff-7",
@@ -90,13 +104,14 @@ fn a_press_appends_the_implicit_row_to_its_thread_and_returns_it() {
     assert_eq!(row.model, None);
     assert_eq!(
         ThreadStore::new(&data).read("handoff-7").unwrap(),
-        vec![expected]
+        vec![question, expected]
     );
 }
 
 #[test]
 fn unknown_service_model_and_kind_stay_unset() {
     let data = scratch("bare");
+    seeded(&data, "h1");
     let row = log_implicit(&data, "h1", "abandoned", None, None, None).unwrap();
     assert_eq!(
         row,
@@ -109,6 +124,7 @@ fn unknown_service_model_and_kind_stay_unset() {
 #[test]
 fn each_signal_logs_under_its_own_name() {
     let data = scratch("all");
+    seeded(&data, "h2");
     for signal in ALL {
         let row = log_implicit(
             &data,
@@ -134,6 +150,7 @@ fn each_signal_logs_under_its_own_name() {
     assert_eq!(
         ids,
         vec![
+            None,
             Some("h2#implicit-opened-in-claude".to_string()),
             Some("h2#implicit-re-asked".to_string()),
             Some("h2#implicit-abandoned".to_string()),
@@ -159,6 +176,8 @@ fn later_rows_are_appended_after_the_rows_already_there() {
 #[test]
 fn threads_stay_apart() {
     let data = scratch("apart");
+    seeded(&data, "ha");
+    seeded(&data, "hb");
     log_implicit(&data, "ha", "copied-answer", None, None, None).unwrap();
     log_implicit(&data, "hb", "opened-in-claude", None, None, None).unwrap();
     let store = ThreadStore::new(&data);
@@ -166,8 +185,8 @@ fn threads_stay_apart() {
         store.list().unwrap(),
         vec!["ha".to_string(), "hb".to_string()]
     );
-    assert_eq!(store.read("ha").unwrap().len(), 1);
-    assert_eq!(store.read("hb").unwrap().len(), 1);
+    assert_eq!(store.read("ha").unwrap().len(), 2);
+    assert_eq!(store.read("hb").unwrap().len(), 2);
 }
 
 #[test]
@@ -220,12 +239,13 @@ fn a_handoff_id_that_escapes_the_folder_is_refused() {
 #[test]
 fn the_logged_row_reads_back_as_an_implicit_chat_row() {
     let data = scratch("joblog");
+    seeded(&data, "h5");
     log_implicit(&data, "h5", "opened-in-claude", Some("claude"), None, None).unwrap();
     let rows = read_all(&[], &ThreadStore::new(&data).read("h5").unwrap());
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].source, RowSource::Chat);
-    assert!(rows[0].implicit);
-    assert_eq!(rows[0].lane.as_deref(), Some("claude"));
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[1].source, RowSource::Chat);
+    assert!(rows[1].implicit);
+    assert_eq!(rows[1].lane.as_deref(), Some("claude"));
 }
 
 // --- the shell registers the command; the code map says so ---

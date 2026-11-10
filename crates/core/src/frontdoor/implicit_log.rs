@@ -19,8 +19,9 @@ pub fn implicit_from_name(name: &str) -> Option<Implicit> {
 }
 
 /// FD-9: build the implicit row for the signal named `signal` (`implicit_row`) and append it to
-/// the thread `handoff_id` in `data_dir`'s thread store; returns the row. An unknown name or an
-/// empty handoff id is `CoreError::Refused` and writes nothing.
+/// the thread `handoff_id` in `data_dir`'s thread store; returns the row. An unknown name, an
+/// empty handoff id or a thread that does not exist (#372) is `CoreError::Refused` and writes
+/// nothing.
 pub fn log_implicit(
     data_dir: &Path,
     handoff_id: &str,
@@ -36,7 +37,11 @@ pub fn log_implicit(
             "implicit signal with no handoff id".to_string(),
         ));
     }
+    let store = ThreadStore::new(data_dir);
+    if !store.exists(handoff_id)? {
+        return Err(CoreError::Refused(format!("no thread {handoff_id}")));
+    }
     let row = implicit_row(found, service, model, kind, handoff_id);
-    ThreadStore::new(data_dir).append(handoff_id, &row)?;
+    store.append(handoff_id, &row)?;
     Ok(row)
 }

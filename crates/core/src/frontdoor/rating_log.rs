@@ -59,7 +59,10 @@ pub fn rating_entry(
     })
 }
 
-/// Append the turn's rating row to the chat's thread in the app data folder, and return it.
+/// Log the turn's rating row in the chat's thread in the app data folder, and return it. The
+/// thread must exist, `turn_index` must name one of its turns (`ThreadStore::turns`), that
+/// turn must be an answer, and `service` and `model` must be the ones that answered it; else it
+/// is refused (#372). A second rating of a turn replaces the first (`ThreadStore::upsert`).
 /// A refusal returns before any file is touched.
 pub fn log_rating(
     data_dir: &Path,
@@ -71,6 +74,30 @@ pub fn log_rating(
     kind: Option<&str>,
 ) -> Result<JobRow, CoreError> {
     let row = rating_entry(handoff_id, turn_index, rating, service, model, kind)?;
-    ThreadStore::new(data_dir).append(handoff_id, &row)?;
+    let store = ThreadStore::new(data_dir);
+    if !store.exists(handoff_id)? {
+        return Err(CoreError::Refused(format!("no thread {handoff_id}")));
+    }
+    let turns = store.turns(handoff_id)?;
+    let Some(turn) = turns.get(turn_index as usize) else {
+        return Err(CoreError::Refused(format!(
+            "no turn {turn_index} in thread {handoff_id}"
+        )));
+    };
+    if turn.role.as_deref() != Some("assistant") {
+        return Err(CoreError::Refused(format!(
+            "turn {turn_index} of thread {handoff_id} is not an answer"
+        )));
+    }
+    let (lane, answered_by) = (
+        turn.lane.as_deref().unwrap_or(""),
+        turn.model.as_deref().unwrap_or(""),
+    );
+    if lane != service || answered_by != model {
+        return Err(CoreError::Refused(format!(
+            "turn {turn_index} of thread {handoff_id} was answered by {lane} {answered_by}, not {service} {model}"
+        )));
+    }
+    store.upsert(handoff_id, &row)?;
     Ok(row)
 }

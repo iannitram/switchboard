@@ -187,6 +187,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - FD-11 Claude API adapter (`ClaudeApiAdapter`): present.
 - FD-9 rating and implicit rows (`rating_row`, `implicit_row`): present.
 - FD-9 implicit signal log (`implicit_from_name`, `log_implicit`, `chat_implicit`): present.
+- FD-9 rating checks (`log_rating` refuses an unknown thread or turn, a question, or a service and model that did not answer; a second rating of a turn replaces the first through `ThreadStore::upsert`; `log_implicit` refuses an unknown thread; `ThreadStore::turns`, `is_turn`): present.
 - FD-10 separate move field (`with_move`, `thumbs_down_counts`): present.
 - FD-8 Open in Claude (`as_prompt`): present.
 - FD-4 learned pick (`sample_size`, `learned_pick`): present.
