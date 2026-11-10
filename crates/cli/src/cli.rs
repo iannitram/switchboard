@@ -1342,7 +1342,7 @@ pub fn loadout_text(loadout: &Loadout) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+mod load_reports_tests {
     use super::*;
 
     #[test]
