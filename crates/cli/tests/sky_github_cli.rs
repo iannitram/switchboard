@@ -333,3 +333,56 @@ fn refresh_replaces_the_snapshot_that_does_not_read() {
         .unwrap();
     assert_eq!(beta.labels, vec!["fresh"]);
 }
+
+/// `other/beta` reads and has PR #11 ready to merge (a PASS on its head, CI green), beside
+/// the `owner/beta` file that does not read.
+fn with_bad_beta_and_other_beta(tag: &str) -> (PathBuf, PathBuf) {
+    let (data, bad) = with_bad_beta(tag);
+    let other = RepoSnapshot {
+        repo: "other/beta".to_string(),
+        pulls: vec![PullRequest {
+            number: 11,
+            state: "open".to_string(),
+            head_sha: "cccc".to_string(),
+            head_ref: "b11".to_string(),
+            verdicts: vec![ReviewVerdict {
+                verdict: "PASS".to_string(),
+                sha: "cccc".to_string(),
+                needs_me: false,
+            }],
+            ci_on_head: "success".to_string(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    SnapshotStore::new(&data).save(&other).unwrap();
+    (data, bad)
+}
+
+#[test]
+fn merge_and_delete_of_a_repo_whose_file_does_not_read_are_refused_naming_it() {
+    let (data, bad) = with_bad_beta_and_other_beta("writes");
+    let bad = bad.display().to_string();
+    // `beta` could be the unreadable `owner/beta`: neither `other/beta` nor "no such repo".
+    for argv in [
+        &["--role", "project-manager", "merge", "beta#11"][..],
+        &["--role", "project-manager", "merge", "owner/beta#11"][..],
+        &["delete", "beta"][..],
+        &["delete", "owner/beta"][..],
+    ] {
+        let out = run(argv, &data, None);
+        assert_eq!(out.status.code(), Some(1), "{argv:?}: {}", stderr(&out));
+        assert!(stderr(&out).contains(&bad), "{argv:?}: {}", stderr(&out));
+        assert!(
+            stderr(&out).contains("run switchboard refresh"),
+            "{argv:?}: {}",
+            stderr(&out)
+        );
+    }
+    // No Waiting on you item was asked for the delete.
+    assert!(!data.join("waiting").join("local.json").exists());
+    // A repo the bad file cannot be is still known.
+    let out = run(&["delete", "alpha"], &data, None);
+    assert!(!stderr(&out).contains(&bad), "{}", stderr(&out));
+    assert!(!stderr(&out).contains("no such repo"), "{}", stderr(&out));
+}

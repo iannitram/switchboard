@@ -122,7 +122,7 @@ impl CliWrites {
             .as_deref()
             .ok_or("set SWITCHBOARD_DATA to the app data folder")?;
         let store = SnapshotStore::new(data);
-        let snaps = store.load_all().map_err(|e| e.to_string())?;
+        let snaps = readable_snapshots(&store, repo)?;
         let snap = snaps
             .iter()
             .find(|snap| snap.repo == repo)
@@ -210,11 +210,24 @@ impl Writes for CliWrites {
             .data
             .as_deref()
             .ok_or("set SWITCHBOARD_DATA to the app data folder")?;
-        let snaps = SnapshotStore::new(data)
-            .load_all()
-            .map_err(|e| e.to_string())?;
+        let snaps = readable_snapshots(&SnapshotStore::new(data), repo)?;
         let known: Vec<String> = snaps.into_iter().map(|snap| snap.repo).collect();
         Ok(repo_known(repo, &known))
+    }
+}
+
+/// The stored snapshots for a write on `repo`. A snapshot file that does not read and could be
+/// `repo` (its `owner/name`, or the name part for a bare name) is the error, so `merge` and
+/// `delete` never work from a view missing the repo they name, nor pick another owner's repo of
+/// the same name (#350).
+fn readable_snapshots(store: &SnapshotStore, repo: &str) -> Result<Vec<RepoSnapshot>, String> {
+    let (snaps, bad) = store.load_each().map_err(|e| e.to_string())?;
+    match bad
+        .iter()
+        .find(|file| repo_known(repo, std::slice::from_ref(&file.repo)))
+    {
+        Some(file) => Err(format!("{}; run switchboard refresh", file.error)),
+        None => Ok(snaps),
     }
 }
 
