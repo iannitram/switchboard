@@ -35,7 +35,10 @@ print(json.dumps({"class": "fleet", "signature": card.get("id", "none")}))
 #[test]
 fn a_card_id_becomes_one_file_name() {
     assert_eq!(card_file_name(Some("sb-248"), 1), "sb-248.json");
-    assert_eq!(card_file_name(Some("../escaped"), 1), "%2E%2E%2Fescaped.json");
+    assert_eq!(
+        card_file_name(Some("../escaped"), 1),
+        "%2E%2E%2Fescaped.json"
+    );
     assert_eq!(card_file_name(Some("/tmp/abs"), 2), "%2Ftmp%2Fabs.json");
     assert_eq!(card_file_name(Some("a/b"), 3), "a%2Fb.json");
     assert_eq!(card_file_name(Some("a\\b"), 3), "a%5Cb.json");
@@ -47,16 +50,22 @@ fn a_card_id_becomes_one_file_name() {
 /// Every name is one plain file name: no separator, no `..`, not empty, not a Windows device
 /// name, no character Windows refuses, and not too long for any file system.
 fn assert_one_plain_file(name: &str) {
-    let stem = name.strip_suffix(".json").unwrap_or_else(|| panic!("{name}"));
+    let stem = name
+        .strip_suffix(".json")
+        .unwrap_or_else(|| panic!("{name}"));
     assert!(!stem.is_empty(), "{name}");
     assert!(name.len() <= 200, "{name}");
     assert!(
-        name.bytes().all(|b| b.is_ascii_alphanumeric() || b"%_-~.".contains(&b)),
+        name.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"%_-~.".contains(&b)),
         "{name}"
     );
     assert!(!stem.contains('.'), "{name}");
     let device = ["con", "prn", "aux", "nul", "com1", "com9", "lpt1", "lpt0"];
-    assert!(!device.contains(&stem.to_ascii_lowercase().as_str()), "{name}");
+    assert!(
+        !device.contains(&stem.to_ascii_lowercase().as_str()),
+        "{name}"
+    );
     assert_eq!(Path::new(name).components().count(), 1, "{name}");
 }
 

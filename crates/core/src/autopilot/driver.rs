@@ -178,7 +178,12 @@ pub fn card_file_name(id: Option<&str>, n: usize) -> String {
     if name.len() > CARD_NAME_MAX {
         let mut cut = CARD_NAME_MAX - 30;
         // Never cut inside a `%XX`.
-        while name.as_bytes()[..cut].iter().rev().take(2).any(|&b| b == b'%') {
+        while name.as_bytes()[..cut]
+            .iter()
+            .rev()
+            .take(2)
+            .any(|&b| b == b'%')
+        {
             cut -= 1;
         }
         // FNV-1a, 64 bits: the same id gives the same name on every run.
