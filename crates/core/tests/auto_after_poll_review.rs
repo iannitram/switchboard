@@ -51,6 +51,9 @@ impl JobStarter for FakeStarter {
         self.jobs.push((job.clone(), brief.to_string()));
         Ok(())
     }
+    fn finished(&mut self, _: &str) -> Result<bool, CoreError> {
+        Ok(true)
+    }
 }
 
 fn pr(number: u64, labels: &[&str], closes: &[u64]) -> PullRequest {
@@ -320,6 +323,9 @@ impl JobStarter for BrokenBudget {
     }
     fn start(&mut self, _: &Value, _: &str) -> Result<(), CoreError> {
         panic!("nothing may start when the budget answer failed");
+    }
+    fn finished(&mut self, _: &str) -> Result<bool, CoreError> {
+        Ok(true)
     }
 }
 
