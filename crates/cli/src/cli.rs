@@ -55,7 +55,7 @@ const NO_REPORTS: &str = "no reports";
 /// The message when no snapshot has been written yet.
 const NO_SNAPSHOT: &str = "switchboard: no snapshot yet; run switchboard refresh";
 
-const USAGE: &str = "usage: switchboard [--json] [--role <role>] \
+const USAGE: &str = "usage: switchboard [--help | --version] [--json] [--role <role>] \
                      [--project <repo>] [--outcome <o>] [--pool <p>] \
                      <sky | waiting | reports | budget | loadout | star <repo>#<n> | \
                      refresh | backup <repo> | backup --all | delete <repo> | restore <repo> | merge <repo>#<pr> | mcp>";
@@ -244,6 +244,16 @@ pub fn run(argv: &[String]) -> ExitCode {
     )
 }
 
+/// The text to print for a first word that asks for help or the version, or `None` when the
+/// argv is a real command. Only the first word counts; the rest of the line is not read.
+fn early_answer(argv: &[String]) -> Option<String> {
+    match argv.first().map(String::as_str) {
+        Some("--help" | "-h" | "help") => Some(USAGE.to_string()),
+        Some("--version" | "-V") => Some(format!("switchboard {}", env!("CARGO_PKG_VERSION"))),
+        _ => None,
+    }
+}
+
 /// `run` with its seams passed in: the working directory, the time, the writes and stderr.
 pub fn run_with(
     argv: &[String],
@@ -252,6 +262,10 @@ pub fn run_with(
     writes: &dyn Writes,
     err: &mut dyn Write,
 ) -> ExitCode {
+    if let Some(text) = early_answer(argv) {
+        println!("{text}");
+        return ExitCode::SUCCESS;
+    }
     let (filter, argv) = match take_filter(argv) {
         Ok(taken) => taken,
         Err(e) => {
@@ -1239,5 +1253,42 @@ mod tests {
 
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].id, "card-1");
+    }
+}
+
+#[cfg(test)]
+mod early_answer_tests {
+    use super::*;
+
+    fn argv(words: &[&str]) -> Vec<String> {
+        words.iter().map(|word| word.to_string()).collect()
+    }
+
+    #[test]
+    fn help_spellings_answer_with_the_usage_text() {
+        for word in ["--help", "-h", "help"] {
+            assert_eq!(
+                early_answer(&argv(&[word])),
+                Some(USAGE.to_string()),
+                "{word}"
+            );
+        }
+    }
+
+    #[test]
+    fn version_spellings_answer_with_the_crate_version() {
+        let expected = format!("switchboard {}", env!("CARGO_PKG_VERSION"));
+        for word in ["--version", "-V"] {
+            assert_eq!(
+                early_answer(&argv(&[word])),
+                Some(expected.clone()),
+                "{word}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_real_command_gets_no_early_answer() {
+        assert_eq!(early_answer(&argv(&["sky"])), None);
     }
 }
