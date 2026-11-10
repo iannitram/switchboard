@@ -15,17 +15,47 @@ owner/app-a#5: Pick the sync rule | Labelled needs-ian. | Open issue | https://g
 owner/app-b#9: Budget copy | Labelled needs-ian. | Open PR | https://github.com/owner/app-b/pull/9
 ";
 
+/// REP-1 (#361): each report's head line, then its four other parts, as the Reports view shows.
 const REPORTS_TEXT: &str = "\
 Tidy the budget copy | passed | owner/app-b
+  changed: https://github.com/owner/app-b/pull/3, files not recorded, lines not recorded
+  checked: nothing
+  not checked:
+    no checks were recorded
+  cost: gemini, tokens not recorded, cost not recorded, time not recorded
 Add the settings screen | passed | owner/app-a
-Fix the sync retry | failed | owner/app-a
+  changed: no PR, files not recorded, lines not recorded
+  checked: nothing
+  not checked:
+    no checks were recorded
+  cost: qwen, tokens not recorded, cost not recorded, time not recorded
+Fix the sync retry | failed (tests) | owner/app-a
+  changed: no PR, files not recorded, lines not recorded
+  checked:
+    cargo test: failed (2 failed)
+  not checked:
+    clippy: skipped
+  cost: gemini, 12000 tokens, $0.42, 15m 31s
 Scratch run | failed | not recorded
+  changed: no PR, files not recorded, lines not recorded
+  checked: nothing
+  not checked:
+    no checks were recorded
+  cost: qwen, tokens not recorded, cost not recorded, time not recorded
 ";
+
+/// The head lines of `reports` text (the lines that do not start with a space).
+fn heads(text: &str) -> String {
+    text.lines()
+        .filter(|line| !line.starts_with(' '))
+        .map(|line| format!("{line}\n"))
+        .collect()
+}
 
 /// The done cards behind REPORTS_TEXT: one file each under `jobs/done/`.
 const CARDS: &str = r#"[
   {"id": "job-a1", "title": "Add the settings screen", "repo": "owner/app-a", "outcome": "passed", "lane": "qwen", "model": "qwen3-coder", "at": "2026-11-06T13:00:43-07:00"},
-  {"id": "job-a2", "title": "Fix the sync retry", "repo": "owner/app-a", "outcome": "failed", "failure_mode": "tests", "lane": "gemini", "model": "gemini-2.5-pro", "at": "2026-11-05T09:00:00-07:00"},
+  {"id": "job-a2", "title": "Fix the sync retry", "repo": "owner/app-a", "outcome": "failed", "failure_mode": "tests", "lane": "gemini", "model": "gemini-2.5-pro", "at": "2026-11-05T09:00:00-07:00", "checks": [{"name": "cargo test", "status": "failed", "note": "2 failed"}, {"name": "clippy", "status": "skipped"}], "tokens": 12000, "cost_usd": 0.42, "seconds": 931},
   {"id": "job-b1", "title": "Tidy the budget copy", "pr_url": "https://github.com/owner/app-b/pull/3", "outcome": "passed", "lane": "gemini", "model": "gemini-2.5-pro", "at": "2026-11-07T08:00:00-07:00"},
   {"id": "job-n1", "title": "Scratch run", "outcome": "failed", "lane": "qwen", "model": "qwen3-coder", "at": "2026-11-04T10:00:00-07:00"}
 ]"#;
@@ -206,9 +236,9 @@ fn reports_project_flag_keeps_that_project() {
     let out = switchboard(&["reports", "--project", "owner/app-a"], &data);
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
     assert_eq!(
-        stdout(&out),
+        heads(&stdout(&out)),
         "Add the settings screen | passed | owner/app-a\n\
-         Fix the sync retry | failed | owner/app-a\n"
+         Fix the sync retry | failed (tests) | owner/app-a\n"
     );
 }
 
@@ -218,8 +248,8 @@ fn reports_outcome_flag_keeps_that_outcome() {
     let out = switchboard(&["reports", "--outcome", "failed"], &data);
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
     assert_eq!(
-        stdout(&out),
-        "Fix the sync retry | failed | owner/app-a\n\
+        heads(&stdout(&out)),
+        "Fix the sync retry | failed (tests) | owner/app-a\n\
          Scratch run | failed | not recorded\n"
     );
 }
