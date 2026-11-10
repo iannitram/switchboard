@@ -29,18 +29,26 @@ fn stub() -> PathBuf {
 }
 
 fn index() -> AbilitiesIndex {
+    index_with(true)
+}
+
+/// The stub table, with or without the stub request kind that carries `code`; without it only
+/// a job action carries `code`, as in the real action table.
+fn index_with(coding_kind: bool) -> AbilitiesIndex {
     let text = std::fs::read_to_string(stub().join("answers").join("actions.json")).unwrap();
     let mut value: Value = serde_json::from_str(&text).unwrap();
-    value.as_object_mut().unwrap().insert(
-        "stub-coding".to_string(),
-        json!({
-            "label": "Stub: a coding kind",
-            "request": true,
-            "needs": ["code"],
-            "first": ["gemini"],
-            "ok": { "gemini": { "model": GEMINI_MODEL, "effort": "-" } }
-        }),
-    );
+    if coding_kind {
+        value.as_object_mut().unwrap().insert(
+            "stub-coding".to_string(),
+            json!({
+                "label": "Stub: a coding kind",
+                "request": true,
+                "needs": ["code"],
+                "first": ["gemini"],
+                "ok": { "gemini": { "model": GEMINI_MODEL, "effort": "-" } }
+            }),
+        );
+    }
     let models = FleetModels::read(&FleetBridge::with_root(&stub()), Some("strix-halo")).unwrap();
     AbilitiesIndex::from_json_with(&value, &models)
         .unwrap()
@@ -182,4 +190,94 @@ fn the_budget_rule_skips_braked_pools_and_waits_with_a_reason() {
         r.pick,
         Pick::Wait("waiting for Claude's budget".to_string())
     );
+}
+
+fn go_real(message: &str, braked: &[&'static str]) -> Route {
+    route(
+        message,
+        &index_with(false),
+        &Braked(braked.to_vec()),
+        Complexity::Small,
+    )
+}
+
+#[test]
+fn write_code_with_only_a_job_action_carrying_code_is_a_claude_handoff() {
+    let r = go_real("write code to parse a csv", &[]);
+    assert_eq!(
+        r.step,
+        Step::ExplicitAsk {
+            need: "code".to_string()
+        }
+    );
+    assert_eq!(r.kind, None);
+    assert_eq!(
+        r.pick,
+        Pick::ClaudeHandoff("code: needs a Claude session with tools".to_string())
+    );
+    let r = go_real("write code to parse a csv", &["claude"]);
+    assert_eq!(
+        r.step,
+        Step::ExplicitAsk {
+            need: "code".to_string()
+        }
+    );
+    assert_eq!(
+        r.pick,
+        Pick::Wait("waiting for Claude's budget".to_string())
+    );
+}
+
+#[test]
+fn ask_claude_is_an_explicit_ask_for_claude() {
+    for message in ["Ask Claude: why is the sky blue", "open in Claude please"] {
+        let r = go_real(message, &[]);
+        assert_eq!(
+            r.step,
+            Step::ExplicitAsk {
+                need: "claude".to_string()
+            },
+            "{message}"
+        );
+        assert_eq!(r.kind, None);
+        assert_eq!(
+            r.pick,
+            Pick::ClaudeHandoff("claude: needs a Claude session with tools".to_string())
+        );
+    }
+    let r = go_real("ask claude about it", &["claude"]);
+    assert_eq!(
+        r.pick,
+        Pick::Wait("waiting for Claude's budget".to_string())
+    );
+}
+
+#[test]
+fn search_the_web_still_takes_the_request_kind_pick() {
+    let r = go_real("search the web for x", &[]);
+    assert_eq!(
+        r.step,
+        Step::ExplicitAsk {
+            need: "web".to_string()
+        }
+    );
+    assert_eq!(r.kind.as_deref(), Some("web-research"));
+}
+
+#[test]
+fn an_ask_whose_need_nothing_carries_falls_through() {
+    let index = AbilitiesIndex::default().with_ask("do a thing", "nothing-has-this");
+    let r = route(
+        "please do a thing",
+        &index,
+        &Braked(vec![]),
+        Complexity::Small,
+    );
+    assert_ne!(
+        r.step,
+        Step::ExplicitAsk {
+            need: "nothing-has-this".to_string()
+        }
+    );
+    assert_eq!(r.step, Step::BudgetRule);
 }
