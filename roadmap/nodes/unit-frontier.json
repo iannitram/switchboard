@@ -1,0 +1,33 @@
+{
+  "id": "unit-frontier",
+  "what": "`switchboard unit frontier` lists open, unclaimed units whose blockers are all closed with a resolution record; `switchboard unit next` orders that list by how many units each one unblocks, then smaller size, then earlier roadmap line.",
+  "expectations": [
+    "A unit with one open blocker is never in the frontier.",
+    "Of two ready units, the one that unblocks more others is first.",
+    "An empty frontier exits 75."
+  ],
+  "files_allowed": [
+    "crates/core/src/unit/mod.rs",
+    "crates/core/src/unit/frontier.rs",
+    "crates/core/tests/unit_frontier.rs"
+  ],
+  "test_files": [
+    "crates/core/tests/unit_frontier.rs"
+  ],
+  "verify": [
+    {
+      "name": "tests",
+      "cmd": "cargo test -p switchboard-core --test unit_frontier",
+      "expect": "fail-before"
+    },
+    {
+      "name": "lint",
+      "cmd": "cargo clippy --all-targets -- -D warnings",
+      "expect": "pass"
+    }
+  ],
+  "code_map_entries": [
+    "crates/core/src/unit/mod.rs",
+    "crates/core/src/unit/frontier.rs"
+  ]
+}

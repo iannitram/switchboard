@@ -1,0 +1,34 @@
+{
+  "id": "bug-intake",
+  "what": "`switchboard bug scan`, `capture`, `validate`, `owner`, `dedupe`, `record` and `archive`: find new reports, save the raw copy with checksums, check the report form and scan it for private words, find the owning repo from the owner table, drop duplicates by error signature, write the bug row and archive the original.",
+  "expectations": [
+    "A report whose signature matches an open bug in the same repo is linked as a duplicate, not filed.",
+    "A report naming an app with no owner row is refused with the app named.",
+    "An original leaves the inbox only when its raw copy's sha256 matches.",
+    "A report containing a private word is refused before any issue text is written."
+  ],
+  "files_allowed": [
+    "crates/core/src/bug/mod.rs",
+    "crates/core/src/bug/intake.rs",
+    "crates/core/tests/bug_intake.rs"
+  ],
+  "test_files": [
+    "crates/core/tests/bug_intake.rs"
+  ],
+  "verify": [
+    {
+      "name": "tests",
+      "cmd": "cargo test -p switchboard-core --test bug_intake",
+      "expect": "fail-before"
+    },
+    {
+      "name": "lint",
+      "cmd": "cargo clippy --all-targets -- -D warnings",
+      "expect": "pass"
+    }
+  ],
+  "code_map_entries": [
+    "crates/core/src/bug/mod.rs",
+    "crates/core/src/bug/intake.rs"
+  ]
+}

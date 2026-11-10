@@ -1,0 +1,30 @@
+{
+  "id": "bug-loop-live",
+  "what": "Wire specs/bug-loop.json through the engine so one report runs from intake to a closed issue.",
+  "expectations": [
+    "On the fixture app, a report becomes an issue, a red repro test, a fix and a merged pull request with no manual step.",
+    "For an app marked as having releases, the issue stays open until a release tag contains the fix; for one without, it closes at merge."
+  ],
+  "files_allowed": [
+    "crates/core/src/runner/bug_loop.rs",
+    "crates/core/tests/bug_loop_live.rs"
+  ],
+  "test_files": [
+    "crates/core/tests/bug_loop_live.rs"
+  ],
+  "verify": [
+    {
+      "name": "tests",
+      "cmd": "cargo test -p switchboard-core --test bug_loop_live",
+      "expect": "fail-before"
+    },
+    {
+      "name": "lint",
+      "cmd": "cargo clippy --all-targets -- -D warnings",
+      "expect": "pass"
+    }
+  ],
+  "code_map_entries": [
+    "crates/core/src/runner/bug_loop.rs"
+  ]
+}

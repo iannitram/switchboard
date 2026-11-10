@@ -1,0 +1,34 @@
+{
+  "id": "runner-engine",
+  "what": "Run one step of a loaded spec for one unit: start its command or model task, read exit 0 with JSON or exit 75, evaluate every done_when check, move to to_state_ok or to_state_fail, and save the run state so a restart resumes at the same step.",
+  "expectations": [
+    "Exit 75 leaves the state unchanged and records 'not now'.",
+    "A step whose done_when check fails moves to to_state_fail and applies on_fail (retry count, then escalate, park, ask-owner or fail).",
+    "Run state survives a restart: the next call continues from the saved state.",
+    "A step with home pipeline goes through the existing fleet bridge; no new shell-out path is added."
+  ],
+  "files_allowed": [
+    "crates/core/src/runner/engine.rs",
+    "crates/core/src/runner/state.rs",
+    "crates/core/tests/runner_engine.rs"
+  ],
+  "test_files": [
+    "crates/core/tests/runner_engine.rs"
+  ],
+  "verify": [
+    {
+      "name": "tests",
+      "cmd": "cargo test -p switchboard-core --test runner_engine",
+      "expect": "fail-before"
+    },
+    {
+      "name": "lint",
+      "cmd": "cargo clippy --all-targets -- -D warnings",
+      "expect": "pass"
+    }
+  ],
+  "code_map_entries": [
+    "crates/core/src/runner/engine.rs",
+    "crates/core/src/runner/state.rs"
+  ]
+}

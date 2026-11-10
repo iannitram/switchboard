@@ -3,6 +3,7 @@
 Newest first. One line per change of stage, release or decision that the next session needs.
 
 
+- 2026-11-11 Runner roadmap (#394): the step runner's roadmap graph lands in ROADMAP.md (the `runner` feature line, a `nodes:` block of 19 nodes and an `unspecified:` block) with one file per node under `roadmap/nodes/`, the `runner` row in SPEC.md, and the two draft workflow specs under `specs/` (roadmap-run, bug-loop); documents only, no code.
 - 2026-11-11 Fleet timeout group kill (#445, #452): `kill_group` sends `kill -KILL -- -<pid>` (procps rejected `-s KILL --`, so a timed-out fleet call's grandchild survived on Linux); the grandchild-pipes test checks one wait of limit + 2 s with a 30 s hang bound, not a 4.8 s wall-clock limit.
 - 2026-11-11 Waiting test lock wait (#442): the 431 Waiting-items test (about 240 locked changes at once) moved into `waiting::tests` and sets its own private lock wait to five minutes, as the held-restores test does (#441); every product caller still waits `LOCAL_LOCK_WAIT`, 10 s; a failed change panics with its error.
 - 2026-11-11 Windows rename retry (#444): `waiting/local.json` and the held-restores file are written whole through `lock::write_whole`, so their rename gets the same Windows retry as every other state file.

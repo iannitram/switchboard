@@ -1,0 +1,5 @@
+{
+  "id": "fleet-state-write",
+  "what": "Find out how Switchboard can create a file on the fleet-state branch as one pushed transaction that fails when the file already exists.",
+  "question": "Can Switchboard write fleet-state files safely?"
+}

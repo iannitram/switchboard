@@ -1,0 +1,30 @@
+{
+  "id": "roadmap-drift",
+  "what": "`switchboard roadmap drift <repo> --json` lists nodes with no issue, issues with no node, a roadmap past its stale date and unspecified items whose waits_on nodes are all done.",
+  "expectations": [
+    "Each drift item names its kind and the node or issue id.",
+    "A roadmap in step with its issues returns an empty list."
+  ],
+  "files_allowed": [
+    "crates/core/src/roadmap/drift.rs",
+    "crates/core/tests/roadmap_drift.rs"
+  ],
+  "test_files": [
+    "crates/core/tests/roadmap_drift.rs"
+  ],
+  "verify": [
+    {
+      "name": "tests",
+      "cmd": "cargo test -p switchboard-core --test roadmap_drift",
+      "expect": "fail-before"
+    },
+    {
+      "name": "lint",
+      "cmd": "cargo clippy --all-targets -- -D warnings",
+      "expect": "pass"
+    }
+  ],
+  "code_map_entries": [
+    "crates/core/src/roadmap/drift.rs"
+  ]
+}

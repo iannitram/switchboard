@@ -1,0 +1,25 @@
+{
+  "id": "sky-roadmap-graph",
+  "what": "When a project has a nodes: block, the sky's Roadmap lens lays stars out by dependency layer from the node graph instead of the stages table.",
+  "expectations": [
+    "A project with a nodes: block shows one column per dependency layer.",
+    "A project without one keeps the stages layout."
+  ],
+  "files_allowed": [
+    "app/src/sky/roadmapLens.ts",
+    "app/src/sky/roadmapLens.test.ts"
+  ],
+  "test_files": [
+    "app/src/sky/roadmapLens.test.ts"
+  ],
+  "verify": [
+    {
+      "name": "tests",
+      "cmd": "npm test -- roadmapLens",
+      "expect": "fail-before"
+    }
+  ],
+  "code_map_entries": [
+    "app/src/sky/roadmapLens.ts"
+  ]
+}
