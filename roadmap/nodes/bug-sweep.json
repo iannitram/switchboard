@@ -1,0 +1,30 @@
+{
+  "id": "bug-sweep",
+  "what": "`switchboard bug sweep` searches the other apps for the fixed bug's search patterns and queues one issue per hit through the create queue.",
+  "expectations": [
+    "A pattern that matches in a sister app queues exactly one issue there.",
+    "A second sweep of the same class queues nothing new."
+  ],
+  "files_allowed": [
+    "crates/core/src/bug/sweep.rs",
+    "crates/core/tests/bug_sweep.rs"
+  ],
+  "test_files": [
+    "crates/core/tests/bug_sweep.rs"
+  ],
+  "verify": [
+    {
+      "name": "tests",
+      "cmd": "cargo test -p switchboard-core --test bug_sweep",
+      "expect": "fail-before"
+    },
+    {
+      "name": "lint",
+      "cmd": "cargo clippy --all-targets -- -D warnings",
+      "expect": "pass"
+    }
+  ],
+  "code_map_entries": [
+    "crates/core/src/bug/sweep.rs"
+  ]
+}

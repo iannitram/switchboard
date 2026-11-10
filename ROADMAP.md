@@ -1,6 +1,6 @@
 # Roadmap: Switchboard
 
-Updated: 2026-11-09
+Updated: 2026-11-10
 
 features:
 - core: The core and the fleet bridge, with the abilities index (release: 1.0)
@@ -25,6 +25,7 @@ features:
 - fleet-rust: Porting fleet to Rust (release: after-1.0)
 - dashboard: Retiring the fleet dashboard, only with my yes again (release: after-1.0)
 - plugins: Plugins: add views, commands and MCP tools to Switchboard without changing the core (release: after-1.0)
+- runner: The step runner: Switchboard runs a project's roadmap and its bug fixes from spec files (release: after-1.0)
 - gamification: A gamification plugin (release: after-2.0)
 
 ## The features block
@@ -51,6 +52,36 @@ Each stage's first issues are `Blocked by` the stage before (written on the issu
 **The live loops (added 2026-11-09).** By 2026-11-09 most of stages 1 to 7 are merged, but several of the core's parts are tested functions that nothing runs yet: the 10-minute GitHub poll and the Refresh button (GH-1), the autopilot's review start, merge pass, PM job and Sunday run (AUTO-2 to AUTO-6), the loadout timer (IT-1), automatic IT tickets (IT-2), the CLI and MCP write paths (CLI-3, MCP-2) and `switchboard loadout` (CLI-1). Each gets one wiring issue. The poll comes first: the autopilot issues that act on a fresh snapshot are `Blocked by` it, and they share one `autopilot::after_poll` hook that the review start adds. They run beside the open stage 3 to 7 issues and before the design pass.
 
 After 1.0 the dark stars above get their own Specs and issues (the after-2.0 stars wait for 2.0); `platforms` turns the Mac and Windows seams on.
+
+## The roadmap graph
+
+Draft format, first used by `runner`. One line per node: `- <id>: <title> (feature: <id>, type: build|research|prototype|grilling|task, size: easy|medium|hard, kind: <k>, after: <ids separated by spaces, or none>)`. A node is one unit of work; `after` lists the nodes that must be done first. Each node's detail is `roadmap/nodes/<id>.json`. An issue is made from a node, never the other way round. `unspecified:` holds what is known to be missing: `- <id>: <gist> (waits on: <ids>)`. The workflows that run this graph are in `specs/`; the `roadmap-graph` node settles the format.
+
+nodes:
+- runner-spec: Spec files load and validate (feature: runner, type: build, size: medium, kind: data-shape, after: none)
+- runner-engine: The step engine: run one step and move the state (feature: runner, type: build, size: hard, kind: state, after: runner-spec)
+- runner-waiting: Owner steps raise one Waiting on you item (feature: runner, type: build, size: medium, kind: state, after: runner-engine)
+- roadmap-graph: Read the roadmap graph and lint it (feature: runner, type: build, size: medium, kind: data-shape, after: runner-spec)
+- roadmap-units: Turn nodes into issues and link them in order (feature: runner, type: build, size: medium, kind: wiring, after: roadmap-graph)
+- roadmap-drift: Compute drift between the roadmap and the issues (feature: runner, type: build, size: easy, kind: pure-fn, after: roadmap-graph)
+- fleet-state-write: Can Switchboard write fleet-state files safely? (feature: runner, type: research, size: easy, after: none)
+- unit-frontier: List ready work and choose the next unit (feature: runner, type: build, size: medium, kind: pure-fn, after: roadmap-units)
+- unit-claim: Claim a unit with a lock two workers cannot share (feature: runner, type: build, size: hard, kind: state, after: unit-frontier fleet-state-write)
+- unit-job: Write the build job from the node file (feature: runner, type: build, size: medium, kind: data-shape, after: unit-claim)
+- unit-proof: Prove a test is red and the code map matches the change (feature: runner, type: build, size: medium, kind: pure-fn, after: roadmap-graph)
+- unit-land: Open the pull request and record the result (feature: runner, type: build, size: medium, kind: wiring, after: unit-job unit-proof)
+- roadmap-run-live: roadmap-run builds one project end to end (feature: runner, type: build, size: hard, kind: wiring, after: runner-waiting roadmap-drift unit-land)
+- bug-intake: Collect a bug report into one tracked bug (feature: runner, type: build, size: hard, kind: data-shape, after: runner-engine fleet-state-write)
+- bug-fix: Reproduce, fix and record one bug (feature: runner, type: build, size: hard, kind: state, after: bug-intake unit-claim unit-proof)
+- bug-sweep: Check sister apps for the same bug (feature: runner, type: build, size: medium, kind: wiring, after: bug-fix)
+- bug-loop-live: bug-loop fixes one reported bug end to end (feature: runner, type: build, size: hard, kind: wiring, after: runner-waiting bug-sweep unit-land)
+- run-scoring: Score a sample of runs and propose changes to the specs (feature: runner, type: build, size: hard, kind: state, after: roadmap-run-live)
+- sky-roadmap-graph: The Roadmap lens draws the node graph (feature: runner, type: build, size: medium, kind: ui, after: roadmap-graph)
+
+unspecified:
+- approval-lines: Who writes the dated approval line into SPEC.md and ROADMAP.md after you answer (waits on: runner-waiting)
+- picked-lane: Whether `fleet run` honours a lane `fleet pick` already chose, or picks again (waits on: unit-job)
+- fleet-pick-exits: `fleet pick` answers with exits 3, 4 and 5; the runner reads only 0 and 75 today (waits on: runner-engine)
 
 ## Code map and skeleton
 

@@ -1,0 +1,32 @@
+{
+  "id": "unit-claim",
+  "what": "`switchboard unit claim` re-checks the unit's blockers, creates one claim file on fleet-state as a single pushed transaction, then mirrors it to the assignee and the in-progress label; `switchboard unit release` drops a claim and reaps stale ones.",
+  "expectations": [
+    "Two claims of one unit started together: exactly one exits 0, the other exits 75.",
+    "A unit with an open blocker cannot be claimed.",
+    "Release removes the claim file, the assignee and the label.",
+    "A claim older than the stale limit is released by the reaper."
+  ],
+  "files_allowed": [
+    "crates/core/src/unit/claim.rs",
+    "crates/core/tests/unit_claim.rs"
+  ],
+  "test_files": [
+    "crates/core/tests/unit_claim.rs"
+  ],
+  "verify": [
+    {
+      "name": "tests",
+      "cmd": "cargo test -p switchboard-core --test unit_claim",
+      "expect": "fail-before"
+    },
+    {
+      "name": "lint",
+      "cmd": "cargo clippy --all-targets -- -D warnings",
+      "expect": "pass"
+    }
+  ],
+  "code_map_entries": [
+    "crates/core/src/unit/claim.rs"
+  ]
+}
