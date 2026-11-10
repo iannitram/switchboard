@@ -133,8 +133,22 @@ pub fn failed_cards(stdout: &str) -> Vec<Value> {
         .collect()
 }
 
-/// AUTO-9 for each failed card of a finished loop: the card is written to `dir` and classed by
-/// `classify`. A card with no string `id` is named `card-<n>` by its place among the failed cards.
+/// The file name a failed card is written under in the cards folder: its id with each character
+/// outside `A-Z a-z 0-9 . _ -` turned into `-` (`passes::id_part`), so `../x`, `a/b` or an
+/// absolute path stays one file inside the folder (#382). An id that is empty, or only dots,
+/// once made safe is `card-<n>`.
+pub fn card_file_name(id: Option<&str>, n: usize) -> String {
+    let safe = id.map(super::passes::id_part).unwrap_or_default();
+    if safe.chars().all(|c| c == '.') {
+        format!("card-{n}.json")
+    } else {
+        format!("{safe}.json")
+    }
+}
+
+/// AUTO-9 for each failed card of a finished loop: the card is written to `dir` under
+/// `card_file_name` and classed by `classify`. The class is answered under the card's own id; a
+/// card with no string `id` is named `card-<n>` by its place among the failed cards.
 pub fn classify_failed(
     fleet: &FleetBridge,
     dir: &Path,
@@ -143,12 +157,9 @@ pub fn classify_failed(
     std::fs::create_dir_all(dir).map_err(|e| CoreError::Io(format!("{}: {e}", dir.display())))?;
     let mut classes = Vec::new();
     for (i, card) in failed_cards(stdout).iter().enumerate() {
-        let id = card
-            .get("id")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .unwrap_or_else(|| format!("card-{}", i + 1));
-        let path = dir.join(format!("{id}.json"));
+        let raw = card.get("id").and_then(Value::as_str);
+        let id = raw.map_or_else(|| format!("card-{}", i + 1), str::to_string);
+        let path = dir.join(card_file_name(raw, i + 1));
         std::fs::write(&path, card.to_string())
             .map_err(|e| CoreError::Io(format!("{}: {e}", path.display())))?;
         let class = classify(fleet, &path)?;
