@@ -833,6 +833,7 @@ impl JobStarter for FleetStarter {
                 exit_code: code,
                 stderr: std::fs::read_to_string(job_file.with_extension("err")).unwrap_or_default(),
                 reason: FleetErrorReason::Exit,
+                undo_note: None,
             }));
         }
         let age = std::fs::metadata(&job_file)

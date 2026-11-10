@@ -252,6 +252,7 @@ impl LoopEnd {
                 exit_code: self.exit_code,
                 stderr: self.stderr.clone(),
                 reason: FleetErrorReason::Exit,
+                undo_note: None,
             })
         })
     }
