@@ -223,8 +223,9 @@ pub fn read_ledger(files: &[PathBuf]) -> Result<Vec<Value>, CoreError> {
     let mut kept: Vec<Value> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     for path in files {
-        let text = match std::fs::read_to_string(path) {
-            Ok(text) => text,
+        // Bytes that are not UTF-8 spoil only their own line (#349), not the whole read.
+        let text = match std::fs::read(path) {
+            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => return Err(CoreError::Io(format!("{}: {e}", path.display()))),
         };

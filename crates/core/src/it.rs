@@ -7,6 +7,7 @@ use crate::platform::{current_os, loadout_probes, Probe};
 use crate::CoreError;
 use serde::Serialize;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 /// IT-1: what this machine can do right now.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -96,29 +97,86 @@ fn last_errors(out: &str) -> Vec<String> {
     lines.into_iter().skip(skip).collect()
 }
 
+/// IT-W: how long one probe may run before it is killed (#339). A probe that runs out of time
+/// has no exit code, so the loadout shows it as not signed in, left out, or not busy.
+pub const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// IT-W: the real probe runner. It runs the probe's program with its args, stdin and stderr
-/// closed, and keeps the exit code and stdout; a program that cannot start has no exit code.
+/// closed, and keeps the exit code and stdout; a program that cannot start, or that is still
+/// running after `PROBE_TIMEOUT`, has no exit code (a slow one is killed).
 pub struct SystemProbeRunner;
 
 impl ProbeRunner for SystemProbeRunner {
     fn run(&self, probe: &Probe) -> ProbeResult {
-        let output = std::process::Command::new(probe.program)
-            .args(probe.args)
-            .stdin(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .output();
-        match output {
-            Ok(out) => ProbeResult {
-                name: probe.name.to_string(),
-                exit_code: out.status.code(),
-                stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-            },
-            Err(_) => ProbeResult {
-                name: probe.name.to_string(),
-                exit_code: None,
-                stdout: String::new(),
-            },
+        run_probe_within(probe, PROBE_TIMEOUT)
+    }
+}
+
+/// Kill the probe's whole process group (the child is its leader). `kill` is the system
+/// program, so the core needs no unsafe code or extra crate.
+#[cfg(unix)]
+fn kill_group(child: &std::process::Child) {
+    let _ = std::process::Command::new("kill")
+        .args(["-KILL", "--", &format!("-{}", child.id())])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+#[cfg(not(unix))]
+fn kill_group(_child: &std::process::Child) {}
+
+/// IT-W: run `probe`, killing it when it is still going after `limit`.
+pub fn run_probe_within(probe: &Probe, limit: Duration) -> ProbeResult {
+    let none = || ProbeResult {
+        name: probe.name.to_string(),
+        exit_code: None,
+        stdout: String::new(),
+    };
+    let mut command = std::process::Command::new(probe.program);
+    command
+        .args(probe.args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    // Its own process group, so a kill reaches what the probe started too (a shim script's
+    // `sleep` would otherwise outlive it).
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    let Ok(mut child) = command.spawn() else {
+        return none();
+    };
+    // Read stdout on its own thread so a full pipe cannot stall the child. It is never joined
+    // after a kill: a grandchild may still hold the pipe open.
+    let (tx, rx) = std::sync::mpsc::channel();
+    if let Some(mut out) = child.stdout.take() {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut out, &mut bytes);
+            let _ = tx.send(bytes);
+        });
+    }
+    let deadline = Instant::now() + limit;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            _ => {
+                kill_group(&child);
+                let _ = child.kill();
+                let _ = child.wait();
+                return none();
+            }
         }
+    };
+    let bytes = rx.recv_timeout(Duration::from_secs(1)).unwrap_or_default();
+    ProbeResult {
+        name: probe.name.to_string(),
+        exit_code: status.code(),
+        stdout: String::from_utf8_lossy(&bytes).into_owned(),
     }
 }
 

@@ -88,11 +88,19 @@ fn stub_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../core/tests/fixtures/fleet-stub")
 }
 
-/// The built binary with a clean fleet environment and `SWITCHBOARD_PIPELINE` set to `pipeline`
-/// (unset when `None`).
+/// An empty app config folder, so no `settings.json` on this machine names a pipeline (#359).
+fn empty_config() -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("sb-budget-config-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// The built binary with a clean fleet environment, an empty app config folder, and
+/// `SWITCHBOARD_PIPELINE` set to `pipeline` (unset when `None`).
 fn switchboard(argv: &[&str], pipeline: Option<&std::ffi::OsStr>) -> Output {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_switchboard"));
     cmd.args(argv)
+        .env("SWITCHBOARD_CONFIG", empty_config())
         .env_remove("FLEET_ROOT")
         .env_remove("FLEET_STUB_EXIT")
         .env_remove("FLEET_STUB_STDERR")
@@ -118,9 +126,9 @@ fn budget_prints_one_line_per_pool_in_pool_order() {
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
     assert_eq!(
         stdout(&out),
-        "chatgpt: 98.6% vs pace 81.4%, brake\n\
-         claude: 2% vs pace 3%, on-pace\n\
-         claudeapi: 71.78% vs pace 74.04%, push\n"
+        "chatgpt: 98.6% vs pace 81.4%, +17.2 pts, brake, 138 min old, stale\n\
+         claude: 2% vs pace 3%, -1.0 pts, on-pace, 65 min old\n\
+         claudeapi: 71.78% vs pace 74.04%, -2.3 pts, push, 138 min old\n"
     );
 }
 
@@ -154,7 +162,10 @@ fn budget_prints_not_recorded_where_a_number_is_missing() {
     let out = switchboard(&["budget"], Some(root.as_os_str()));
     let _ = std::fs::remove_dir_all(&root);
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
-    assert_eq!(stdout(&out), "solo: not recorded vs pace 40%, push\n");
+    assert_eq!(
+        stdout(&out),
+        "solo: not recorded vs pace 40%, pts not recorded, push, age not recorded\n"
+    );
 }
 
 #[test]
