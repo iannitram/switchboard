@@ -14,7 +14,7 @@ function typeAndSend(text: string) {
 const ANSWER: ChatRoute = {
   step: "rules",
   kind: null,
-  pick: { Service: { service: "gemini", model: "flash" } },
+  pick: { to: "service", service: "gemini", model: "flash" },
   text: "Use the labeller's first list.",
   service: "gemini",
   model: "flash",
