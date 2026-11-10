@@ -412,6 +412,8 @@ fn the_fleet_starter_calls_a_job_finished_when_its_out_file_has_text_or_it_is_un
         fleet: switchboard_core::fleet::FleetBridge::with_root(&jobs),
         jobs_dir: jobs.clone(),
         dev_root: jobs.clone(),
+        machine: None,
+        qwen_probe: Box::new(|_| false),
     };
     assert_eq!(starter.finished("nope"), Ok(true), "no job file");
     std::fs::write(jobs.join("a.json"), "{}").unwrap();

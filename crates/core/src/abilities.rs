@@ -57,6 +57,29 @@ impl FleetModels {
         FleetModels { qwen, claudeapi }
     }
 
+    /// `machines.<machine>.qwen_server_url` in a parsed `config.json`: where this machine's
+    /// local model server answers. `None` when the machine is unknown, not in `machines`, or has
+    /// no string `qwen_server_url`.
+    pub fn qwen_server_url(config: &Value, machine: Option<&str>) -> Option<String> {
+        machine
+            .and_then(|m| {
+                config
+                    .get("machines")?
+                    .get(m)?
+                    .get("qwen_server_url")?
+                    .as_str()
+            })
+            .map(str::to_string)
+    }
+
+    /// `qwen_server_url` from `<root>/tools/fleet/config.json`; `None` when the file is missing,
+    /// unreadable or not JSON, as for `read`.
+    pub fn read_qwen_server_url(fleet: &FleetBridge, machine: Option<&str>) -> Option<String> {
+        let text = std::fs::read_to_string(config_path(fleet)).ok()?;
+        let config: Value = serde_json::from_str(&text).ok()?;
+        Self::qwen_server_url(&config, machine)
+    }
+
     /// Read `<root>/tools/fleet/config.json` through the bridge's root (`budget::config_path`)
     /// for `machine`. `None` when the file is missing, unreadable or not JSON: the caller takes
     /// `FleetModels::default()` and the flagged services are skipped.

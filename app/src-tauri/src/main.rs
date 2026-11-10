@@ -97,6 +97,8 @@ fn autopilot_after_poll(
         fleet,
         jobs_dir: data.join("autopilot").join("jobs"),
         dev_root,
+        machine: machine.clone(),
+        qwen_probe: Box::new(passes::http_qwen_probe),
     };
     let result = {
         let _held = state.github.lock().unwrap_or_else(|p| p.into_inner());
