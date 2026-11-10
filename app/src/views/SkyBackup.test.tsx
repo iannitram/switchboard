@@ -93,7 +93,7 @@ test("back up on a constellation calls backup_repo with that repo", async () => 
   render(<Sky />);
   const stars = await screen.findAllByTestId("constellation");
   fireEvent.click(stars[0]);
-  fireEvent.click(screen.getByRole("button", { name: "Back up" }));
+  fireEvent.click(screen.getByRole("button", { name: "Back up this repo" }));
   const outcome = await screen.findByRole("status", { name: "Backup outcome" });
   expect(call).toHaveBeenCalledWith("backup_repo", { repo: "owner/one" });
   expect(outcome.textContent).toBe(backupLine(WRITTEN));
