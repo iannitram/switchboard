@@ -36,8 +36,10 @@ fn setup(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let root =
-        std::env::temp_dir().join(format!("sb-merge-state-{tag}-{}-{nanos}", std::process::id()));
+    let root = std::env::temp_dir().join(format!(
+        "sb-merge-state-{tag}-{}-{nanos}",
+        std::process::id()
+    ));
     let dir = root.join("tools").join("merge-pr");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("merge_pr.py"), STUB).unwrap();
