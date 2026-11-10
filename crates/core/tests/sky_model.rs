@@ -564,15 +564,89 @@ fn an_orphan_on_two_features_a_dark_feature_and_a_stale_roadmap() {
 }
 
 #[test]
-fn no_updated_line_is_stale_drift() {
+fn no_roadmap_file_is_stale_drift_linking_the_repo_page() {
     assert_eq!(
         constellation(&sky(), "iannitram/gamma")["drift"],
         json!([{
             "kind": "stale",
-            "text": "ROADMAP.md has no Updated: line",
-            "link": "https://github.com/iannitram/gamma/blob/HEAD/ROADMAP.md"
+            "text": "no ROADMAP.md",
+            "link": "https://github.com/iannitram/gamma"
         }])
     );
+}
+
+#[test]
+fn drift_links_are_the_ones_github_serves() {
+    let snap = RepoSnapshot {
+        repo: "o/r".to_string(),
+        read_at: NOW,
+        issues: vec![issue(7, "Loose", "open", &[], "")],
+        roadmap_md: Some(
+            "Updated: 2026-10-01\n\nfeatures:\n- core: Core (release: 1.0)\n\
+             - mail: Mail (release: 1.0)\n"
+                .to_string(),
+        ),
+        ..Default::default()
+    };
+    let model = build(&[snap], None, &[], NOW).unwrap();
+    let sky = serde_json::to_value(&model).unwrap();
+    let drift = &constellation(&sky, "o/r")["drift"];
+    assert_eq!(
+        drift,
+        &json!([
+            {
+                "kind": "orphan",
+                "text": "#7 Loose: on no feature",
+                "link": "https://github.com/o/r/issues/7"
+            },
+            {
+                "kind": "dark",
+                "text": "core: Core has no issue",
+                "link": "https://github.com/o/r/blob/HEAD/ROADMAP.md"
+            },
+            {
+                "kind": "dark",
+                "text": "mail: Mail has no issue",
+                "link": "https://github.com/o/r/blob/HEAD/ROADMAP.md"
+            },
+            {
+                "kind": "stale",
+                "text": "ROADMAP.md updated 2026-10-01, 38 days ago",
+                "link": "https://github.com/o/r/blob/HEAD/ROADMAP.md"
+            }
+        ])
+    );
+}
+
+#[test]
+fn no_roadmap_file_leaves_no_link_to_roadmap_md() {
+    let snap = RepoSnapshot {
+        repo: "o/r".to_string(),
+        read_at: NOW,
+        issues: vec![issue(9, "Loose", "open", &[], "")],
+        ..Default::default()
+    };
+    let model = build(&[snap], None, &[], NOW).unwrap();
+    let sky = serde_json::to_value(&model).unwrap();
+    let drift = constellation(&sky, "o/r")["drift"].clone();
+    assert_eq!(
+        drift,
+        json!([
+            {
+                "kind": "orphan",
+                "text": "#9 Loose: on no feature",
+                "link": "https://github.com/o/r/issues/9"
+            },
+            {
+                "kind": "stale",
+                "text": "no ROADMAP.md",
+                "link": "https://github.com/o/r"
+            }
+        ])
+    );
+    for item in drift.as_array().unwrap() {
+        assert!(!item["link"].as_str().unwrap().contains("ROADMAP.md"));
+    }
 }
 
 fn drift_with(updated: &str, now: i64) -> Value {
