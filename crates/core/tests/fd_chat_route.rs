@@ -11,7 +11,8 @@ use std::path::{Path, PathBuf};
 use switchboard_core::abilities::AbilitiesIndex;
 use switchboard_core::fleet::{FleetBridge, FleetErrorReason};
 use switchboard_core::frontdoor::chat::{
-    route_message, route_message_with, ChatPick, ChatRoute, FleetGate, DEFAULT_COMPLEXITY,
+    route_message, route_message_on, route_message_with, ChatPick, ChatRoute, FleetGate,
+    DEFAULT_COMPLEXITY,
 };
 use switchboard_core::frontdoor::router::{self, BudgetGate, Complexity, Pick, Route, Step};
 use switchboard_core::CoreError;
@@ -449,6 +450,102 @@ fn route_message_is_the_real_router_over_the_fleet() {
         let want = router::route(message, &index, &AllowAll, DEFAULT_COMPLEXITY);
         assert_eq!(got, ChatRoute::from(&want), "{message}");
     }
+}
+
+// --- route_message_on: qwen and the Claude API get their models from config.json (FD-3) ---
+
+/// Answers `actions` with the `actions.json` next to it and exits 0 for `budget`.
+const TABLE_FLEET: &str = r#"import pathlib, sys
+here = pathlib.Path(__file__).resolve().parent
+if sys.argv[1:2] == ["actions"]:
+    sys.stdout.write((here / "actions.json").read_text(encoding="utf-8"))
+sys.exit(0)
+"#;
+
+const STUB_QWEN_MODEL: &str = "qwen3.8-27b";
+const STUB_CLAUDEAPI_MODEL: &str = "claude-sonnet-5-5";
+
+/// A stub root with the action table `actions` and a config naming `STUB_QWEN_MODEL` for
+/// `strix-halo` and `STUB_CLAUDEAPI_MODEL` as the Sonnet tier.
+fn table_root(name: &str, actions: &Value) -> PathBuf {
+    let root = std::env::temp_dir().join(format!("sb-fd1w-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let dir = root.join("tools").join("fleet");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("fleet.py"), TABLE_FLEET).unwrap();
+    std::fs::write(dir.join("actions.json"), actions.to_string()).unwrap();
+    let config = json!({
+        "claudeapi_models": { "sonnet": STUB_CLAUDEAPI_MODEL },
+        "machines": { "strix-halo": { "qwen_model": STUB_QWEN_MODEL } }
+    });
+    std::fs::write(dir.join("config.json"), config.to_string()).unwrap();
+    root
+}
+
+fn flagged_table() -> Value {
+    json!({
+        "stub-web": {
+            "label": "Stub: a web lookup",
+            "request": true,
+            "needs": ["web"],
+            "first": ["qwen"],
+            "ok": { "qwen": true }
+        },
+        "stub-big": {
+            "label": "Stub: a big request",
+            "request": true,
+            "needs": [],
+            "first": ["claudeapi"],
+            "claudeapi": true,
+            "ok": { "claude": "sonnet" }
+        }
+    })
+}
+
+#[test]
+fn a_qwen_first_kind_routes_to_qwen_with_this_machines_model() {
+    let root = table_root("qwen-first", &flagged_table());
+    let fleet = FleetBridge::with_root(&root);
+    let got = route_message_on(
+        &fleet,
+        Some("strix-halo"),
+        "search the web for llama-swap",
+        Complexity::Small,
+        router::route,
+    )
+    .unwrap();
+    assert_eq!(
+        got,
+        ChatRoute {
+            step: "explicit ask web".to_string(),
+            kind: Some("stub-web".to_string()),
+            pick: ChatPick::Service {
+                service: "qwen".to_string(),
+                model: STUB_QWEN_MODEL.to_string(),
+            },
+        }
+    );
+}
+
+#[test]
+fn a_big_no_tools_message_routes_to_the_claude_api_sonnet_model() {
+    let root = table_root("big-no-tools", &flagged_table());
+    let fleet = FleetBridge::with_root(&root);
+    let got = route_message_on(
+        &fleet,
+        Some("strix-halo"),
+        "hello there",
+        Complexity::BigNoTools,
+        router::route,
+    )
+    .unwrap();
+    assert_eq!(
+        got.pick,
+        ChatPick::Service {
+            service: "claudeapi".to_string(),
+            model: STUB_CLAUDEAPI_MODEL.to_string(),
+        }
+    );
 }
 
 // --- The shell registers the command; the code map says so ---

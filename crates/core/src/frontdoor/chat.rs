@@ -1,7 +1,7 @@
 //! FD-1 for the Chat composer (#177): route one message and say which step picked. Routing only:
 //! no adapter is called, nothing is logged and no thread is stored.
 
-use crate::abilities::AbilitiesIndex;
+use crate::abilities::{AbilitiesIndex, FleetModels};
 use crate::autopilot::may_spend;
 use crate::fleet::FleetBridge;
 use crate::frontdoor::router::{self, BudgetGate, Complexity, Pick, Route, Step};
@@ -98,9 +98,28 @@ impl BudgetGate for FleetGate<'_> {
 
 /// `route_message` with the router passed in, so the message, the index, the gate and the
 /// complexity can be checked without the real router. A fleet error met by the index read or
-/// the gate is the error; a braked pool is just the router's answer.
+/// the gate is the error; a braked pool is just the router's answer. The index takes its qwen
+/// and Claude API models for this machine (`FleetModels::local_machine`).
 pub fn route_message_with(
     fleet: &FleetBridge,
+    message: &str,
+    complexity: Complexity,
+    route: impl Fn(&str, &AbilitiesIndex, &dyn BudgetGate, Complexity) -> Route,
+) -> Result<ChatRoute, CoreError> {
+    route_message_on(
+        fleet,
+        FleetModels::local_machine().as_deref(),
+        message,
+        complexity,
+        route,
+    )
+}
+
+/// `route_message_with` for the machine the caller names (`None`: no qwen model, the Claude API
+/// tiers only), so a test can pick the machine.
+pub fn route_message_on(
+    fleet: &FleetBridge,
+    machine: Option<&str>,
     message: &str,
     complexity: Complexity,
     route: impl Fn(&str, &AbilitiesIndex, &dyn BudgetGate, Complexity) -> Route,
@@ -108,7 +127,7 @@ pub fn route_message_with(
     if message.trim().is_empty() {
         return Err(CoreError::Refused("chat: empty message".to_string()));
     }
-    let index = AbilitiesIndex::load(fleet)?;
+    let index = AbilitiesIndex::load_with(fleet, machine)?;
     let gate = FleetGate::new(fleet);
     let picked = route(message, &index, &gate, complexity);
     if let Some(err) = gate.into_error() {
