@@ -659,26 +659,59 @@ pub(crate) fn pipeline_dir() -> Option<PathBuf> {
     env_path(PIPELINE_ENV)
 }
 
+/// A read answer that failed: the line the command prints on stderr and its exit code. The MCP
+/// read tools answer with the message.
+pub(crate) struct Fail {
+    code: u8,
+    pub(crate) message: String,
+}
+
+impl From<serde_json::Error> for Fail {
+    fn from(e: serde_json::Error) -> Self {
+        fail(1, format!("switchboard: {e}"))
+    }
+}
+
+fn fail(code: u8, message: String) -> Fail {
+    Fail { code, message }
+}
+
+/// Say why a read failed on stderr and give its exit code.
+fn exit_with(fail: Fail) -> ExitCode {
+    eprintln!("{}", fail.message);
+    ExitCode::from(fail.code)
+}
+
+/// The pipeline checkout, or the failure saying it is not set.
+fn pipeline_or_fail() -> Result<PathBuf, Fail> {
+    env_path(PIPELINE_ENV).ok_or_else(|| {
+        fail(
+            2,
+            format!("switchboard: set {PIPELINE_ENV} to your pipeline checkout"),
+        )
+    })
+}
+
 /// The pipeline checkout, or the exit code after saying it is not set.
 fn pipeline_root() -> Result<PathBuf, ExitCode> {
-    env_path(PIPELINE_ENV).ok_or_else(|| {
-        eprintln!("switchboard: set {PIPELINE_ENV} to your pipeline checkout");
-        ExitCode::from(2)
+    pipeline_or_fail().map_err(exit_with)
+}
+
+/// The app data folder, or the failure saying it is not set.
+fn data_or_fail() -> Result<PathBuf, Fail> {
+    data_dir().ok_or_else(|| {
+        fail(
+            2,
+            format!("switchboard: set {DATA_ENV} to the app data folder"),
+        )
     })
 }
 
 /// `switchboard budget`: one line per pool (text) or the rows as a JSON array (`--json`).
 fn budget(json: bool) -> ExitCode {
-    let root = match pipeline_root() {
-        Ok(root) => root,
-        Err(code) => return code,
-    };
-    let rows = match budget::read(&FleetBridge::new(&root)) {
+    let rows = match budget_rows() {
         Ok(rows) => rows,
-        Err(e) => {
-            eprintln!("switchboard budget: {e}");
-            return ExitCode::from(1);
-        }
+        Err(fail) => return exit_with(fail),
     };
     if json {
         match serde_json::to_string_pretty(&rows) {
@@ -692,6 +725,12 @@ fn budget(json: bool) -> ExitCode {
         print!("{}", budget_text(&rows));
     }
     ExitCode::SUCCESS
+}
+
+/// MCP-1: the pool rows `budget` prints.
+pub(crate) fn budget_rows() -> Result<Vec<PoolRow>, Fail> {
+    let root = pipeline_or_fail()?;
+    budget::read(&FleetBridge::new(&root)).map_err(|e| fail(1, format!("switchboard budget: {e}")))
 }
 
 /// One line per pool, in row order: `<pool>: <pct>% vs pace <pace>%, <verdict>`.
@@ -713,22 +752,12 @@ fn budget_text(rows: &[PoolRow]) -> String {
         .collect()
 }
 
-/// Every stored snapshot, or the exit code after saying why there is none.
-fn snapshots(command: &str) -> Result<(PathBuf, Vec<RepoSnapshot>), ExitCode> {
-    let Some(data) = data_dir() else {
-        eprintln!("switchboard: set {DATA_ENV} to the app data folder");
-        return Err(ExitCode::from(2));
-    };
-    match SnapshotStore::new(&data).load_all() {
-        Ok(snaps) if snaps.is_empty() => {
-            eprintln!("{NO_SNAPSHOT}");
-            Err(ExitCode::from(1))
-        }
-        Ok(snaps) => Ok((data, snaps)),
-        Err(e) => {
-            eprintln!("switchboard {command}: {e}");
-            Err(ExitCode::from(1))
-        }
+/// Every stored snapshot in the data folder, or the failure saying why there is none.
+fn snapshots(command: &str, data: &Path) -> Result<Vec<RepoSnapshot>, Fail> {
+    match SnapshotStore::new(data).load_all() {
+        Ok(snaps) if snaps.is_empty() => Err(fail(1, NO_SNAPSHOT.to_string())),
+        Ok(snaps) => Ok(snaps),
+        Err(e) => Err(fail(1, format!("switchboard {command}: {e}"))),
     }
 }
 
@@ -736,34 +765,29 @@ fn snapshots(command: &str) -> Result<(PathBuf, Vec<RepoSnapshot>), ExitCode> {
 /// (WAIT-1), newest first: one line each (text) or the items as a JSON array (`--json`). CalDAV
 /// is not read yet (U7).
 fn waiting(json: bool) -> ExitCode {
-    let Some(data) = data_dir() else {
-        eprintln!("switchboard: set {DATA_ENV} to the app data folder");
-        return ExitCode::from(2);
+    let items = match data_or_fail().and_then(|data| waiting_items(&data)) {
+        Ok(items) => items,
+        Err(fail) => return exit_with(fail),
     };
-    let snaps = match SnapshotStore::new(&data).load_all() {
-        Ok(snaps) => snaps,
-        Err(e) => {
-            eprintln!("switchboard waiting: {e}");
-            return ExitCode::from(1);
-        }
-    };
-    let local = match LocalItems::new(&data).load() {
-        Ok(local) => local,
-        Err(e) => {
-            eprintln!("switchboard waiting: {e}");
-            return ExitCode::from(1);
-        }
-    };
-    if snaps.is_empty() && local.is_empty() {
-        eprintln!("{NO_SNAPSHOT}");
-        return ExitCode::from(1);
-    }
-    let items = waiting::assemble(&snaps, &local);
     if json {
         return print_json("waiting", serde_json::to_string_pretty(&items));
     }
     print!("{}", waiting_text(&items));
     ExitCode::SUCCESS
+}
+
+/// MCP-1: the items `waiting` prints, newest first.
+pub(crate) fn waiting_items(data: &Path) -> Result<Vec<Item>, Fail> {
+    let snaps = SnapshotStore::new(data)
+        .load_all()
+        .map_err(|e| fail(1, format!("switchboard waiting: {e}")))?;
+    let local = LocalItems::new(data)
+        .load()
+        .map_err(|e| fail(1, format!("switchboard waiting: {e}")))?;
+    if snaps.is_empty() && local.is_empty() {
+        return Err(fail(1, NO_SNAPSHOT.to_string()));
+    }
+    Ok(waiting::assemble(&snaps, &local))
 }
 
 /// One line per item, in list order: `<what> | <why> | <action> | <link>`; no items gives the
@@ -870,18 +894,30 @@ struct SkyRow {
 /// `switchboard sky`: one row per repo in the Sky view's placement order, from the same
 /// `sky::model` the window paints.
 fn sky_command(json: bool) -> ExitCode {
-    let (data, snaps) = match snapshots("sky") {
-        Ok(found) => found,
-        Err(code) => return code,
+    let rows = match data_or_fail().and_then(|data| sky_rows(&data)) {
+        Ok(rows) => rows,
+        Err(fail) => return exit_with(fail),
     };
-    let model = match sky::model::load(&data, SystemClock.now()) {
-        Ok(model) => model,
-        Err(e) => {
-            eprintln!("switchboard sky: {e}");
-            return ExitCode::from(1);
-        }
-    };
-    let rows: Vec<SkyRow> = model
+    if json {
+        print_json("sky", serde_json::to_string_pretty(&sky_json(&rows)))
+    } else {
+        print!("{}", sky_text(&rows));
+        ExitCode::SUCCESS
+    }
+}
+
+/// The sky model and the snapshots it was built from.
+fn sky_model(data: &Path) -> Result<(sky::model::SkyModel, Vec<RepoSnapshot>), Fail> {
+    let snaps = snapshots("sky", data)?;
+    let model = sky::model::load(data, SystemClock.now())
+        .map_err(|e| fail(1, format!("switchboard sky: {e}")))?;
+    Ok((model, snaps))
+}
+
+/// MCP-1: the rows `sky` prints.
+fn sky_rows(data: &Path) -> Result<Vec<SkyRow>, Fail> {
+    let (model, snaps) = sky_model(data)?;
+    Ok(model
         .constellations
         .iter()
         .map(|c| SkyRow {
@@ -893,10 +929,13 @@ fn sky_command(json: bool) -> ExitCode {
                 .map_or(0, |s| s.issues.iter().filter(|i| i.state == "open").count()),
             drifted: c.drift.len(),
         })
-        .collect();
-    if json {
-        let rows: Vec<Value> = rows
-            .iter()
+        .collect())
+}
+
+/// The rows as `sky --json` prints them.
+fn sky_json(rows: &[SkyRow]) -> Value {
+    Value::Array(
+        rows.iter()
             .map(|row| {
                 json!({
                     "repo": row.repo,
@@ -905,11 +944,35 @@ fn sky_command(json: bool) -> ExitCode {
                     "drifted": row.drifted,
                 })
             })
-            .collect();
-        print_json("sky", serde_json::to_string_pretty(&Value::Array(rows)))
-    } else {
-        print!("{}", sky_text(&rows));
-        ExitCode::SUCCESS
+            .collect(),
+    )
+}
+
+/// MCP-1: the sky rows as `sky --json` prints them.
+pub(crate) fn sky_answer(data: &Path) -> Result<Value, Fail> {
+    sky_rows(data).map(|rows| sky_json(&rows))
+}
+
+/// MCP-1: one repo's constellation from the sky model, as the window paints it. `<repo>` is
+/// `owner/name` or the bare name.
+pub(crate) fn constellation_answer(data: &Path, repo: &str) -> Result<Value, Fail> {
+    let (model, _) = sky_model(data)?;
+    let suffix = format!("/{repo}");
+    let found = model
+        .constellations
+        .iter()
+        .find(|c| c.repo == repo)
+        .or_else(|| {
+            model
+                .constellations
+                .iter()
+                .find(|c| c.repo.ends_with(suffix.as_str()))
+        });
+    match found {
+        Some(c) => {
+            serde_json::to_value(c).map_err(|e| fail(1, format!("switchboard constellation: {e}")))
+        }
+        None => Err(fail(1, format!("switchboard: no such repo: {repo}"))),
     }
 }
 
@@ -952,18 +1015,31 @@ struct Star {
 /// `switchboard star <repo>#<n>`: the facts the Sky view's star card shows. `<repo>` is
 /// `owner/name` or the bare name.
 fn star_command(target: &str, json: bool) -> ExitCode {
+    let star = match data_or_fail().and_then(|data| star_facts(&data, target)) {
+        Ok(star) => star,
+        Err(fail) => return exit_with(fail),
+    };
+    if json {
+        print_json("star", serde_json::to_string_pretty(&star_json(&star)))
+    } else {
+        print!("{}", star_text(&star));
+        ExitCode::SUCCESS
+    }
+}
+
+/// MCP-1: the facts `star` prints for `<repo>#<n>`.
+fn star_facts(data: &Path, target: &str) -> Result<Star, Fail> {
     let Some((repo, number)) = target
         .rsplit_once('#')
         .and_then(|(repo, n)| Some((repo, n.parse::<u64>().ok()?)))
         .filter(|(repo, _)| !repo.is_empty())
     else {
-        eprintln!("switchboard: star needs <repo>#<n>, got {target}");
-        return ExitCode::from(2);
+        return Err(fail(
+            2,
+            format!("switchboard: star needs <repo>#<n>, got {target}"),
+        ));
     };
-    let (_, snaps) = match snapshots("star") {
-        Ok(found) => found,
-        Err(code) => return code,
-    };
+    let snaps = snapshots("star", data)?;
     let suffix = format!("/{repo}");
     let snap = snaps
         .iter()
@@ -972,17 +1048,11 @@ fn star_command(target: &str, json: bool) -> ExitCode {
     let Some((snap, issue)) =
         snap.and_then(|s| Some((s, s.issues.iter().find(|i| i.number == number)?)))
     else {
-        eprintln!("switchboard: no such star: {target}");
-        return ExitCode::from(1);
+        return Err(fail(1, format!("switchboard: no such star: {target}")));
     };
-    let job = match running_job(&snap.repo, number) {
-        Ok(job) => job,
-        Err(e) => {
-            eprintln!("switchboard star: {e}");
-            return ExitCode::from(1);
-        }
-    };
-    let star = Star {
+    let job =
+        running_job(&snap.repo, number).map_err(|e| fail(1, format!("switchboard star: {e}")))?;
+    Ok(Star {
         repo: snap.repo.clone(),
         number,
         title: issue.title.clone(),
@@ -1008,34 +1078,44 @@ fn star_command(target: &str, json: bool) -> ExitCode {
                 ci: pr.ci_on_head.clone(),
             }),
         job,
+    })
+}
+
+/// The star as `star --json` prints it.
+fn star_json(star: &Star) -> Value {
+    let job = match &star.job {
+        Some(job) => json!(job),
+        None => json!(NOT_RECORDED),
     };
-    if json {
-        let job = match &star.job {
-            Some(job) => json!(job),
-            None => json!(NOT_RECORDED),
-        };
-        print_json(
-            "star",
-            serde_json::to_string_pretty(&json!({
-                "repo": star.repo,
-                "number": star.number,
-                "title": star.title,
-                "state": star.state,
-                "labels": star.labels,
-                "size": star.size,
-                "pr": star.pr.as_ref().map(|pr| json!({
-                    "number": pr.number,
-                    "state": pr.state,
-                    "review": pr.review,
-                    "ci": pr.ci,
-                })),
-                "job": job,
-            })),
-        )
-    } else {
-        print!("{}", star_text(&star));
-        ExitCode::SUCCESS
-    }
+    json!({
+        "repo": star.repo,
+        "number": star.number,
+        "title": star.title,
+        "state": star.state,
+        "labels": star.labels,
+        "size": star.size,
+        "pr": star.pr.as_ref().map(|pr| json!({
+            "number": pr.number,
+            "state": pr.state,
+            "review": pr.review,
+            "ci": pr.ci,
+        })),
+        "job": job,
+    })
+}
+
+/// MCP-1: the star as `star --json` prints it.
+pub(crate) fn star_answer(data: &Path, target: &str) -> Result<Value, Fail> {
+    star_facts(data, target).map(|star| star_json(&star))
+}
+
+/// MCP-1: the reports as `reports --json` prints them, unfiltered, read the way the app reads
+/// them.
+pub(crate) fn reports_answer() -> Result<Vec<Report>, Fail> {
+    let root = pipeline_or_fail()?;
+    let env = std::env::var_os(reports::FLEET_STATE_DIR_ENV);
+    reports::load(&FleetBridge::new(&root), env.as_deref(), &[], None)
+        .map_err(|e| fail(1, format!("switchboard reports: {e}")))
 }
 
 /// One fact per line, the issue first.
