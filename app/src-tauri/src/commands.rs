@@ -12,6 +12,8 @@ use switchboard_core::it::{self, Loadout, ProbeRunner};
 use switchboard_core::platform::{current_os, loadout_probes, Probe};
 use switchboard_core::reports::{self, thread_rows, Filter, Report, FLEET_STATE_DIR_ENV};
 use switchboard_core::settings::{self, Settings};
+// The test modules (`confirm_guarded_tests.rs`, `pool_edit_tests.rs`) take it in through `super::*`.
+#[cfg(test)]
 use switchboard_core::waiting::LocalItems;
 use switchboard_core::CoreError;
 use tauri::Manager;
@@ -375,16 +377,28 @@ pub fn budget_save_edit(
         .map_err(|e| CoreError::Io(format!("app data dir: {e}")))
         .and_then(|data| {
             let fleet = bridge(&state.settings_path)?;
-            let saved =
-                budget::save_edit(&fleet, &edit, &data.join("pool-edits.jsonl"), &SystemClock)?;
-            LocalItems::new(&data).add(saved.waiting)?;
-            Ok(saved.rows)
+            save_pool_edit_rows(&fleet, &edit, &data, &SystemClock)
         })
         .map_err(|e| {
             record_fleet_error(&state, &e);
             FaceError::new("budget_save_edit", &e)
         })
 }
+
+/// BUD-2 (#340): the Budget panel's save through `budget::save_pool_edit`, the same as the CLI
+/// and MCP: file, ledger row and Waiting item all or nothing; the rows read again.
+pub fn save_pool_edit_rows(
+    fleet: &FleetBridge,
+    edit: &PoolEdit,
+    data: &Path,
+    clock: &dyn Clock,
+) -> Result<Vec<PoolRow>, CoreError> {
+    budget::save_pool_edit(fleet, edit, data, clock).map(|saved| saved.rows)
+}
+
+#[cfg(test)]
+#[path = "pool_edit_tests.rs"]
+mod pool_edit_tests;
 
 /// REP-1, REP-3: the reports, newest first, narrowed by `filter` when the face sends one.
 /// The chat threads join from the thread store in the app data folder (REP follow-up, #286).

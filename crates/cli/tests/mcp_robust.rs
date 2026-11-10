@@ -23,7 +23,10 @@ impl WriteCore for NoWrites {
     fn merge(&self, _: &str, _: u64) -> Result<(), String> {
         panic!("a bad call must not reach the write core")
     }
-    fn set_pool_cap(&self, _: &str, _: f64) -> Result<(), String> {
+    fn pool_edit(&self, _: &str, _: &switchboard_core::budget::PoolEdit) -> Result<String, String> {
+        panic!("a bad call must not reach the write core")
+    }
+    fn budget_refresh(&self) -> Result<Value, String> {
         panic!("a bad call must not reach the write core")
     }
     fn waiting(&self, _: &str) -> Result<(), String> {
