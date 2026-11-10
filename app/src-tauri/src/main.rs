@@ -22,8 +22,9 @@ const TICK_EVERY: Duration = Duration::from_secs(60);
 /// AUTO-6: how often the satellite's lanes are checked. A loop that ended frees its lane.
 const SATELLITE_EVERY: Duration = Duration::from_secs(60);
 
-/// AUTO-6: the satellite thread. Each pass reads `satellite.json` (off when missing), starts
-/// the lanes `driver::tick` allows, and classes the failed cards of loops that ended (AUTO-9).
+/// AUTO-6: the satellite thread. Each pass reads `satellite.json` (off when missing), records a
+/// fleet error for each loop that ended with an error (CORE-2), classes the failed cards of
+/// loops that ended (AUTO-9), and starts the lanes `driver::tick` allows.
 fn satellite_loop(handle: tauri::AppHandle, config_dir: std::path::PathBuf) {
     let data = handle
         .path()
@@ -38,9 +39,16 @@ fn satellite_loop(handle: tauri::AppHandle, config_dir: std::path::PathBuf) {
                     let runner = runner.get_or_insert_with(|| {
                         driver::ChildRunner::new(fleet.clone(), &data.join("satellite"))
                     });
-                    for (lane, stdout) in runner.take_finished() {
+                    for end in runner.take_finished() {
+                        // CORE-2 (#383): a loop that ended with an error is a fleet error with its
+                        // exit code and stderr; the runner holds its lane for a while.
+                        if let Some(e) = end.fleet_error() {
+                            commands::record_fleet_error(&state, &e);
+                            eprintln!("satellite {}: {e}", end.lane);
+                        }
+                        let lane = end.lane;
                         let dir = data.join("satellite").join("cards").join(&lane);
-                        match driver::classify_failed(&fleet, &dir, &stdout) {
+                        match driver::classify_failed(&fleet, &dir, &end.stdout) {
                             Ok(classes) => {
                                 for (id, class) in classes {
                                     eprintln!("satellite {lane}: {id} {class:?}");

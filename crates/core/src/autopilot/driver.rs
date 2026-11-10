@@ -3,12 +3,13 @@
 //! AUTO-9's `classify`.
 
 use super::classify::{classify, FailureClass};
-use crate::fleet::{FleetBridge, FLEET_ROOT_ENV};
+use crate::fleet::{FleetBridge, FleetError, FleetErrorReason, FLEET_ROOT_ENV};
 use crate::CoreError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
 /// The lanes the fleet knows. A lane in the satellite file that is not here is skipped.
 pub const FLEET_LANES: [&str; 5] = ["chatgpt", "claudeapi", "deepseek", "gemini", "qwen"];
@@ -82,10 +83,16 @@ pub fn next_command(lane: &str) -> Vec<String> {
 pub trait LaneRunner {
     fn running(&mut self) -> Vec<String>;
     fn start(&mut self, lane: &str) -> Result<(), CoreError>;
+    /// The lanes not to start now: a loop that ended with an error holds its lane for a while
+    /// (`ChildRunner`, #383) instead of being started again at the next tick. None by default.
+    fn held(&mut self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// One pass of the satellite: with the switch on, start one loop for each configured lane that
-/// `may_start` allows and the budget (`may_spend`, AUTO-1) allows. Returns the lanes started.
+/// is not held (`LaneRunner::held`), that `may_start` allows and the budget (`may_spend`, AUTO-1)
+/// allows. Returns the lanes started.
 /// The first error stops the pass; the lanes already started stay started.
 pub fn tick(
     config: &SatelliteConfig,
@@ -97,8 +104,12 @@ pub fn tick(
         return Ok(started);
     }
     let mut running = runner.running();
+    let held = runner.held();
     for lane in &config.lanes {
-        if !FLEET_LANES.contains(&lane.as_str()) || !may_start(&running, lane) {
+        if !FLEET_LANES.contains(&lane.as_str())
+            || held.contains(lane)
+            || !may_start(&running, lane)
+        {
             continue;
         }
         if !may_spend(lane.as_str())? {
@@ -168,42 +179,105 @@ pub fn classify_failed(
     Ok(classes)
 }
 
+/// How long a lane whose loop ended with an error waits before it is started again: 10 minutes
+/// (ten satellite ticks), so a loop that dies at once is not restarted every tick (#383).
+pub const FAILED_LOOP_HOLD: Duration = Duration::from_secs(600);
+
+/// One loop that has ended: its lane, its stdout, and how it ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoopEnd {
+    pub lane: String,
+    /// The command line it ran, program first.
+    pub command: Vec<String>,
+    pub stdout: String,
+    /// The exit code; `None` when it was killed by a signal or its status could not be read.
+    pub exit_code: Option<i32>,
+    pub stderr: String,
+}
+
+impl LoopEnd {
+    /// Did the loop end with an error: a non-zero exit, a signal, or no status?
+    pub fn failed(&self) -> bool {
+        self.exit_code != Some(0)
+    }
+
+    /// CORE-2: the fleet error of a loop that failed, with its command, exit code and stderr;
+    /// `None` for a loop that exited 0.
+    pub fn fleet_error(&self) -> Option<CoreError> {
+        self.failed().then(|| {
+            CoreError::Fleet(FleetError {
+                command: self.command.clone(),
+                exit_code: self.exit_code,
+                stderr: self.stderr.clone(),
+                reason: FleetErrorReason::Exit,
+            })
+        })
+    }
+}
+
 /// The app's runner: each lane's loop is a child process (the bridge's command line for
-/// `run_args`, `FLEET_ROOT` set), its stdout written to `<out_dir>/<lane>.out`.
+/// `run_args`, `FLEET_ROOT` set), its stdout written to `<out_dir>/<lane>.out` and its stderr to
+/// `<out_dir>/<lane>.err`. A loop that ended with an error holds its lane for `hold`.
 pub struct ChildRunner {
     fleet: FleetBridge,
     out_dir: PathBuf,
-    children: Vec<(String, Child)>,
-    finished: Vec<(String, String)>,
+    hold: Duration,
+    children: Vec<(String, Vec<String>, Child)>,
+    finished: Vec<LoopEnd>,
+    held: Vec<(String, Instant)>,
 }
 
 impl ChildRunner {
     pub fn new(fleet: FleetBridge, out_dir: &Path) -> Self {
+        Self::with_hold(fleet, out_dir, FAILED_LOOP_HOLD)
+    }
+
+    /// `new` with the hold after a failed loop given (a test's is short).
+    pub fn with_hold(fleet: FleetBridge, out_dir: &Path, hold: Duration) -> Self {
         ChildRunner {
             fleet,
             out_dir: out_dir.to_path_buf(),
+            hold,
             children: Vec::new(),
             finished: Vec::new(),
+            held: Vec::new(),
         }
     }
 
-    /// (lane, stdout) of each loop that has ended since the last call, oldest first.
-    pub fn take_finished(&mut self) -> Vec<(String, String)> {
+    /// Each loop that has ended since the last call, oldest first.
+    pub fn take_finished(&mut self) -> Vec<LoopEnd> {
         self.reap();
         std::mem::take(&mut self.finished)
     }
 
     fn reap(&mut self) {
         let mut still = Vec::new();
-        for (lane, mut child) in std::mem::take(&mut self.children) {
-            match child.try_wait() {
-                Ok(None) => still.push((lane, child)),
-                _ => {
-                    let out = self.out_dir.join(format!("{lane}.out"));
-                    let text = std::fs::read_to_string(out).unwrap_or_default();
-                    self.finished.push((lane, text));
+        for (lane, command, mut child) in std::mem::take(&mut self.children) {
+            let status = match child.try_wait() {
+                Ok(None) => {
+                    still.push((lane, command, child));
+                    continue;
                 }
+                Ok(Some(status)) => status.code(),
+                Err(_) => None,
+            };
+            let read = |ext: &str| {
+                std::fs::read_to_string(self.out_dir.join(format!("{lane}.{ext}")))
+                    .unwrap_or_default()
+            };
+            let end = LoopEnd {
+                stdout: read("out"),
+                stderr: read("err"),
+                exit_code: status,
+                command,
+                lane,
+            };
+            if end.failed() {
+                self.held.retain(|(l, _)| *l != end.lane);
+                self.held
+                    .push((end.lane.clone(), Instant::now() + self.hold));
             }
+            self.finished.push(end);
         }
         self.children = still;
     }
@@ -212,13 +286,21 @@ impl ChildRunner {
 impl LaneRunner for ChildRunner {
     fn running(&mut self) -> Vec<String> {
         self.reap();
-        self.children.iter().map(|(l, _)| l.clone()).collect()
+        self.children.iter().map(|(l, _, _)| l.clone()).collect()
+    }
+
+    fn held(&mut self) -> Vec<String> {
+        self.reap();
+        let now = Instant::now();
+        self.held.retain(|(_, until)| *until > now);
+        self.held.iter().map(|(l, _)| l.clone()).collect()
     }
 
     fn start(&mut self, lane: &str) -> Result<(), CoreError> {
         let io = |e: std::io::Error| CoreError::Io(format!("{}: {e}", self.out_dir.display()));
         std::fs::create_dir_all(&self.out_dir).map_err(io)?;
         let out = std::fs::File::create(self.out_dir.join(format!("{lane}.out"))).map_err(io)?;
+        let err = std::fs::File::create(self.out_dir.join(format!("{lane}.err"))).map_err(io)?;
         let args = run_args(lane);
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         let command = self.fleet.command_line(&args);
@@ -227,10 +309,10 @@ impl LaneRunner for ChildRunner {
             .env(FLEET_ROOT_ENV, self.fleet.root())
             .stdin(Stdio::null())
             .stdout(Stdio::from(out))
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(err))
             .spawn()
             .map_err(io)?;
-        self.children.push((lane.to_string(), child));
+        self.children.push((lane.to_string(), command, child));
         Ok(())
     }
 }
