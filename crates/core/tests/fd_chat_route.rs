@@ -494,7 +494,7 @@ fn the_chat_route_command_is_a_thin_call_into_route_message() {
     let body = &commands[at..body_end];
     assert!(body.contains("message: String"), "{body}");
     assert!(body.contains("route_message("), "{body}");
-    assert!(body.contains("DEFAULT_COMPLEXITY"), "{body}");
+    assert!(body.contains("estimate_complexity(&message)"), "{body}");
     assert!(body.contains("FaceError::new(\"chat_route\""), "{body}");
     assert!(body.contains("record_fleet_error("), "{body}");
 }
@@ -512,7 +512,7 @@ fn the_code_map_marks_the_command_present() {
         .expect("a ### frontdoor section");
     assert!(
         section.contains(
-            "- FD-1 chat_route command (`ChatRoute`, `FleetGate`, `route_message`, `chat_route`): present."
+            "- FD-1 chat_route command (`ChatRoute`, `FleetGate`, `route_message`, `estimate_complexity`, `chat_route`): present."
         ),
         "{section}"
     );
