@@ -95,6 +95,7 @@ fn fleet_error(stderr: &str) -> FleetError {
         exit_code: Some(3),
         stderr: stderr.into(),
         reason: FleetErrorReason::Exit,
+        undo_note: None,
     }
 }
 

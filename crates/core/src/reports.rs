@@ -389,7 +389,8 @@ pub fn state_dir_from(pipeline_root: &Path, env: Option<&OsStr>, worktrees: &str
 }
 
 /// The done cards in `<state_dir>/jobs/done/`: the `.json` files whose names do not end
-/// `.job.json`, by path, each kept when it parses to a JSON object. A missing folder is no
+/// `.job.json`, by path, each kept when it is UTF-8 and parses to a JSON object (any other file
+/// is skipped and named on stderr). A missing folder is no
 /// cards; any other folder or file error is `CoreError::Io`.
 pub fn read_done_cards(state_dir: &Path) -> Result<Vec<Value>, CoreError> {
     let done = state_dir.join("jobs").join("done");
@@ -411,16 +412,36 @@ pub fn read_done_cards(state_dir: &Path) -> Result<Vec<Value>, CoreError> {
 
     let mut cards = Vec::new();
     for path in paths {
-        let text = std::fs::read_to_string(&path)
-            .map_err(|e| CoreError::Io(format!("{}: {e}", path.display())))?;
-        if let Some(card) = serde_json::from_str::<Value>(&text)
+        let bytes =
+            std::fs::read(&path).map_err(|e| CoreError::Io(format!("{}: {e}", path.display())))?;
+        // A file that is not UTF-8 is skipped like one that is not JSON (#349): it must not
+        // hide every other report. It is named on stderr.
+        let card = String::from_utf8(bytes)
             .ok()
-            .filter(Value::is_object)
-        {
-            cards.push(card);
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            .filter(Value::is_object);
+        match card {
+            Some(card) => cards.push(card),
+            None => eprintln!(
+                "reports: skipped an unreadable done card: {}",
+                path.display()
+            ),
         }
     }
     Ok(cards)
+}
+
+/// REP-1 (#348): each chat thread in the thread store under `data` (the folder
+/// `ThreadStore::new` takes), in the store's sorted id order. A missing store folder gives none.
+/// A thread that cannot be read is skipped, so the other threads still show.
+pub fn thread_rows(data: &Path) -> Vec<(String, Vec<JobRow>)> {
+    let store = crate::frontdoor::thread::ThreadStore::new(data);
+    store
+        .list()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|id| store.read(&id).ok().map(|rows| (id, rows)))
+        .collect()
 }
 
 /// The reports for the done cards, then the threads, newest first (the ones without a time

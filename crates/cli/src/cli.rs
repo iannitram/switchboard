@@ -59,7 +59,7 @@ const NO_REPORTS: &str = "no reports";
 /// The message when no snapshot has been written yet.
 const NO_SNAPSHOT: &str = "switchboard: no snapshot yet; run switchboard refresh";
 
-const USAGE: &str = "usage: switchboard [--help | --version] [--json] [--role <role>] \
+pub const USAGE: &str = "usage: switchboard [--help | --version] [--json] [--role <role>] \
                      [--project <repo>] [--outcome <o>] [--pool <p>] \
                      <sky | waiting | reports | budget | loadout | star <repo>#<n> | \
                      refresh | backup <repo> | backup --all | delete <repo> | restore <repo> | merge <repo>#<pr> | mcp>";
@@ -75,6 +75,13 @@ pub trait Writes {
     /// Whether Switchboard knows `repo` (a stored snapshot of `owner/name`, or a bare name).
     /// An error is the reason it cannot tell.
     fn knows_repo(&self, repo: &str) -> Result<bool, String>;
+    /// The `owner/name` that `repo` names among the repos Switchboard knows (#346): `Ok(None)`
+    /// when it knows none, an error when a bare name matches more than one owner or it cannot
+    /// tell. The default asks `knows_repo` and keeps `repo` as given.
+    fn full_repo(&self, repo: &str) -> Result<Option<String>, String> {
+        self.knows_repo(repo)
+            .map(|known| known.then(|| repo.to_string()))
+    }
 }
 
 /// Whether `repo` names one of `known` (each `owner/name`): the whole `owner/name`, or, when
@@ -83,6 +90,36 @@ pub fn repo_known(repo: &str, known: &[String]) -> bool {
     known
         .iter()
         .any(|full| full == repo || (!repo.contains('/') && full.rsplit('/').next() == Some(repo)))
+}
+
+/// #346: the one `owner/name` of `known` that `repo` names: the whole `owner/name`, or, when
+/// `repo` has no `/`, the only one whose name part it is. `Ok(None)` when none does; an error
+/// naming the matches when a bare name matches more than one owner.
+pub fn resolve_repo<'a>(
+    repo: &str,
+    known: impl IntoIterator<Item = &'a str>,
+) -> Result<Option<&'a str>, String> {
+    let known: Vec<&'a str> = known.into_iter().collect();
+    if let Some(full) = known.iter().find(|full| **full == repo) {
+        return Ok(Some(full));
+    }
+    if repo.contains('/') {
+        return Ok(None);
+    }
+    let mut matches: Vec<&'a str> = known
+        .into_iter()
+        .filter(|full| full.contains('/') && full.rsplit('/').next() == Some(repo))
+        .collect();
+    matches.sort_unstable();
+    matches.dedup();
+    match matches.as_slice() {
+        [] => Ok(None),
+        [one] => Ok(Some(one)),
+        many => Err(format!(
+            "{repo} matches {}; name it as <owner>/{repo}",
+            many.join(" and ")
+        )),
+    }
 }
 
 /// The real writes (CLI-3): a merge through GH-5 from the stored snapshot, and the Waiting on
@@ -106,7 +143,7 @@ impl CliWrites {
     pub fn from_env(in_job_worktree: bool) -> Self {
         Self {
             data: data_dir(),
-            pipeline: env_path(PIPELINE_ENV),
+            pipeline: pipeline_dir(),
             dev_root: env_path(DEV_ROOT_ENV)
                 .or_else(|| env_path("HOME").map(|home| default_dev_root(current_os(), &home))),
             in_job_worktree,
@@ -123,14 +160,9 @@ impl CliWrites {
             .ok_or("set SWITCHBOARD_DATA to the app data folder")?;
         let store = SnapshotStore::new(data);
         let snaps = readable_snapshots(&store, repo)?;
-        let snap = snaps
-            .iter()
-            .find(|snap| snap.repo == repo)
-            .or_else(|| {
-                snaps
-                    .iter()
-                    .find(|snap| snap.repo.ends_with(&format!("/{repo}")))
-            })
+        let full = resolve_repo(repo, snaps.iter().map(|snap| snap.repo.as_str()))?;
+        let snap = full
+            .and_then(|full| snaps.iter().find(|snap| snap.repo == full))
             .ok_or_else(|| format!("no snapshot of {repo}; run switchboard refresh"))?;
         let pull = snap
             .pulls
@@ -206,13 +238,18 @@ impl Writes for CliWrites {
 
     /// The repos of the stored snapshots, from the app data folder.
     fn knows_repo(&self, repo: &str) -> Result<bool, String> {
+        self.full_repo(repo).map(|full| full.is_some())
+    }
+
+    /// #346: `repo` resolved against the stored snapshots' `owner/name`s.
+    fn full_repo(&self, repo: &str) -> Result<Option<String>, String> {
         let data = self
             .data
             .as_deref()
             .ok_or("set SWITCHBOARD_DATA to the app data folder")?;
         let snaps = readable_snapshots(&SnapshotStore::new(data), repo)?;
-        let known: Vec<String> = snaps.into_iter().map(|snap| snap.repo).collect();
-        Ok(repo_known(repo, &known))
+        resolve_repo(repo, snaps.iter().map(|snap| snap.repo.as_str()))
+            .map(|full| full.map(str::to_string))
     }
 }
 
@@ -226,7 +263,10 @@ fn readable_snapshots(store: &SnapshotStore, repo: &str) -> Result<Vec<RepoSnaps
         .iter()
         .find(|file| repo_known(repo, std::slice::from_ref(&file.repo)))
     {
-        Some(file) => Err(format!("{}; run switchboard refresh", file.error)),
+        Some(file) => Err(format!(
+            "{}; run switchboard refresh",
+            terminal_safe(&file.error)
+        )),
         None => Ok(snaps),
     }
 }
@@ -285,14 +325,76 @@ pub fn run(argv: &[String]) -> ExitCode {
     )
 }
 
-/// The text to print for a first word that asks for help or the version, or `None` when the
-/// argv is a real command. Only the first word counts; the rest of the line is not read.
+/// The line `--version` prints.
+pub(crate) fn version_text() -> String {
+    format!("switchboard {}", env!("CARGO_PKG_VERSION"))
+}
+
+/// The text to print for a line that asks for help or the version, or `None` when the argv is a
+/// real command (#355): `--help`, `-h`, `--version` or `-V` anywhere on the line, or `help` as
+/// the first word. The first such word wins.
 fn early_answer(argv: &[String]) -> Option<String> {
-    match argv.first().map(String::as_str) {
-        Some("--help" | "-h" | "help") => Some(USAGE.to_string()),
-        Some("--version" | "-V") => Some(format!("switchboard {}", env!("CARGO_PKG_VERSION"))),
-        _ => None,
+    if argv.first().map(String::as_str) == Some("help") {
+        return Some(USAGE.to_string());
     }
+    argv.iter().find_map(|word| match word.as_str() {
+        "--help" | "-h" => Some(USAGE.to_string()),
+        "--version" | "-V" => Some(version_text()),
+        _ => None,
+    })
+}
+
+/// Write `text` to stdout (#334): exit 0 once it is written, and when the reader has closed the
+/// pipe (a quiet exit, nothing more to say); any other write error is one line on stderr and
+/// exit 1. Never a panic.
+pub(crate) fn emit(text: &str) -> ExitCode {
+    emit_to(&mut std::io::stdout().lock(), text)
+}
+
+/// `emit` over its seam: the writer stdout would be.
+pub fn emit_to(out: &mut dyn Write, text: &str) -> ExitCode {
+    match out.write_all(text.as_bytes()).and_then(|()| out.flush()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
+        Err(e) => {
+            let _ = writeln!(
+                std::io::stderr(),
+                "switchboard: cannot write the output: {e}"
+            );
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// #352: text from GitHub or the fleet made safe for one line of a terminal: each control
+/// character (an escape sequence's ESC, a newline, a tab, BEL) is written as its Rust escape
+/// (`\u{1b}`, `\n`), so a title can neither drive the terminal nor forge a row. `--json`
+/// already escapes them.
+pub fn terminal_safe(text: &str) -> String {
+    if !text.chars().any(char::is_control) {
+        return text.to_string();
+    }
+    text.chars()
+        .map(|c| {
+            if c.is_control() {
+                c.escape_default().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
+}
+
+/// #356: a command that takes no more words, given some: the usage error, exit 2.
+fn no_more_words(args: &super::Args) -> Option<ExitCode> {
+    let extra = args.command.get(1..).filter(|rest| !rest.is_empty())?;
+    let command = &args.command[0];
+    eprintln!(
+        "switchboard: {command} takes no other words, got {}",
+        extra.join(" ")
+    );
+    eprintln!("{USAGE}");
+    Some(ExitCode::from(2))
 }
 
 /// `run` with its seams passed in: the working directory, the time, the writes and stderr.
@@ -304,8 +406,7 @@ pub fn run_with(
     err: &mut dyn Write,
 ) -> ExitCode {
     if let Some(text) = early_answer(argv) {
-        println!("{text}");
-        return ExitCode::SUCCESS;
+        return emit(&format!("{text}\n"));
     }
     let (filter, argv) = match take_filter(argv) {
         Ok(taken) => taken,
@@ -339,6 +440,14 @@ pub fn run_with(
         eprintln!("switchboard: --all is for backup");
         eprintln!("{USAGE}");
         return ExitCode::from(2);
+    }
+    if matches!(
+        command,
+        Some("sky" | "waiting" | "reports" | "budget" | "loadout")
+    ) {
+        if let Some(code) = no_more_words(&args) {
+            return code;
+        }
     }
     match command {
         Some("refresh") => match args.command.get(1..) {
@@ -496,6 +605,13 @@ fn refresh_one(
 /// `--all`), the Back up buttons: the settings file in the app config folder and the real GitHub
 /// backup.
 fn run_backup(target: &[String]) -> ExitCode {
+    // A target that is not one repo or `--all` is the usage error before any folder or
+    // settings file is read.
+    if !matches!(target, [one] if one == "--all" || !one.starts_with("--")) {
+        eprintln!("switchboard: backup needs a repo or --all");
+        eprintln!("{USAGE}");
+        return ExitCode::from(2);
+    }
     let Some(data) = data_dir() else {
         eprintln!("switchboard: set {DATA_ENV} to the app data folder");
         return ExitCode::from(2);
@@ -596,6 +712,20 @@ fn write_command(
     err: &mut dyn Write,
 ) -> ExitCode {
     let command = args.command.first().map(String::as_str).unwrap_or_default();
+    if let Some(extra) = args.command.get(2..).filter(|rest| !rest.is_empty()) {
+        let what = if command == "merge" {
+            "one <repo>#<pr>"
+        } else {
+            "one repo"
+        };
+        let _ = writeln!(
+            err,
+            "switchboard: {command} takes {what}, got more: {}",
+            extra.join(" ")
+        );
+        let _ = writeln!(err, "{USAGE}");
+        return ExitCode::from(2);
+    }
     let action = match (command, args.command.get(1)) {
         ("merge", Some(target)) => match parse_target(target) {
             Some((repo, pr)) => GuardedAction::Merge { repo, pr },
@@ -612,27 +742,31 @@ fn write_command(
         }
     };
     // `delete` and `restore` of a repo Switchboard does not know write nothing (fail closed
-    // when it cannot tell).
-    if let GuardedAction::DeleteRepo { repo } | GuardedAction::RestoreOverLive { repo } = &action {
-        match writes.knows_repo(repo) {
-            Ok(true) => {}
-            Ok(false) => {
-                let _ = writeln!(err, "switchboard: no such repo: {repo}");
-                return ExitCode::from(1);
-            }
-            Err(e) => {
-                let _ = writeln!(err, "switchboard: {command}: {e}");
-                return ExitCode::from(1);
+    // when it cannot tell); a bare name is stored as the one `owner/name` it names (#346), so
+    // the item links to the repo and asking with either spelling keeps one item.
+    let mut action = action;
+    match &mut action {
+        GuardedAction::DeleteRepo { repo } | GuardedAction::RestoreOverLive { repo } => {
+            match writes.full_repo(repo) {
+                Ok(Some(full)) => *repo = full,
+                Ok(None) => {
+                    let _ = writeln!(err, "switchboard: no such repo: {repo}");
+                    return ExitCode::from(1);
+                }
+                Err(e) => {
+                    let _ = writeln!(err, "switchboard: {command}: {e}");
+                    return ExitCode::from(1);
+                }
             }
         }
+        // A merge never asks here: `Writes::merge` resolves the repo itself and refuses a bare
+        // name that matches more than one owner.
+        GuardedAction::Merge { .. } => {}
     }
     match rules::guard(&guard_for(args, cwd), &action) {
         Verdict::Allow => match &action {
             GuardedAction::Merge { repo, pr } => match writes.merge(repo, *pr) {
-                Ok(()) => {
-                    println!("merge {repo}#{pr}: done");
-                    ExitCode::SUCCESS
-                }
+                Ok(()) => emit(&format!("merge {repo}#{pr}: done\n")),
                 Err(text) => refuse(err, &text),
             },
             // The guard allows only a merge from the CLI (CORE-3).
@@ -762,9 +896,24 @@ fn config_dir_from(
     }
 }
 
-/// The pipeline checkout (`SWITCHBOARD_PIPELINE`), or `None` when unset.
+/// The pipeline checkout (#359): `SWITCHBOARD_PIPELINE`, else `pipeline_repo` in the app's
+/// `settings.json` (CORE-5, in the app config folder), else `None`. A settings file that cannot
+/// be read counts as naming none.
 pub(crate) fn pipeline_dir() -> Option<PathBuf> {
-    env_path(PIPELINE_ENV)
+    pipeline_setting().ok().flatten()
+}
+
+/// `pipeline_dir` with the reason a settings file could not be read.
+fn pipeline_setting() -> Result<Option<PathBuf>, String> {
+    if let Some(dir) = env_path(PIPELINE_ENV) {
+        return Ok(Some(dir));
+    }
+    let Some(config) = config_dir() else {
+        return Ok(None);
+    };
+    settings::load(&config.join("settings.json"))
+        .map(|settings| settings.pipeline_repo().ok().map(Path::to_path_buf))
+        .map_err(|e| e.to_string())
 }
 
 /// A read answer that failed: the line the command prints on stderr and its exit code. The MCP
@@ -792,12 +941,17 @@ fn exit_with(fail: Fail) -> ExitCode {
 
 /// The pipeline checkout, or the failure saying it is not set.
 fn pipeline_or_fail() -> Result<PathBuf, Fail> {
-    env_path(PIPELINE_ENV).ok_or_else(|| {
-        fail(
+    match pipeline_setting() {
+        Ok(Some(root)) => Ok(root),
+        Ok(None) => Err(fail(
             2,
-            format!("switchboard: set {PIPELINE_ENV} to your pipeline checkout"),
-        )
-    })
+            format!(
+                "switchboard: set {PIPELINE_ENV} to your pipeline checkout \
+                 (or pipeline_repo in settings.json)"
+            ),
+        )),
+        Err(e) => Err(fail(1, format!("switchboard: {e}"))),
+    }
 }
 
 /// The pipeline checkout, or the exit code after saying it is not set.
@@ -822,17 +976,10 @@ fn budget(json: bool) -> ExitCode {
         Err(fail) => return exit_with(fail),
     };
     if json {
-        match serde_json::to_string_pretty(&rows) {
-            Ok(text) => println!("{text}"),
-            Err(e) => {
-                eprintln!("switchboard budget: {e}");
-                return ExitCode::from(1);
-            }
-        }
+        print_json("budget", serde_json::to_string_pretty(&rows))
     } else {
-        print!("{}", budget_text(&rows));
+        emit(&budget_text(&rows))
     }
-    ExitCode::SUCCESS
 }
 
 /// MCP-1: the pool rows `budget` prints.
@@ -841,20 +988,33 @@ pub(crate) fn budget_rows() -> Result<Vec<PoolRow>, Fail> {
     budget::read(&FleetBridge::new(&root)).map_err(|e| fail(1, format!("switchboard budget: {e}")))
 }
 
-/// One line per pool, in row order: `<pool>: <pct>% vs pace <pace>%, <verdict>`.
+/// One line per pool, in row order, with what the budget panel shows (BUD-1, #361):
+/// `<pool>: <pct>% vs pace <pace>%, <+d.d> pts, <verdict>, <age> min old`, and `, stale` when
+/// fleet calls the reading stale.
 fn budget_text(rows: &[PoolRow]) -> String {
     let percent = |value: Option<f64>| match value {
         Some(v) => format!("{v}%"),
         None => NOT_RECORDED.to_string(),
     };
+    let points = |value: Option<f64>| match value {
+        Some(v) if v >= 0.0 => format!("+{v:.1} pts"),
+        Some(v) => format!("{v:.1} pts"),
+        None => format!("pts {NOT_RECORDED}"),
+    };
     rows.iter()
         .map(|row| {
+            let age = match row.reading_age_min {
+                Some(min) => format!("{min} min old"),
+                None => format!("age {NOT_RECORDED}"),
+            };
             format!(
-                "{}: {} vs pace {}, {}\n",
-                row.pool,
+                "{}: {} vs pace {}, {}, {}, {age}{}\n",
+                terminal_safe(&row.pool),
                 percent(row.pct),
                 percent(row.pace),
-                row.verdict
+                points(row.delta),
+                terminal_safe(&row.verdict),
+                if row.stale { ", stale" } else { "" }
             )
         })
         .collect()
@@ -880,7 +1040,7 @@ fn warn_unreadable(command: &str, bad: &[switchboard_core::github::snapshot::Unr
     for file in bad {
         eprintln!(
             "switchboard {command}: {}; skipped, run switchboard refresh",
-            file.error
+            terminal_safe(&file.error)
         );
     }
 }
@@ -896,8 +1056,7 @@ fn waiting(json: bool) -> ExitCode {
     if json {
         return print_json("waiting", serde_json::to_string_pretty(&items));
     }
-    print!("{}", waiting_text(&items));
-    ExitCode::SUCCESS
+    emit(&waiting_text(&items))
 }
 
 /// MCP-1: the items `waiting` prints, newest first.
@@ -930,7 +1089,10 @@ fn waiting_text(items: &[waiting::Item]) -> String {
         .map(|item| {
             format!(
                 "{} | {} | {} | {}\n",
-                item.what, item.why, item.action, item.link
+                terminal_safe(&item.what),
+                terminal_safe(&item.why),
+                terminal_safe(&item.action),
+                terminal_safe(&item.link)
             )
         })
         .collect()
@@ -944,7 +1106,7 @@ fn reports(json: bool, filter: &Filter) -> ExitCode {
         Err(code) => return code,
     };
     let state = std::env::var_os(reports::FLEET_STATE_DIR_ENV);
-    let shown = match load_reports(&root, state.as_deref(), filter) {
+    let shown = match load_reports(&root, state.as_deref(), data_dir().as_deref(), filter) {
         Ok(shown) => shown,
         Err(e) => {
             eprintln!("switchboard reports: {e}");
@@ -955,8 +1117,7 @@ fn reports(json: bool, filter: &Filter) -> ExitCode {
         return print_json("reports", serde_json::to_string_pretty(&shown));
     }
     let refs: Vec<&Report> = shown.iter().collect();
-    print!("{}", reports_text(&refs));
-    ExitCode::SUCCESS
+    emit(&reports_text(&refs))
 }
 
 /// The reports on disk for the pipeline checkout at `root`, newest first, narrowed by `filter`.
@@ -964,37 +1125,87 @@ fn reports(json: bool, filter: &Filter) -> ExitCode {
 fn load_reports(
     root: &Path,
     state: Option<&std::ffi::OsStr>,
+    data: Option<&Path>,
     filter: &Filter,
 ) -> Result<Vec<Report>, CoreError> {
-    reports::load(&FleetBridge::new(root), state, &[], Some(filter))
+    let threads = data.map(reports::thread_rows).unwrap_or_default();
+    reports::load(&FleetBridge::new(root), state, &threads, Some(filter))
 }
 
-/// One line per report, in list order: `<title> | <outcome> | <project>`; no reports gives the
-/// no-reports line.
+/// Each report in list order with the five parts the Reports view shows (REP-1, #361): the head
+/// line `<title> | <outcome> | <project>` (outcome as `<outcome> (<failure mode>)` when there is
+/// one), then indented lines for what changed, what was checked, what wasn't and cost. An empty
+/// list says `nothing`. No reports gives the no-reports line.
 fn reports_text(reports: &[&reports::Report]) -> String {
     if reports.is_empty() {
         return format!("{NO_REPORTS}\n");
     }
-    reports
-        .iter()
-        .map(|report| {
-            format!(
-                "{} | {} | {}\n",
-                joblog::shown(&report.title),
-                report.outcome,
-                joblog::shown(&report.project)
-            )
-        })
-        .collect()
+    reports.iter().map(|report| report_text(report)).collect()
+}
+
+/// One report as `reports_text` prints it.
+fn report_text(report: &Report) -> String {
+    let or_not = |value: Option<String>, what: &str| {
+        value.unwrap_or_else(|| format!("{what} {NOT_RECORDED}"))
+    };
+    let outcome = match &report.failure_mode {
+        Some(mode) => format!("{} ({mode})", report.outcome),
+        None => report.outcome.clone(),
+    };
+    let mut text = format!(
+        "{} | {} | {}\n",
+        terminal_safe(&joblog::shown(&report.title)),
+        terminal_safe(&outcome),
+        terminal_safe(&joblog::shown(&report.project))
+    );
+    let changed = &report.changed;
+    text.push_str(&format!(
+        "  changed: {}, {}, {}\n",
+        changed
+            .pr
+            .as_deref()
+            .map_or("no PR".to_string(), terminal_safe),
+        or_not(changed.files.map(|n| format!("files {n}")), "files"),
+        or_not(changed.lines.map(|n| format!("lines {n}")), "lines"),
+    ));
+    for (part, lines) in [
+        ("checked", &report.checked),
+        ("not checked", &report.not_checked),
+    ] {
+        if lines.is_empty() {
+            text.push_str(&format!("  {part}: nothing\n"));
+        } else {
+            text.push_str(&format!("  {part}:\n"));
+            for line in lines {
+                text.push_str(&format!("    {}\n", terminal_safe(line)));
+            }
+        }
+    }
+    let cost = &report.cost;
+    text.push_str(&format!(
+        "  cost: {}, {}, {}, {}\n",
+        or_not(cost.pool.as_deref().map(terminal_safe), "pool"),
+        or_not(cost.tokens.map(|n| format!("{n} tokens")), "tokens"),
+        or_not(cost.usd.map(|usd| format!("${usd:.2}")), "cost"),
+        or_not(cost.seconds.map(duration), "time"),
+    ));
+    text
+}
+
+/// Seconds, rounded to the second, as the Reports view writes them: `45s`, `15m 31s`, `1h 2m`.
+fn duration(seconds: f64) -> String {
+    let total = seconds.round().max(0.0) as u64;
+    match total {
+        0..=59 => format!("{total}s"),
+        60..=3599 => format!("{}m {}s", total / 60, total % 60),
+        _ => format!("{}h {}m", total / 3600, (total % 3600) / 60),
+    }
 }
 
 /// Print the JSON on stdout; a failure is named by `command` on stderr, exit 1.
 fn print_json(command: &str, json: serde_json::Result<String>) -> ExitCode {
     match json {
-        Ok(text) => {
-            println!("{text}");
-            ExitCode::SUCCESS
-        }
+        Ok(text) => emit(&format!("{text}\n")),
         Err(e) => {
             eprintln!("switchboard {command}: {e}");
             ExitCode::from(1)
@@ -1022,8 +1233,7 @@ fn sky_command(json: bool) -> ExitCode {
     if json {
         print_json("sky", serde_json::to_string_pretty(&sky_json(&rows)))
     } else {
-        print!("{}", sky_text(&rows));
-        ExitCode::SUCCESS
+        emit(&sky_text(&rows))
     }
 }
 
@@ -1081,17 +1291,9 @@ pub(crate) fn sky_answer(data: &Path) -> Result<Value, Fail> {
 /// `owner/name` or the bare name.
 pub(crate) fn constellation_answer(data: &Path, repo: &str) -> Result<Value, Fail> {
     let (model, _) = sky_model(data)?;
-    let suffix = format!("/{repo}");
-    let found = model
-        .constellations
-        .iter()
-        .find(|c| c.repo == repo)
-        .or_else(|| {
-            model
-                .constellations
-                .iter()
-                .find(|c| c.repo.ends_with(suffix.as_str()))
-        });
+    let full = resolve_repo(repo, model.constellations.iter().map(|c| c.repo.as_str()))
+        .map_err(|e| fail(1, format!("switchboard: {e}")))?;
+    let found = full.and_then(|full| model.constellations.iter().find(|c| c.repo == full));
     match found {
         Some(c) => {
             serde_json::to_value(c).map_err(|e| fail(1, format!("switchboard constellation: {e}")))
@@ -1108,7 +1310,10 @@ fn sky_text(rows: &[SkyRow]) -> String {
         .map(|row| {
             format!(
                 "{}: brightness {:.2}, {} open, {} drifted\n",
-                row.repo, row.brightness, row.open, row.drifted
+                terminal_safe(&row.repo),
+                row.brightness,
+                row.open,
+                row.drifted
             )
         })
         .collect();
@@ -1152,8 +1357,7 @@ fn star_command(target: &str, json: bool) -> ExitCode {
     if json {
         print_json("star", serde_json::to_string_pretty(&star_json(&star)))
     } else {
-        print!("{}", star_text(&star));
-        ExitCode::SUCCESS
+        emit(&star_text(&star))
     }
 }
 
@@ -1170,11 +1374,9 @@ fn star_facts(data: &Path, target: &str) -> Result<Star, Fail> {
         ));
     };
     let snaps = snapshots("star", data)?;
-    let suffix = format!("/{repo}");
-    let snap = snaps
-        .iter()
-        .find(|s| s.repo == repo)
-        .or_else(|| snaps.iter().find(|s| s.repo.ends_with(suffix.as_str())));
+    let full = resolve_repo(repo, snaps.iter().map(|s| s.repo.as_str()))
+        .map_err(|e| fail(1, format!("switchboard: {e}")))?;
+    let snap = full.and_then(|full| snaps.iter().find(|s| s.repo == full));
     let Some((snap, issue)) =
         snap.and_then(|s| Some((s, s.issues.iter().find(|i| i.number == number)?)))
     else {
@@ -1240,23 +1442,26 @@ pub(crate) fn star_answer(data: &Path, target: &str) -> Result<Value, Fail> {
 pub(crate) fn reports_answer() -> Result<Vec<Report>, Fail> {
     let root = pipeline_or_fail()?;
     let env = std::env::var_os(reports::FLEET_STATE_DIR_ENV);
-    reports::load(&FleetBridge::new(&root), env.as_deref(), &[], None)
+    let threads = data_dir()
+        .map(|d| reports::thread_rows(&d))
+        .unwrap_or_default();
+    reports::load(&FleetBridge::new(&root), env.as_deref(), &threads, None)
         .map_err(|e| fail(1, format!("switchboard reports: {e}")))
 }
 
 /// One fact per line, the issue first.
 fn star_text(star: &Star) -> String {
-    let or_none = |value: Option<&str>| value.unwrap_or("none").to_string();
+    let or_none = |value: Option<&str>| terminal_safe(value.unwrap_or("none"));
     let labels = if star.labels.is_empty() {
         "none".to_string()
     } else {
-        star.labels.join(", ")
+        terminal_safe(&star.labels.join(", "))
     };
     let (pr, review, ci) = match &star.pr {
         Some(pr) => (
-            format!("#{} {}", pr.number, pr.state),
+            format!("#{} {}", pr.number, terminal_safe(&pr.state)),
             or_none(pr.review.as_deref()),
-            pr.ci.clone(),
+            terminal_safe(&pr.ci),
         ),
         None => ("none".to_string(), "none".to_string(), "none".to_string()),
     };
@@ -1266,19 +1471,20 @@ fn star_text(star: &Star) -> String {
     };
     format!(
         "{}#{}: {}\nstate: {}\nlabels: {labels}\nsize: {}\npr: {pr}\nreview: {review}\nci: {ci}\njob: {job}\n",
-        star.repo,
+        terminal_safe(&star.repo),
         star.number,
-        star.title,
-        star.state,
+        terminal_safe(&star.title),
+        terminal_safe(&star.state),
         or_none(star.size.as_deref()),
     )
 }
 
-/// The fleet ledger's events; `Ok(None)` when the pipeline checkout is not set.
+/// The fleet ledger's events; `Ok(None)` when the pipeline checkout is not set
+/// (`pipeline_dir`: `SWITCHBOARD_PIPELINE`, else `pipeline_repo` in settings.json, #359).
 /// The fleet state folder is `SWITCHBOARD_STATE` when set, else the one `reports` and the app
 /// read (`reports::state_dir`: `FLEET_STATE_DIR`, then the pipeline checkout's rule).
 fn ledger_events() -> Result<Option<Vec<Value>>, String> {
-    let Some(pipeline) = env_path(PIPELINE_ENV) else {
+    let Some(pipeline) = pipeline_dir() else {
         return Ok(None);
     };
     let state = env_path(STATE_ENV).unwrap_or_else(|| {
@@ -1364,11 +1570,8 @@ pub fn loadout_command(loadout: &Loadout, json: bool, out: &mut dyn Write) -> Ex
     } else {
         loadout_text(loadout)
     };
-    if let Err(e) = out.write_all(text.as_bytes()) {
-        eprintln!("switchboard loadout: {e}");
-        return ExitCode::from(1);
-    }
-    ExitCode::SUCCESS
+    // #334: a closed pipe is a quiet exit, like every other command.
+    emit_to(out, &text)
 }
 
 /// One line per probe, in the Loadout panel's order: `<name>  <state>`, then `  <detail>` when
@@ -1408,7 +1611,8 @@ pub fn loadout_text(loadout: &Loadout) -> String {
     } else {
         "no models loaded".to_string()
     };
-    let models = loadout.models_loaded.join(", ");
+    // #352: model names and fleet errors are outside text, escaped like the rest.
+    let models = terminal_safe(&loadout.models_loaded.join(", "));
     rows.push(row("llama-swap", &loaded_state, models));
     let status = if loadout.busy { "busy" } else { "idle" };
     rows.push(row("fleet status", status, String::new()));
@@ -1418,7 +1622,7 @@ pub fn loadout_text(loadout: &Loadout) -> String {
     } else {
         "none".to_string()
     };
-    let error_list = loadout.recent_errors.join("; ");
+    let error_list = terminal_safe(&loadout.recent_errors.join("; "));
     rows.push(row("fleet errors", &errors_state, error_list));
     rows.into_iter()
         .map(|(name, state, detail)| {
@@ -1457,7 +1661,8 @@ mod load_reports_tests {
         )
         .unwrap();
 
-        let found = load_reports(&pipeline, Some(state.as_os_str()), &Filter::default()).unwrap();
+        let found =
+            load_reports(&pipeline, Some(state.as_os_str()), None, &Filter::default()).unwrap();
         let _ = std::fs::remove_dir_all(&base);
 
         assert_eq!(found.len(), 1);

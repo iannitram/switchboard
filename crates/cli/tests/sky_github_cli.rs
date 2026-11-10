@@ -93,6 +93,7 @@ fn command(data: &Path, ledger: Option<&(PathBuf, PathBuf)>) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_switchboard"));
     cmd.env("SWITCHBOARD_DATA", data)
         .env_remove("SWITCHBOARD_PIPELINE")
+        .env_remove("SWITCHBOARD_CONFIG")
         .env_remove("FLEET_STATE_DIR")
         .env("SWITCHBOARD_STATE", data.join("no-fleet-state"));
     if let Some((pipeline, state)) = ledger {
@@ -190,6 +191,39 @@ fn star_and_the_mcp_constellation_agree_on_the_job_in_flight() {
     assert_eq!(star["number"], json!(3), "{c}");
     assert_eq!(star["inFlight"], json!(true));
     assert_eq!(star["job"], json!("qwen q3 on m1, attempt 2"));
+}
+
+#[test]
+fn the_job_in_flight_is_found_through_pipeline_repo_in_the_settings() {
+    // #359 with #343: no SWITCHBOARD_PIPELINE, the pipeline checkout named by `pipeline_repo`
+    // in settings.json (the config folder is the data folder here), the state folder from
+    // SWITCHBOARD_STATE.
+    let data = data_with_alpha("settings-pipeline");
+    let (pipeline, state) = ledger("settings-pipeline");
+    std::fs::write(
+        data.join("settings.json"),
+        json!({ "pipeline_repo": pipeline }).to_string(),
+    )
+    .unwrap();
+    let with_state = |cmd: &mut Command| {
+        cmd.env("SWITCHBOARD_STATE", &state);
+    };
+
+    let mut cmd = command(&data, None);
+    with_state(&mut cmd);
+    let out = cmd.args(["star", "alpha#3"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert!(
+        stdout(&out).contains("job: qwen q3 on m1, attempt 2\n"),
+        "{}",
+        stdout(&out)
+    );
+
+    let mut cmd = command(&data, None);
+    with_state(&mut cmd);
+    let out = cmd.args(["--json", "star", "alpha#3"]).output().unwrap();
+    let star: Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(star["job"], json!("qwen q3 on m1, attempt 2"), "{star}");
 }
 
 // --- #344: a stale priority copy is waiting on me ---
