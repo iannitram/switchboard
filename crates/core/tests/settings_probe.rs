@@ -37,21 +37,34 @@ fn a_failed_save_leaves_the_old_file_in_place() {
         ..Settings::default()
     };
     save(&p, &old).unwrap();
-    // A folder that cannot be written to blocks the temp-file write, so the save must fail.
-    // (Each save has a temp name of its own since #371, so a folder at one name no longer
-    // blocks it.)
-    let mut perms = std::fs::metadata(&d).unwrap().permissions();
-    perms.set_readonly(true);
-    std::fs::set_permissions(&d, perms.clone()).unwrap();
+    // A read-only folder blocks the temp-file write (Linux, macOS), and a read-only settings
+    // file blocks the rename over it (Windows ignores a folder's read-only flag), so the save
+    // must fail either way. (Each save has a temp name of its own since #371, so a folder at
+    // one name no longer blocks it.)
+    let lock = |path: &Path, on: bool| {
+        let mut perms = std::fs::metadata(path).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(on);
+        std::fs::set_permissions(path, perms).unwrap();
+    };
+    lock(&p, true);
+    lock(&d, true);
     let new = Settings {
         pipeline_repo: Some(PathBuf::from("/srv/new")),
         ..Settings::default()
     };
     let saved = save(&p, &new);
-    #[allow(clippy::permissions_set_readonly_false)]
-    perms.set_readonly(false);
-    std::fs::set_permissions(&d, perms).unwrap();
+    lock(&d, false);
+    lock(&p, false);
     assert!(matches!(saved, Err(CoreError::Io(_))), "{saved:?}");
+    // The failed save left no temp file behind.
+    let leftovers: Vec<_> = std::fs::read_dir(&d)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".tmp"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
     assert_eq!(load(&p), Ok(old));
 }
 

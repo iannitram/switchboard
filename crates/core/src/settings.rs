@@ -81,7 +81,11 @@ pub fn save(path: &Path, settings: &Settings) -> Result<(), CoreError> {
     let text =
         serde_json::to_string_pretty(settings).map_err(|e| CoreError::Parse(format!("{e}")))?;
     let tmp = temp_path(path);
-    std::fs::write(&tmp, text).map_err(|e| CoreError::Io(format!("{}: {e}", tmp.display())))?;
+    std::fs::write(&tmp, text).map_err(|e| {
+        // A write that failed part way may have left the temp file.
+        let _ = std::fs::remove_file(&tmp);
+        CoreError::Io(format!("{}: {e}", tmp.display()))
+    })?;
     std::fs::rename(&tmp, path).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
         CoreError::Io(format!("{}: {e}", path.display()))
