@@ -6,13 +6,22 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use switchboard_core::backup::{
-    restore_history_from, write_json, RecordedAnswers, Remote, RestoreReport,
+    restore_history_from, write_json, FileSource, RecordedAnswers, Remote, RestoreReport,
 };
 use switchboard_core::fleet::FleetBridge;
 use switchboard_core::github::transport::{Recorded, RestAnswer};
 use switchboard_core::CoreError;
 
 const NEW: &str = "owner/restored";
+
+/// No test here has a release file to fetch.
+struct NoFiles;
+
+impl FileSource for NoFiles {
+    fn fetch(&self, url: &str) -> Result<Vec<u8>, CoreError> {
+        Err(CoreError::GitHub(format!("GET {url}: not expected")))
+    }
+}
 
 /// A fixture `fleet ghq`: logs each call, keeps every batch item in `items.json`, and answers
 /// `status` with counts: a repo named in `taken` is `exists`, an item whose kind is in `fail` is
@@ -168,6 +177,7 @@ fn remote<'a>(f: &Fixture, api: &'a Recorded) -> Remote<'a> {
         git_base: f.server.to_string_lossy().into_owned(),
         git_config: Vec::new(),
         api,
+        files: &NoFiles,
     }
 }
 
@@ -195,7 +205,8 @@ fn a_restore_makes_a_private_repo_with_every_ref_and_the_manifest_counts() {
         RestoreReport {
             refs: 3,
             labels: 2,
-            milestones: 1
+            milestones: 1,
+            ..RestoreReport::default()
         }
     );
 
@@ -285,4 +296,158 @@ fn a_label_the_queue_fails_is_an_error_not_a_report() {
         Err(CoreError::GitHub(why)) => assert!(why.contains("2 label or milestone"), "{why}"),
         other => panic!("expected a queue failure, got {other:?}"),
     }
+}
+
+/// Asserts a restore was refused with `needle` in the reason and nothing was touched: no API
+/// call, no queue call (so no repo was created), nothing pushed.
+fn refused_before_any_write(f: &Fixture, backup: &Path, needle: &str) {
+    let api = Recorded::new(Vec::new(), Vec::new());
+    match restore_history_from(&f.fleet, backup, NEW, &remote(f, &api)) {
+        Err(CoreError::Parse(why)) => assert!(why.contains(needle), "{why}"),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    assert!(api.log.lock().unwrap().is_empty(), "no API call at all");
+    assert!(!f.stub.join("calls.log").exists(), "no fleet call at all");
+    assert!(refs_of(&f.target, "refs").is_empty());
+}
+
+fn set_manifest(backup: &Path, change: impl Fn(&mut Value)) {
+    let path = backup.join("manifest.json");
+    let mut manifest: Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    change(&mut manifest);
+    std::fs::write(&path, serde_json::to_string_pretty(&manifest).unwrap()).unwrap();
+}
+
+/// #364: a valid bundle that holds only `master`, where the manifest says 4 refs.
+#[test]
+fn a_bundle_with_fewer_refs_than_the_manifest_is_refused_before_a_repo_is_created() {
+    let f = fixture("fewer-refs");
+    let bundle = f.backup.join("repo.bundle");
+    std::fs::remove_file(&bundle).unwrap();
+    git(
+        &f.source,
+        &[
+            "bundle",
+            "create",
+            "-q",
+            &bundle.to_string_lossy(),
+            "master",
+        ],
+    );
+    refused_before_any_write(&f, &f.backup, "1 refs, the manifest says 4");
+}
+
+/// #364: a manifest edited to claim more refs than the bundle holds.
+#[test]
+fn a_manifest_that_claims_more_refs_than_the_bundle_is_refused() {
+    let f = fixture("more-refs");
+    set_manifest(&f.backup, |m| m["refs"] = json!(99));
+    refused_before_any_write(&f, &f.backup, "4 refs, the manifest says 99");
+}
+
+/// #364: the bundle is not the file the manifest was written for.
+#[test]
+fn a_bundle_that_is_not_the_manifests_is_refused() {
+    let f = fixture("hash");
+    // A hash is 40 hex characters; this is not this bundle's.
+    set_manifest(&f.backup, |m| m["bundle_hash"] = json!("0".repeat(40)));
+    refused_before_any_write(&f, &f.backup, "repo.bundle is not the one the manifest");
+
+    // With the bundle's own hash the same backup restores.
+    let hash = git(&f.backup, &["hash-object", "--no-filters", "repo.bundle"]);
+    set_manifest(&f.backup, |m| m["bundle_hash"] = json!(hash));
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            answer(404, json!({"message": "Not Found"})),
+            answer(200, json!({"full_name": NEW, "private": true})),
+        ],
+    );
+    let report = restore_history_from(&f.fleet, &f.backup, NEW, &remote(&f, &api)).unwrap();
+    assert_eq!(report.refs, 3);
+}
+
+/// #364: the folder is the backup of `owner/demo`, the manifest in it names another repo.
+#[test]
+fn a_manifest_for_another_repo_than_its_folder_is_refused() {
+    let f = fixture("wrong-repo");
+    let home = f.backup.parent().unwrap().join("Backups/github/owner/demo");
+    std::fs::create_dir_all(home.parent().unwrap()).unwrap();
+    std::fs::rename(&f.backup, &home).unwrap();
+    set_manifest(&home, |m| m["repo"] = json!("other/zzz"));
+    refused_before_any_write(&f, &home, "the manifest is for other/zzz");
+
+    set_manifest(&home, |m| m["repo"] = json!("zzz"));
+    refused_before_any_write(&f, &home, "not an owner/name repo");
+}
+
+/// #365: a label comes back with its colour and description, a milestone with its description
+/// and due date.
+#[test]
+fn labels_and_milestones_keep_their_colour_description_and_due_date() {
+    let f = fixture("colours");
+    std::fs::write(
+        f.backup.join("labels.json"),
+        r#"[{"name": "bug", "color": "d73a4a", "description": "Something is broken"},
+            {"name": "size:Easy", "color": "", "description": null}]"#,
+    )
+    .unwrap();
+    std::fs::write(
+        f.backup.join("milestones.json"),
+        r#"[{"title": "1.0", "state": "open", "description": "First release",
+             "due_on": "2026-12-01T08:00:00Z"}]"#,
+    )
+    .unwrap();
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            answer(404, json!({"message": "Not Found"})),
+            answer(200, json!({"full_name": NEW, "private": true})),
+        ],
+    );
+    restore_history_from(&f.fleet, &f.backup, NEW, &remote(&f, &api)).unwrap();
+    assert_eq!(
+        queued(&f)[1..],
+        [
+            json!({"kind": "label", "repo": NEW, "name": "bug", "color": "d73a4a",
+                   "description": "Something is broken"}),
+            json!({"kind": "label", "repo": NEW, "name": "size:Easy"}),
+            json!({"kind": "milestone", "repo": NEW, "title": "1.0",
+                   "description": "First release", "due": "2026-12-01"}),
+        ]
+    );
+}
+
+/// #365: what a restore cannot bring back is named in the report, not passed over in silence.
+#[test]
+fn what_is_not_restored_is_listed_in_the_report() {
+    let f = fixture("left-out");
+    set_manifest(&f.backup, |m| {
+        m["wiki"] = json!(true);
+        m["pulls"] = json!(2);
+        m["releases"] = json!(1);
+    });
+    std::fs::write(
+        f.backup.join("milestones.json"),
+        r#"[{"title": "1.0", "state": "closed"}]"#,
+    )
+    .unwrap();
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            answer(404, json!({"message": "Not Found"})),
+            answer(200, json!({"full_name": NEW, "private": true})),
+        ],
+    );
+    let report = restore_history_from(&f.fleet, &f.backup, NEW, &remote(&f, &api)).unwrap();
+    assert_eq!(
+        report.left_out,
+        [
+            "the wiki (wiki.git) is not restored",
+            "2 PRs (pulls.json) are not restored",
+            "1 releases (releases.json, releases/) are not restored; their tags are",
+            "1 closed milestones come back open: the create queue cannot close one",
+        ]
+    );
 }

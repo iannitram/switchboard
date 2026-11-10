@@ -1,6 +1,7 @@
 //! `backup`: one latest backup of each repo in `Backups/github/<repo>/` in NextCloud (BAK-1),
 //! guarded against a bad pass overwriting the last good copy (BAK-2), restorable to a new
-//! private repo (BAK-3: history, labels and milestones in `restore_history`).
+//! private repo (BAK-3: history, labels and milestones in `restore_history`, issues and comments
+//! in `restore_issues`).
 
 use crate::fleet::FleetBridge;
 use crate::github::queue::{self, Create, QueueStatus};
@@ -10,9 +11,10 @@ use crate::settings::Settings;
 use crate::CoreError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 /// The manifest BAK-1 writes beside the bundle and the JSON.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,6 +39,9 @@ pub struct Manifest {
     /// Closed issues no merged PR closed.
     pub closed_without_pr: u64,
     pub wiki: bool,
+    /// `git hash-object` of `repo.bundle`; empty in a backup written before the manifest had it.
+    #[serde(default)]
+    pub bundle_hash: String,
 }
 
 /// The recorded answers `write_json` writes out, as the REST JSON arrays GitHub returned. Issues
@@ -247,9 +252,13 @@ fn fetch_into(
             let name = asset["name"]
                 .as_str()
                 .ok_or_else(|| CoreError::Parse(format!("release {tag}: an asset has no name")))?;
-            let url = asset["browser_download_url"].as_str().ok_or_else(|| {
-                CoreError::Parse(format!("release {tag}: asset {name} has no download URL"))
-            })?;
+            // The API address reads a private repo's file with the token; the browser one may not.
+            let url = asset["url"]
+                .as_str()
+                .or_else(|| asset["browser_download_url"].as_str())
+                .ok_or_else(|| {
+                    CoreError::Parse(format!("release {tag}: asset {name} has no download URL"))
+                })?;
             let bytes = files.fetch(url)?;
             let dir = staging.join(safe_part(tag));
             std::fs::create_dir_all(&dir).map_err(|e| io_error(&dir, e))?;
@@ -485,8 +494,9 @@ fn said(what: &str, new: i128, old: i128) -> String {
     format!("the new backup has {new} {what}, the last had {old}")
 }
 
-/// BAK-1 and BAK-2: what one backup did. `Refused` holds `refuse_reason`'s text for the Waiting
-/// on you item; the last backup was kept.
+/// BAK-1 and BAK-2: what one backup did. `Refused` holds the reason for the Waiting on you item
+/// (`refuse_reason`'s text, a wiki the last backup had and this one could not read, or a last
+/// backup whose manifest is damaged or missing); the last backup was kept.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BackupOutcome {
     Written(Manifest),
@@ -494,13 +504,78 @@ pub enum BackupOutcome {
 }
 
 /// Where a backup reads a repo from: git clones `<git_base>/<repo>.git` and
-/// `<git_base>/<repo>.wiki.git`, with each `git_config` entry passed as `-c`, and the REST API
-/// through `api`. The app uses `https://github.com` and `HttpTransport`; tests use a folder of
-/// bare repos and recorded answers.
+/// `<git_base>/<repo>.wiki.git`, with each `git_config` entry passed as `-c`, the REST API
+/// through `api`, and release files through `files`. The app uses `https://github.com`,
+/// `HttpTransport` and `HttpFiles`; tests use a folder of bare repos, recorded answers and a
+/// stub file source.
 pub struct Remote<'a> {
     pub git_base: String,
     pub git_config: Vec<String>,
     pub api: &'a dyn GitHubTransport,
+    pub files: &'a dyn FileSource,
+}
+
+/// Release files over HTTPS. The GitHub token goes to GitHub's own two hosts only, and is not
+/// sent on to the storage host a download redirects to.
+pub struct HttpFiles {
+    token: String,
+    agent: ureq::Agent,
+}
+
+impl HttpFiles {
+    /// The file source for the token the platform's store holds for GitHub.
+    pub fn new(tokens: &dyn crate::platform::TokenStore) -> Result<Self, CoreError> {
+        let token = tokens
+            .get("github")
+            .ok_or_else(|| CoreError::GitHub("no GitHub token: run `gh auth login`".to_string()))?;
+        Ok(Self {
+            token,
+            agent: ureq::AgentBuilder::new()
+                .timeout_connect(std::time::Duration::from_secs(30))
+                .timeout_read(std::time::Duration::from_secs(120))
+                .build(),
+        })
+    }
+}
+
+impl FileSource for HttpFiles {
+    fn fetch(&self, url: &str) -> Result<Vec<u8>, CoreError> {
+        use std::io::Read;
+        let failed = |why: String| CoreError::GitHub(format!("GET {url}: {why}"));
+        let mut request = self
+            .agent
+            .get(url)
+            .set("User-Agent", "switchboard")
+            .set("Accept", "application/octet-stream");
+        if url.starts_with("https://api.github.com/") || url.starts_with("https://github.com/") {
+            request = request.set("Authorization", &format!("Bearer {}", self.token));
+        }
+        let answer = request.call().map_err(|e| failed(e.to_string()))?;
+        let mut bytes = Vec::new();
+        answer
+            .into_reader()
+            .take(RELEASE_FILE_LIMIT)
+            .read_to_end(&mut bytes)
+            .map_err(|e| failed(e.to_string()))?;
+        Ok(bytes)
+    }
+}
+
+/// Runs `job` against GitHub: git over `https://github.com` with `gh` as the credential helper,
+/// the API and the release files with `gh auth token`.
+fn with_github<T>(job: impl FnOnce(&Remote<'_>) -> Result<T, CoreError>) -> Result<T, CoreError> {
+    let tokens = crate::platform::GhAuthToken::default();
+    let api = HttpTransport::new(&tokens)?;
+    let files = HttpFiles::new(&tokens)?;
+    job(&Remote {
+        git_base: "https://github.com".to_string(),
+        git_config: vec![
+            "credential.helper=".to_string(),
+            "credential.helper=!gh auth git-credential".to_string(),
+        ],
+        api: &api,
+        files: &files,
+    })
 }
 
 /// BAK-1: back up `repo` (`owner/name`) from GitHub into
@@ -508,30 +583,18 @@ pub struct Remote<'a> {
 /// Git reads use `gh` as the credential helper and the API uses `gh auth token`.
 pub fn backup_repo(settings: &Settings, repo: &str) -> Result<BackupOutcome, CoreError> {
     backups_dir(settings)?;
-    let api = HttpTransport::new(&crate::platform::GhAuthToken::default())?;
-    backup_repo_from(settings, repo, &github_remote(&api), &now_rfc3339())
+    with_github(|remote| backup_repo_from(settings, repo, remote, &now_rfc3339()))
 }
 
-/// BAK-1: back up every repo in `repos`, in order, each as `backup_repo` does. Stops at the
-/// first error, which names the repo; backups already written stay written.
-pub fn backup_all(
-    settings: &Settings,
-    repos: &[String],
-) -> Result<Vec<(String, BackupOutcome)>, CoreError> {
+/// One repo of a "back up all" and what its backup did, or the error that stopped it.
+pub type RepoBackup = (String, Result<BackupOutcome, CoreError>);
+
+/// BAK-1: back up every repo in `repos`, in order, each as `backup_repo` does. Every repo is
+/// tried: one that fails holds its error, which names the repo, and the others still run. The
+/// outer error is for what stops them all (no backups folder, no GitHub token).
+pub fn backup_all(settings: &Settings, repos: &[String]) -> Result<Vec<RepoBackup>, CoreError> {
     backups_dir(settings)?;
-    let api = HttpTransport::new(&crate::platform::GhAuthToken::default())?;
-    backup_all_from(settings, repos, &github_remote(&api), &now_rfc3339())
-}
-
-fn github_remote(api: &dyn GitHubTransport) -> Remote<'_> {
-    Remote {
-        git_base: "https://github.com".to_string(),
-        git_config: vec![
-            "credential.helper=".to_string(),
-            "credential.helper=!gh auth git-credential".to_string(),
-        ],
-        api,
-    }
+    with_github(|remote| backup_all_from(settings, repos, remote, &now_rfc3339()))
 }
 
 /// `backup_all` against `remote`, every manifest stamped `taken_at`.
@@ -540,25 +603,40 @@ pub fn backup_all_from(
     repos: &[String],
     remote: &Remote<'_>,
     taken_at: &str,
-) -> Result<Vec<(String, BackupOutcome)>, CoreError> {
+) -> Result<Vec<RepoBackup>, CoreError> {
     backups_dir(settings)?;
-    let mut outcomes = Vec::new();
-    for repo in repos {
-        let outcome =
-            backup_repo_from(settings, repo, remote, taken_at).map_err(|e| about(repo, e))?;
-        outcomes.push((repo.clone(), outcome));
-    }
-    Ok(outcomes)
+    Ok(repos
+        .iter()
+        .map(|repo| {
+            let outcome =
+                backup_repo_from(settings, repo, remote, taken_at).map_err(|e| about(repo, e));
+            (repo.clone(), outcome)
+        })
+        .collect())
+}
+
+/// The lock that keeps two backups of one folder in this process apart.
+fn repo_lock(folder: &Path) -> Arc<Mutex<()>> {
+    static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+    let mut locks = LOCKS
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    locks.entry(folder.to_path_buf()).or_default().clone()
 }
 
 /// `backup_repo` against `remote`, the manifest stamped `taken_at` (RFC 3339).
 ///
-/// Mirrors the repo into a temp folder, then builds the new backup beside the old one in
-/// `.<name>.new`: `bundle`, `write_json`, `copy_wiki`, and the manifest with the ref count and
-/// the wiki. Asks `refuse_reason` against the old folder's manifest; a refusal removes the new
-/// folder and leaves the old one untouched. Otherwise the old folder moves to `.<name>.old`, the
-/// new one takes its place, and the old one is removed. Any error before the swap leaves the
-/// old folder as it was.
+/// One backup of a repo runs at a time in this process: a second one waits for the first. A last
+/// backup whose manifest is damaged or missing is `Refused` before anything is read. Then the
+/// repo is mirrored into a temp folder and the new backup is built beside the old one in a
+/// staging folder of this run's own (`.<name>.new-<run>`, so a backup in another process cannot
+/// clear it): `bundle`, `write_json`, `write_releases`, `copy_wiki`, and the manifest with the
+/// ref count, the bundle's hash and the wiki. Asks `refuse_reason` against the old folder's
+/// manifest, and refuses a new backup with no wiki when the old one has one; a refusal removes
+/// the new folder and leaves the old one untouched. Otherwise the old folder moves to
+/// `.<name>.old-<run>`, the new one takes its place, and the old one is removed. Any error before
+/// the swap leaves the old folder as it was.
 pub fn backup_repo_from(
     settings: &Settings,
     repo: &str,
@@ -569,9 +647,17 @@ pub fn backup_repo_from(
     let (owner, name) = split_repo(repo)?;
     let parent = backups.join("github").join(owner);
     let folder = parent.join(name);
-    let staging = parent.join(format!(".{name}.new"));
+    let lock = repo_lock(&folder);
+    let _held = lock.lock().unwrap_or_else(PoisonError::into_inner);
+    let old = match last_backup(&folder)? {
+        LastBackup::None => None,
+        LastBackup::Good(old) => Some(old),
+        LastBackup::Damaged(why) => return Ok(BackupOutcome::Refused(why)),
+    };
+    clear_stale(&parent, name)?;
+    let run = run_tag();
+    let staging = parent.join(format!(".{name}.new-{run}"));
     let work = work_dir(owner, name);
-    remove_dir(&staging)?;
     let built = build(repo, remote, taken_at, &work, &staging);
     let _ = std::fs::remove_dir_all(&work);
     let manifest = match built {
@@ -581,19 +667,49 @@ pub fn backup_repo_from(
             return Err(e);
         }
     };
-    let old = match read_manifest(&folder) {
-        Ok(old) => old,
-        Err(e) => {
-            let _ = std::fs::remove_dir_all(&staging);
-            return Err(e);
-        }
-    };
-    if let Some(reason) = old.and_then(|old| refuse_reason(&old, &manifest)) {
+    let refusal = old.and_then(|old| {
+        refuse_reason(&old, &manifest).or_else(|| {
+            // A wiki that could not be read looks the same as a wiki that is gone.
+            (old.wiki && !manifest.wiki)
+                .then(|| "the new backup has no wiki, the last had one".to_string())
+        })
+    });
+    if let Some(reason) = refusal {
         remove_dir(&staging)?;
         return Ok(BackupOutcome::Refused(reason));
     }
-    swap_in(&staging, &folder, &parent.join(format!(".{name}.old")))?;
+    swap_in(
+        &staging,
+        &folder,
+        &parent.join(format!(".{name}.old-{run}")),
+    )?;
     Ok(BackupOutcome::Written(manifest))
+}
+
+/// A staging folder left by a run that died is this old before a later backup removes it.
+const STALE_STAGING: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+/// Removes what dead runs left in `parent` for the repo `name`: the fixed `.<name>.new` of
+/// earlier versions, and any `.<name>.new-<run>` older than a day. A younger one may belong to
+/// a backup running in another process, so it stays.
+fn clear_stale(parent: &Path, name: &str) -> Result<(), CoreError> {
+    remove_dir(&parent.join(format!(".{name}.new")))?;
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return Ok(());
+    };
+    let prefix = format!(".{name}.new-");
+    for entry in entries.flatten() {
+        let old = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|at| at.elapsed().ok())
+            .is_some_and(|age| age > STALE_STAGING);
+        if old && entry.file_name().to_string_lossy().starts_with(&prefix) {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+    Ok(())
 }
 
 /// The new backup, written into `staging`; the mirrors go into `work`.
@@ -624,16 +740,49 @@ fn build(
     };
     let mut manifest = write_json(&answers, staging, taken_at)?;
     manifest.refs = refs;
+    manifest.bundle_hash = bundle_hash(staging)?;
 
-    // A repo with no wiki (or no wiki pages yet) has nothing to clone.
+    let releases = rest_all(remote.api, &format!("/repos/{repo}/releases?"))?;
+    write_releases(&releases, remote.files, staging, &mut manifest)?;
+
+    // A repo with no wiki (or no wiki pages yet) has nothing to clone; any other failed clone
+    // is an error, so a wiki that could not be read is never written down as "no wiki".
     let wiki = work.join("wiki.git");
     let wiki_url = format!("{}/{repo}.wiki.git", remote.git_base);
-    let wiki_mirror = clone_mirror(remote, &wiki_url, &wiki).ok().map(|()| wiki);
+    let wiki_mirror = match clone_mirror(remote, &wiki_url, &wiki) {
+        Ok(()) => Some(wiki),
+        Err(e) if no_such_repo(&e) => None,
+        Err(e) => return Err(e),
+    };
     copy_wiki(wiki_mirror.as_deref(), staging, &mut manifest)?;
 
     let path = staging.join("manifest.json");
     std::fs::write(&path, pretty(&manifest)?).map_err(|e| io_error(&path, e))?;
     Ok(manifest)
+}
+
+/// `git hash-object` of `<dir>/repo.bundle`.
+fn bundle_hash(dir: &Path) -> Result<String, CoreError> {
+    let dir = std::path::absolute(dir).map_err(|e| io_error(dir, e))?;
+    Ok(git(&dir, &["hash-object", "--no-filters", "repo.bundle"])?
+        .trim()
+        .to_string())
+}
+
+/// Whether a failed clone says the repo is not there (GitHub: "Repository not found"; a local
+/// path: "does not appear to be a git repository", "does not exist"), not that the read failed.
+fn no_such_repo(e: &CoreError) -> bool {
+    let CoreError::Io(why) = e else {
+        return false;
+    };
+    let why = why.to_ascii_lowercase();
+    [
+        "not found",
+        "does not appear to be a git repository",
+        "does not exist",
+    ]
+    .iter()
+    .any(|said| why.contains(said))
 }
 
 /// Every page of a REST list, 100 at a time, until a short page. `path` ends in `?` or carries
@@ -686,7 +835,7 @@ fn clone_mirror(remote: &Remote<'_>, url: &str, into: &Path) -> Result<(), CoreE
     Ok(())
 }
 
-/// The last backup's manifest, or `None` when there is no last backup.
+/// The manifest of the backup in `folder`, or `None` when it has none.
 fn read_manifest(folder: &Path) -> Result<Option<Manifest>, CoreError> {
     let path = folder.join("manifest.json");
     let text = match std::fs::read_to_string(&path) {
@@ -699,19 +848,70 @@ fn read_manifest(folder: &Path) -> Result<Option<Manifest>, CoreError> {
         .map_err(|e| CoreError::Parse(format!("{}: {e}", path.display())))
 }
 
+/// The backup a new one would replace.
+enum LastBackup {
+    /// No folder, or an empty one.
+    None,
+    Good(Manifest),
+    /// The folder holds files but no manifest that can be read; the text says which and what to
+    /// do, for the Waiting on you item.
+    Damaged(String),
+}
+
+/// BAK-2: the last backup in `folder`. A folder with a damaged manifest, or with files and no
+/// manifest, cannot be compared with a new backup, so it is never replaced silently.
+fn last_backup(folder: &Path) -> Result<LastBackup, CoreError> {
+    const TO_DO: &str = "check the folder, then move it away or remove it to let a new backup \
+                         be written";
+    let path = folder.join("manifest.json");
+    match std::fs::read(&path) {
+        Ok(bytes) => Ok(match serde_json::from_slice(&bytes) {
+            Ok(manifest) => LastBackup::Good(manifest),
+            Err(e) => LastBackup::Damaged(format!(
+                "the last backup's manifest.json is damaged ({e}), so the new backup cannot be \
+                 compared with it; {TO_DO}"
+            )),
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let mut holds: Vec<String> = match std::fs::read_dir(folder) {
+                Ok(entries) => entries
+                    .flatten()
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    .collect(),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+                Err(e) => return Err(io_error(folder, e)),
+            };
+            if holds.is_empty() {
+                return Ok(LastBackup::None);
+            }
+            holds.sort();
+            Ok(LastBackup::Damaged(format!(
+                "the last backup has no manifest.json but still holds {}, so the new backup \
+                 cannot be compared with it; {TO_DO}",
+                holds.join(", ")
+            )))
+        }
+        Err(e) => Err(io_error(&path, e)),
+    }
+}
+
 /// Moves `staging` to `folder`, the old `folder` aside to `aside` first and removed after. A
-/// failed move puts the old folder back.
+/// failed move puts the old folder back. When a backup in another process took the place in
+/// between, its folder stays and this run's two folders are removed.
 fn swap_in(staging: &Path, folder: &Path, aside: &Path) -> Result<(), CoreError> {
-    remove_dir(aside)?;
     let had_old = folder.exists();
     if had_old {
-        std::fs::rename(folder, aside).map_err(|e| io_error(folder, e))?;
+        if let Err(e) = std::fs::rename(folder, aside) {
+            let _ = std::fs::remove_dir_all(staging);
+            return Err(io_error(folder, e));
+        }
     }
     if let Err(e) = std::fs::rename(staging, folder) {
-        if had_old {
-            let _ = std::fs::rename(aside, folder);
-        }
+        let put_back = had_old && std::fs::rename(aside, folder).is_ok();
         let _ = std::fs::remove_dir_all(staging);
+        if had_old && !put_back && folder.join("manifest.json").exists() {
+            let _ = std::fs::remove_dir_all(aside);
+        }
         return Err(io_error(staging, e));
     }
     if had_old {
@@ -752,20 +952,22 @@ fn split_repo(repo: &str) -> Result<(&str, &str), CoreError> {
     }
 }
 
-/// A fresh temp folder for this backup's mirrors. The counter keeps two
-/// backups in one process apart when the clock does not tick between them
-/// (macOS reads it in whole microseconds).
-fn work_dir(owner: &str, name: &str) -> PathBuf {
+/// A tag no other run has: the process, the clock and a counter. The counter keeps two runs in
+/// one process apart when the clock does not tick between them (macOS reads it in whole
+/// microseconds).
+fn run_tag() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let seq = NEXT.fetch_add(1, Ordering::Relaxed);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
-    std::env::temp_dir().join(format!(
-        "switchboard-backup-{owner}-{name}-{}-{nanos}-{seq}",
-        std::process::id()
-    ))
+    format!("{}-{nanos}-{seq}", std::process::id())
+}
+
+/// A fresh temp folder for this backup's mirrors.
+fn work_dir(owner: &str, name: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("switchboard-backup-{owner}-{name}-{}", run_tag()))
 }
 
 /// `e` with `repo` in front of its text.
@@ -805,6 +1007,25 @@ fn rfc3339(secs: i64) -> String {
     )
 }
 
+/// BAK-3: what `restore_issues` did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IssuesReport {
+    /// Issues sent through the create queue.
+    pub issues: u64,
+    /// Issues the repo already had (the same title), not created again.
+    pub issues_there: u64,
+    /// Comments sent through the create queue, each on the number its issue has now.
+    pub comments: u64,
+    /// Comments the repo already had on their issue, not created again.
+    pub comments_there: u64,
+    /// Comments held back because their issue is not in the repo yet (the queue stopped on a
+    /// rate limit, or kept one of two issues with the same title). Run `restore_issues` again
+    /// once the issues are there.
+    pub comments_waiting: u64,
+    /// What the backup holds that was not put back, one plain line each.
+    pub left_out: Vec<String>,
+}
+
 /// BAK-3: what `restore_history` put back.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RestoreReport {
@@ -814,6 +1035,11 @@ pub struct RestoreReport {
     pub labels: u64,
     /// Milestones sent through the create queue.
     pub milestones: u64,
+    /// The issues and comments (`restore_over_live` only; `restore_history` leaves them to
+    /// `restore_issues`).
+    pub issues: IssuesReport,
+    /// What the backup holds that was not put back, one plain line each.
+    pub left_out: Vec<String>,
 }
 
 /// BAK-3: restore the history, labels and milestones of the backup in `backup_dir` to the new
@@ -824,20 +1050,21 @@ pub fn restore_history(
     backup_dir: &Path,
     new_repo: &str,
 ) -> Result<RestoreReport, CoreError> {
-    let api = HttpTransport::new(&crate::platform::GhAuthToken::default())?;
-    restore_history_from(fleet, backup_dir, new_repo, &github_remote(&api))
+    with_github(|remote| restore_history_from(fleet, backup_dir, new_repo, remote))
 }
 
 /// `restore_history` against `remote`.
 ///
-/// Reads and checks the whole backup first (the manifest, `labels.json` and `milestones.json`
-/// with the manifest's counts, and `repo.bundle`, cloned into a temp mirror). Then asks the API for
+/// Reads and checks the whole backup first (`read_backup`, then `repo.bundle` cloned into a temp
+/// mirror, which must hold the manifest's count of refs). Then asks the API for
 /// `/repos/<new_repo>`: a repo that is there is `Refused` with nothing written. Otherwise the
 /// repo is created private through the create queue (an `exists` answer is `Refused` too), the
 /// API must then show it private, every ref in the bundle is pushed to
-/// `<git_base>/<new_repo>.git`, and the labels and milestones go through the queue in one batch.
-/// `refs/pull/*` are not pushed: GitHub keeps them read-only, and they come back with the PRs.
-/// Never restores over a live repo; that needs `rules::guard` (#101).
+/// `<git_base>/<new_repo>.git`, and the labels (with colour and description) and milestones
+/// (with description and due date) go through the queue in one batch.
+/// `refs/pull/*` are not pushed: GitHub keeps them read-only. The report's `left_out` names what
+/// the backup holds that is not put back. Never restores over a live repo; that needs
+/// `rules::guard` (#101).
 pub fn restore_history_from(
     fleet: &FleetBridge,
     backup_dir: &Path,
@@ -845,33 +1072,35 @@ pub fn restore_history_from(
     remote: &Remote<'_>,
 ) -> Result<RestoreReport, CoreError> {
     let (owner, name) = split_repo(new_repo)?;
-    let manifest = read_manifest(backup_dir)?.ok_or_else(|| {
-        CoreError::Io(format!(
-            "{}: no manifest.json, not a backup",
-            backup_dir.display()
-        ))
-    })?;
-    let labels = names_in(backup_dir, "labels.json", "name", manifest.labels)?;
-    let milestones = names_in(backup_dir, "milestones.json", "title", manifest.milestones)?;
-    let bundle =
-        std::path::absolute(backup_dir.join("repo.bundle")).map_err(|e| io_error(backup_dir, e))?;
+    let backup = read_backup(backup_dir)?;
+    let creates: Vec<Create> = label_creates(&backup, new_repo)
+        .into_iter()
+        .chain(milestone_creates(&backup, new_repo))
+        .collect();
     // Cloning the bundle checks it before anything is written.
     let work = work_dir(owner, name);
-    let restored = clone_mirror(remote, &bundle.to_string_lossy(), &work)
-        .and_then(|()| restore_into(fleet, &work, new_repo, remote, &labels, &milestones));
+    let restored = clone_mirror(remote, &backup.bundle.to_string_lossy(), &work)
+        .and_then(|()| check_refs(&work, &backup))
+        .and_then(|()| restore_into(fleet, &work, new_repo, remote, &creates));
     let _ = std::fs::remove_dir_all(&work);
-    restored
+    Ok(RestoreReport {
+        refs: restored?,
+        labels: backup.labels.len() as u64,
+        milestones: backup.milestones.len() as u64,
+        issues: IssuesReport::default(),
+        left_out: left_out(&backup),
+    })
 }
 
-/// The writes of `restore_history_from`, the bundle already cloned into `work`.
+/// The writes of `restore_history_from`, the bundle already cloned into `work`; returns how many
+/// refs it pushed.
 fn restore_into(
     fleet: &FleetBridge,
     work: &Path,
     new_repo: &str,
     remote: &Remote<'_>,
-    labels: &[String],
-    milestones: &[String],
-) -> Result<RestoreReport, CoreError> {
+    creates: &[Create],
+) -> Result<u64, CoreError> {
     let taken = format!("{new_repo} already exists; restore goes to a new repo only");
     let path = format!("/repos/{new_repo}");
     match remote.api.rest_get(&path, None)?.status {
@@ -905,12 +1134,121 @@ fn restore_into(
     }
 
     let refs = push_refs(remote, work, new_repo).map_err(|e| about(new_repo, e))?;
-    queue_labels(fleet, new_repo, labels, milestones, &made)?;
-    Ok(RestoreReport {
-        refs,
-        labels: labels.len() as u64,
-        milestones: milestones.len() as u64,
+    queue_labels(fleet, new_repo, creates, &made)?;
+    Ok(refs)
+}
+
+/// A backup folder read and checked against its manifest, before a restore writes anything.
+struct Backup {
+    manifest: Manifest,
+    /// `labels.json`: each item has a `name`.
+    labels: Vec<Value>,
+    /// `milestones.json`: each item has a `title`.
+    milestones: Vec<Value>,
+    /// `repo.bundle`, as an absolute path.
+    bundle: PathBuf,
+}
+
+/// BAK-3: the backup in `dir`, checked against its manifest: the manifest names an `owner/name`
+/// repo, and the one this folder is the backup of when the folder is
+/// `.../github/<owner>/<name>`; `labels.json` and `milestones.json` hold the manifest's counts;
+/// `repo.bundle` has the manifest's hash (a manifest written before it held one has none to
+/// check; `check_refs` still counts the refs).
+fn read_backup(dir: &Path) -> Result<Backup, CoreError> {
+    let manifest = manifest_in(dir)?;
+    let dir = &std::path::absolute(dir).map_err(|e| io_error(dir, e))?;
+    let wrong = |why: String| CoreError::Parse(format!("{}: {why}", dir.display()));
+    if split_repo(&manifest.repo).is_err() {
+        return Err(wrong(format!(
+            "the manifest's repo is not an owner/name repo: {}",
+            manifest.repo
+        )));
+    }
+    let part = |path: Option<&Path>| {
+        path.and_then(Path::file_name)
+            .map(|name| name.to_string_lossy().into_owned())
+    };
+    let owner_dir = dir.parent();
+    let github_dir = owner_dir.and_then(Path::parent);
+    if let (Some(name), Some(owner), Some("github")) = (
+        part(Some(dir)),
+        part(owner_dir),
+        part(github_dir).as_deref(),
+    ) {
+        let of = format!("{owner}/{name}");
+        if !of.eq_ignore_ascii_case(&manifest.repo) {
+            return Err(wrong(format!(
+                "the manifest is for {}, the folder is the backup of {of}",
+                manifest.repo
+            )));
+        }
+    }
+    let labels = keyed_items(dir, "labels.json", "name", manifest.labels)?;
+    let milestones = keyed_items(dir, "milestones.json", "title", manifest.milestones)?;
+    if !manifest.bundle_hash.is_empty() {
+        let hash = bundle_hash(dir)?;
+        if hash != manifest.bundle_hash {
+            return Err(wrong(format!(
+                "repo.bundle is not the one the manifest was written for (hash {hash}, the \
+                 manifest says {})",
+                manifest.bundle_hash
+            )));
+        }
+    }
+    Ok(Backup {
+        manifest,
+        labels,
+        milestones,
+        bundle: dir.join("repo.bundle"),
     })
+}
+
+/// BAK-3: the bundle, cloned into `work`, holds as many refs as the manifest says.
+fn check_refs(work: &Path, backup: &Backup) -> Result<(), CoreError> {
+    let refs = git(work, &["for-each-ref", "--format=%(refname)"])?
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count() as u64;
+    if refs != backup.manifest.refs {
+        return Err(CoreError::Parse(format!(
+            "{}: {refs} refs, the manifest says {}",
+            backup.bundle.display(),
+            backup.manifest.refs
+        )));
+    }
+    Ok(())
+}
+
+/// What a restore of `backup` does not put back, one plain line each.
+fn left_out(backup: &Backup) -> Vec<String> {
+    let manifest = &backup.manifest;
+    let mut lines = Vec::new();
+    if manifest.wiki {
+        lines.push("the wiki (wiki.git) is not restored".to_string());
+    }
+    if manifest.pulls > 0 {
+        lines.push(format!(
+            "{} PRs (pulls.json) are not restored",
+            manifest.pulls
+        ));
+    }
+    if manifest.releases > 0 {
+        lines.push(format!(
+            "{} releases (releases.json, releases/) are not restored; their tags are",
+            manifest.releases
+        ));
+    }
+    let closed = backup
+        .milestones
+        .iter()
+        .filter(|m| has_state(m, "closed"))
+        .count();
+    if closed > 0 {
+        lines.push(format!(
+            "{closed} closed milestones come back open: the create queue cannot close one"
+        ));
+    }
+    lines
 }
 
 /// The items of the JSON array `<dir>/<file>`; an error when there are not `expected` of them, as
@@ -930,17 +1268,16 @@ fn items_in(dir: &Path, file: &str, expected: u64) -> Result<Vec<Value>, CoreErr
     Ok(items)
 }
 
-/// The `key` string of each item in the JSON array `<dir>/<file>`, as `items_in` checks them.
-fn names_in(dir: &Path, file: &str, key: &str, expected: u64) -> Result<Vec<String>, CoreError> {
-    let path = dir.join(file);
-    items_in(dir, file, expected)?
-        .iter()
-        .map(|item| {
-            item[key].as_str().map(String::from).ok_or_else(|| {
-                CoreError::Parse(format!("{}: an item with no {key}", path.display()))
-            })
-        })
-        .collect()
+/// `items_in`, each item with a `key` string.
+fn keyed_items(dir: &Path, file: &str, key: &str, expected: u64) -> Result<Vec<Value>, CoreError> {
+    let items = items_in(dir, file, expected)?;
+    if items.iter().any(|item| !item[key].is_string()) {
+        return Err(CoreError::Parse(format!(
+            "{}: an item with no {key}",
+            dir.join(file).display()
+        )));
+    }
+    Ok(items)
 }
 
 /// The backup's manifest; an error when `dir` has none.
@@ -949,27 +1286,62 @@ fn manifest_in(dir: &Path) -> Result<Manifest, CoreError> {
         .ok_or_else(|| CoreError::Io(format!("{}: no manifest.json, not a backup", dir.display())))
 }
 
-/// The labels then the milestones of the backup, in one batch through the queue; `base` is the
-/// queue's counts before it. A label or milestone the queue fails is an error.
+/// The string at `key`, when it is not blank.
+fn filled(item: &Value, key: &str) -> Option<String> {
+    item[key]
+        .as_str()
+        .filter(|text| !text.trim().is_empty())
+        .map(String::from)
+}
+
+/// The backup's labels as creates on `repo`, each with its colour and description.
+fn label_creates(backup: &Backup, repo: &str) -> Vec<Create> {
+    backup
+        .labels
+        .iter()
+        .map(|label| Create::Label {
+            repo: repo.to_string(),
+            name: label["name"].as_str().unwrap_or_default().to_string(),
+            color: filled(label, "color")
+                .filter(|c| c.len() == 6 && c.chars().all(|ch| ch.is_ascii_hexdigit())),
+            // The queue takes a label's description as one line.
+            description: filled(label, "description")
+                .map(|d| d.split_whitespace().collect::<Vec<_>>().join(" ")),
+        })
+        .collect()
+}
+
+/// The backup's milestones as creates on `repo`, each with its description and due date.
+fn milestone_creates(backup: &Backup, repo: &str) -> Vec<Create> {
+    backup
+        .milestones
+        .iter()
+        .map(|milestone| Create::Milestone {
+            repo: repo.to_string(),
+            title: milestone["title"].as_str().unwrap_or_default().to_string(),
+            description: filled(milestone, "description"),
+            // `due_on` is a time (`2026-12-01T08:00:00Z`); the queue takes the date.
+            due: filled(milestone, "due_on")
+                .and_then(|at| at.get(..10).map(String::from))
+                .filter(|date| {
+                    date.bytes().enumerate().all(|(i, b)| match i {
+                        4 | 7 => b == b'-',
+                        _ => b.is_ascii_digit(),
+                    })
+                }),
+        })
+        .collect()
+}
+
+/// Label and milestone creates in one batch through the queue; `base` is the queue's counts
+/// before it. A label or milestone the queue fails is an error.
 fn queue_labels(
     fleet: &FleetBridge,
     repo: &str,
-    labels: &[String],
-    milestones: &[String],
+    creates: &[Create],
     base: &QueueStatus,
 ) -> Result<(), CoreError> {
-    let creates: Vec<Create> = labels
-        .iter()
-        .map(|name| Create::Label {
-            repo: repo.to_string(),
-            name: name.clone(),
-        })
-        .chain(milestones.iter().map(|title| Create::Milestone {
-            repo: repo.to_string(),
-            title: title.clone(),
-        }))
-        .collect();
-    let sent = queue::send(fleet, &creates)?;
+    let sent = queue::send(fleet, creates)?;
     if sent.failed > base.failed {
         return Err(CoreError::GitHub(format!(
             "{repo}: {} label or milestone creates failed in the queue",
@@ -1030,21 +1402,133 @@ fn push_refs(remote: &Remote<'_>, work: &Path, repo: &str) -> Result<u64, CoreEr
     Ok(refspecs.len() as u64)
 }
 
-/// BAK-3: queues the issues and comments of the backup in `backup_dir` as creates on `repo`
-/// (`owner/name`), each once, in one batch. The counts must be the manifest's. Returns how many
-/// were queued. A rate-limit stop leaves them queued; only a failed create is an error.
+/// The issue number at the end of a comment's `issue_url`.
+fn issue_of(comment: &Value) -> Option<u64> {
+    comment["issue_url"]
+        .as_str()
+        .and_then(|url| url.rsplit('/').next())
+        .and_then(|n| n.parse().ok())
+}
+
+/// A comment body as it is compared: the queue's own `<!-- ghq:... -->` marker line and the
+/// white space at the end are not part of it.
+fn plain(body: &str) -> String {
+    let text = body.trim_end();
+    let text = match text.rfind("<!-- ghq:") {
+        Some(at) if text.ends_with("-->") => text[..at].trim_end(),
+        _ => text,
+    };
+    text.to_string()
+}
+
+/// The repo's issues now (PRs aside) as `(number, title)`, lowest number first.
+fn live_issues(api: &dyn GitHubTransport, repo: &str) -> Result<Vec<(u64, String)>, CoreError> {
+    let mut issues: Vec<(u64, String)> = rest_all(api, &format!("/repos/{repo}/issues?state=all"))?
+        .iter()
+        .filter(|item| item.get("pull_request").is_none())
+        .filter_map(|item| {
+            Some((
+                item["number"].as_u64()?,
+                item["title"].as_str()?.to_string(),
+            ))
+        })
+        .collect();
+    issues.sort();
+    Ok(issues)
+}
+
+/// Which issue of the repo each backed-up issue is: the backup's number to the repo's number.
+/// An issue is the one with its title; of several with one title, the one with its own number
+/// first, then the lowest number not taken. Both lists are lowest number first.
+fn match_issues(backup: &[(u64, String)], live: &[(u64, String)]) -> HashMap<u64, u64> {
+    let mut matched = HashMap::new();
+    let mut taken = HashSet::new();
+    for (number, title) in backup {
+        if live.contains(&(*number, title.clone())) {
+            matched.insert(*number, *number);
+            taken.insert(*number);
+        }
+    }
+    for (number, title) in backup {
+        if matched.contains_key(number) {
+            continue;
+        }
+        let found = live
+            .iter()
+            .find(|(n, t)| t == title && !taken.contains(n))
+            .map(|(n, _)| *n);
+        if let Some(now) = found {
+            matched.insert(*number, now);
+            taken.insert(now);
+        }
+    }
+    matched
+}
+
+/// Sends `creates` through the queue; a create the queue fails is an error.
+fn send_checked(fleet: &FleetBridge, repo: &str, creates: &[Create]) -> Result<(), CoreError> {
+    if creates.is_empty() {
+        return Ok(());
+    }
+    let before = queue_counts(fleet)?;
+    let sent = queue::send(fleet, creates)?;
+    if sent.failed > before.failed {
+        return Err(CoreError::GitHub(format!(
+            "{repo}: {} issue or comment creates failed in the queue",
+            sent.failed - before.failed
+        )));
+    }
+    Ok(())
+}
+
+/// BAK-3: puts the issues and comments of the backup in `backup_dir` on `repo` (`owner/name`)
+/// through the create queue. The counts must be the manifest's.
+///
+/// Reads the repo's issues first: an issue that is there already (the same title) is not created
+/// again, and the rest are queued lowest number first. A new repo numbers its issues from 1, so
+/// the repo is read again after the creates and each comment is queued on the number its issue
+/// has now, never the backup's. A comment the repo already has on that issue is not created
+/// again; one whose issue is not there yet is held back and counted (`comments_waiting`), and a
+/// second call queues it. A rate-limit stop leaves creates queued; only a failed create is an
+/// error. `left_out` says what is not put back: the closed state of issues and the comments on
+/// PRs.
 pub fn restore_issues(
     fleet: &FleetBridge,
     backup_dir: &Path,
     repo: &str,
-) -> Result<u64, CoreError> {
+    remote: &Remote<'_>,
+) -> Result<IssuesReport, CoreError> {
+    split_repo(repo)?;
     let manifest = manifest_in(backup_dir)?;
     let issues = items_in(backup_dir, "issues.json", manifest.issues)?;
     let comments = items_in(backup_dir, "comments.json", manifest.comments)?;
     let text = |item: &Value, key: &str| item[key].as_str().unwrap_or("").to_string();
-    let mut creates: Vec<Create> = issues
+    let mut numbered: Vec<(u64, &Value)> = Vec::new();
+    for issue in &issues {
+        let number = issue["number"]
+            .as_u64()
+            .ok_or_else(|| CoreError::Parse(format!("{repo}: an issue with no number")))?;
+        numbered.push((number, issue));
+    }
+    numbered.sort_by_key(|(number, _)| *number);
+    let titles: Vec<(u64, String)> = numbered
         .iter()
-        .map(|issue| Create::Issue {
+        .map(|(number, issue)| (*number, text(issue, "title")))
+        .collect();
+    let mut old_numbers = Vec::new();
+    for comment in &comments {
+        old_numbers.push(
+            issue_of(comment).ok_or_else(|| {
+                CoreError::Parse(format!("{repo}: a comment with no issue number"))
+            })?,
+        );
+    }
+
+    let mut now = match_issues(&titles, &live_issues(remote.api, repo)?);
+    let issue_creates: Vec<Create> = numbered
+        .iter()
+        .filter(|(number, _)| !now.contains_key(number))
+        .map(|(_, issue)| Create::Issue {
             repo: repo.to_string(),
             title: text(issue, "title"),
             body: text(issue, "body"),
@@ -1057,28 +1541,68 @@ pub fn restore_issues(
             milestone: issue["milestone"]["title"].as_str().map(String::from),
         })
         .collect();
-    for comment in &comments {
-        let number = comment["issue_url"]
-            .as_str()
-            .and_then(|url| url.rsplit('/').next())
-            .and_then(|n| n.parse().ok())
-            .ok_or_else(|| CoreError::Parse(format!("{repo}: a comment with no issue number")))?;
-        creates.push(Create::Comment {
-            repo: repo.to_string(),
-            number,
-            body: text(comment, "body"),
-            marker: None,
-        });
+    let mut report = IssuesReport {
+        issues: issue_creates.len() as u64,
+        issues_there: (numbered.len() - issue_creates.len()) as u64,
+        ..IssuesReport::default()
+    };
+    if !issue_creates.is_empty() {
+        send_checked(fleet, repo, &issue_creates)?;
+        now = match_issues(&titles, &live_issues(remote.api, repo)?);
     }
-    let before = queue_counts(fleet)?;
-    let sent = queue::send(fleet, &creates)?;
-    if sent.failed > before.failed {
-        return Err(CoreError::GitHub(format!(
-            "{repo}: {} issue or comment creates failed in the queue",
-            sent.failed - before.failed
-        )));
+
+    // What is on the repo's issues already: (issue number, body) and how many times.
+    let mut there: HashMap<(u64, String), u64> = HashMap::new();
+    if !comments.is_empty() {
+        for comment in rest_all(remote.api, &format!("/repos/{repo}/issues/comments?"))? {
+            if let Some(number) = issue_of(&comment) {
+                *there
+                    .entry((number, plain(&text(&comment, "body"))))
+                    .or_default() += 1;
+            }
+        }
     }
-    Ok(creates.len() as u64)
+    let backed_up: HashSet<u64> = titles.iter().map(|(number, _)| *number).collect();
+    let mut comment_creates = Vec::new();
+    let mut on_prs = 0;
+    for (comment, old) in comments.iter().zip(old_numbers) {
+        if !backed_up.contains(&old) {
+            on_prs += 1;
+            continue;
+        }
+        let Some(&number) = now.get(&old) else {
+            report.comments_waiting += 1;
+            continue;
+        };
+        let body = text(comment, "body");
+        match there.get_mut(&(number, plain(&body))) {
+            Some(left) if *left > 0 => {
+                *left -= 1;
+                report.comments_there += 1;
+            }
+            _ => comment_creates.push(Create::Comment {
+                repo: repo.to_string(),
+                number,
+                body,
+                marker: None,
+            }),
+        }
+    }
+    report.comments = comment_creates.len() as u64;
+    send_checked(fleet, repo, &comment_creates)?;
+
+    let closed = issues.iter().filter(|i| has_state(i, "closed")).count();
+    if closed > 0 {
+        report.left_out.push(format!(
+            "{closed} closed issues come back open: the create queue cannot close an issue"
+        ));
+    }
+    if on_prs > 0 {
+        report.left_out.push(format!(
+            "{on_prs} comments on PRs are not restored: PRs are not"
+        ));
+    }
+    Ok(report)
 }
 
 /// BAK-3: restore the backup in `backup_dir` over the live repo `repo` (`owner/name`), as
@@ -1090,21 +1614,15 @@ pub fn restore_over_live(
     repo: &str,
     confirmed: bool,
 ) -> Result<RestoreReport, CoreError> {
-    let api = HttpTransport::new(&crate::platform::GhAuthToken::default())?;
-    restore_over_live_from(
-        caller,
-        fleet,
-        backup_dir,
-        repo,
-        confirmed,
-        &github_remote(&api),
-    )
+    with_github(|remote| restore_over_live_from(caller, fleet, backup_dir, repo, confirmed, remote))
 }
 
 /// `restore_over_live` against `remote`. Writes nothing unless `rules::guard` allows
-/// `RestoreOverLive` for `caller` and `confirmed` is set. Then the repo must exist, the bundle's
-/// refs are force-pushed to it, its labels and milestones are queued, and `restore_issues`
-/// queues the issues and comments.
+/// `RestoreOverLive` for `caller` and `confirmed` is set. Then the backup is read and checked as
+/// `restore_history_from` does, the repo must exist, its labels and milestones are read, the
+/// bundle's refs are force-pushed to it, the labels and milestones it does not have yet are
+/// queued, and `restore_issues` queues the issues and comments it does not have yet. A second
+/// restore of the same backup therefore queues nothing.
 pub fn restore_over_live_from(
     caller: &Caller,
     fleet: &FleetBridge,
@@ -1128,9 +1646,7 @@ pub fn restore_over_live_from(
         )));
     }
     let (owner, name) = split_repo(repo)?;
-    let manifest = manifest_in(backup_dir)?;
-    let labels = names_in(backup_dir, "labels.json", "name", manifest.labels)?;
-    let milestones = names_in(backup_dir, "milestones.json", "title", manifest.milestones)?;
+    let backup = read_backup(backup_dir)?;
     let path = format!("/repos/{repo}");
     match remote.api.rest_get(&path, None)?.status {
         200 => {}
@@ -1141,20 +1657,40 @@ pub fn restore_over_live_from(
         }
         other => return Err(CoreError::GitHub(format!("GET {path}: status {other}"))),
     }
-    let bundle =
-        std::path::absolute(backup_dir.join("repo.bundle")).map_err(|e| io_error(backup_dir, e))?;
     let work = work_dir(owner, name);
-    let restored = clone_mirror(remote, &bundle.to_string_lossy(), &work).and_then(|()| {
-        let refs = push_refs(remote, &work, repo).map_err(|e| about(repo, e))?;
-        let before = queue_counts(fleet)?;
-        queue_labels(fleet, repo, &labels, &milestones, &before)?;
-        restore_issues(fleet, backup_dir, repo)?;
-        Ok(RestoreReport {
-            refs,
-            labels: labels.len() as u64,
-            milestones: milestones.len() as u64,
-        })
-    });
+    let restored = clone_mirror(remote, &backup.bundle.to_string_lossy(), &work)
+        .and_then(|()| check_refs(&work, &backup))
+        .and_then(|()| {
+            // What the repo has already is not created again.
+            let has = |list: &str, key: &str| -> Result<HashSet<String>, CoreError> {
+                Ok(rest_all(remote.api, &format!("/repos/{repo}/{list}"))?
+                    .iter()
+                    .filter_map(|item| item[key].as_str().map(str::to_lowercase))
+                    .collect())
+            };
+            let live_labels = has("labels?", "name")?;
+            let live_milestones = has("milestones?state=all", "title")?;
+            let labels: Vec<Create> = label_creates(&backup, repo)
+                .into_iter()
+                .filter(|c| !matches!(c, Create::Label { name, .. } if live_labels.contains(&name.to_lowercase())))
+                .collect();
+            let milestones: Vec<Create> = milestone_creates(&backup, repo)
+                .into_iter()
+                .filter(|c| !matches!(c, Create::Milestone { title, .. } if live_milestones.contains(&title.to_lowercase())))
+                .collect();
+            let refs = push_refs(remote, &work, repo).map_err(|e| about(repo, e))?;
+            let before = queue_counts(fleet)?;
+            let creates: Vec<Create> = labels.iter().chain(&milestones).cloned().collect();
+            queue_labels(fleet, repo, &creates, &before)?;
+            let issues = restore_issues(fleet, backup_dir, repo, remote)?;
+            Ok(RestoreReport {
+                refs,
+                labels: labels.len() as u64,
+                milestones: milestones.len() as u64,
+                issues,
+                left_out: left_out(&backup),
+            })
+        });
     let _ = std::fs::remove_dir_all(&work);
     restored
 }

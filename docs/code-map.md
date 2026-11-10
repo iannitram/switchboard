@@ -160,15 +160,17 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 
 ### backup
 `crates/core/src/backup.rs` · BAK-1, BAK-2, BAK-3 · planned. A git bundle of every ref plus JSON of issues, PRs, comments, labels, milestones, releases (under 1 GB) and the wiki, with a manifest, in `<NextCloud backups>/github/<repo>/`; the overwrite guard; restore to a new private repo (issues through the create queue), over a live repo only after `rules::guard`.
-- BAK-2 overwrite guard (`refuse_reason`): present.
+- BAK-2 overwrite guard (`refuse_reason`): present. `backup_repo` also refuses, before any read, when the last backup's manifest is damaged or missing beside other files, and when the last backup has a wiki and the new one has none.
 
 - BAK-1 JSON of issues, PRs, comments, labels, milestones (`write_json`): present.
 - BAK-1 git bundle (`bundle`): present.
 - BAK-1 releases.json (`write_release_list`, `RELEASE_FILE_LIMIT`): present.
-- BAK-1 release files under 1 GB (`fetch_release_files`, `write_releases`): present.
-- BAK-1 wiki mirror (`copy_wiki`): present.
-- BAK-1 back up one repo or all (`backup_repo`, `backup_all`, `BackupOutcome`; the Sky's back up buttons): present.
-- BAK-W back up from the app (`backup_run`: `folder`, `repos`, `record`, `run_one`, `run_all`; commands `backup_repo`, `backup_all`): present.
+- BAK-1 release files under 1 GB (`fetch_release_files`, `write_releases`; `FileSource`, `HttpFiles` over the network; part of every `backup_repo`): present.
+- BAK-1 wiki mirror (`copy_wiki`): present. Only a clone that says the repo is not there means no wiki; any other failed clone fails the backup.
+- BAK-1 back up one repo or all (`backup_repo`, `backup_all`, `BackupOutcome`, `RepoBackup`; the Sky's back up buttons): present. One backup of a repo at a time in a process, each in a staging folder of its own (`.<name>.new-<run>`); `backup_all` tries every repo and gives each its own outcome or error; the manifest holds the bundle's hash (`bundle_hash`).
+- BAK-W back up from the app (`backup_run`: `folder`, `repos`, `record`, `failed_row`, `run_one`, `run_all`; commands `backup_repo`, `backup_all`): present.
+  A repo whose backup failed in a "Back up all" is a row with outcome `failed`.
+- BAK-3 restore (`restore_history`, `restore_issues`, `restore_over_live`, `RestoreReport`, `IssuesReport`): present in core, no face calls it yet. The backup is checked against its manifest before any write (repo name, ref count, bundle hash, label and milestone counts); labels and milestones keep colour, description and due date; a comment goes to the number its issue has in the repo now; whatever the repo already has is not created again; what cannot be restored is listed in `left_out` (closed state, PRs, the wiki, releases).
 
 ### frontdoor
 `crates/core/src/frontdoor/` · FD-1 to FD-13 · planned. `router` (the four steps, the `first` list against budget, the learned pick), `labeller` (rules, then a small model, U8), `adapters` (one per service; none for the Claude subscription), `packet` (summary, last 6 turns, links; the summary check), `sticky` (what moves a chat; implicit signals), `thread` (one JSON Lines file per thread). Face: `app/src/views/Chat.tsx` with BroCrew's composer and messages ported; the "Open in Claude" button (FD-8).

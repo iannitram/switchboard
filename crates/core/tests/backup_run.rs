@@ -8,7 +8,9 @@
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use switchboard_core::backup::{BackupOutcome, Manifest};
-use switchboard_core::backup_run::{folder, record, repos, run_all, run_one, BackupRow};
+use switchboard_core::backup_run::{
+    failed_row, folder, record, repos, run_all, run_one, BackupRow,
+};
 use switchboard_core::github::snapshot::SnapshotStore;
 use switchboard_core::github::RepoSnapshot;
 use switchboard_core::settings::Settings;
@@ -47,6 +49,7 @@ fn manifest() -> Manifest {
         releases: 1,
         closed_without_pr: 4,
         wiki: true,
+        bundle_hash: String::new(),
     }
 }
 
@@ -416,5 +419,23 @@ fn the_code_map_lists_bak_w_present() {
             && l.contains("`backup_run`")
             && l.ends_with("): present.")),
         "no `- BAK-W ...: present.` line under `### backup`: {section:?}"
+    );
+}
+
+/// #369: a repo whose backup failed is a row of its own, so the rows of the other repos in a
+/// "Back up all" still come back.
+#[test]
+fn a_failed_backup_is_a_row_with_the_error_as_its_reason() {
+    let backups = Path::new("/nc/Backups");
+    let error = CoreError::Io("o/gone: git clone --mirror: not found".to_string());
+    assert_eq!(
+        failed_row(backups, "o/gone", &error),
+        BackupRow {
+            repo: "o/gone".to_string(),
+            outcome: "failed".to_string(),
+            folder: folder(backups, "o/gone").display().to_string(),
+            manifest: None,
+            reason: Some(error.to_string()),
+        }
     );
 }

@@ -119,10 +119,14 @@ fn a_label_or_a_milestone_adds_coordinator() {
     let label = Create::Label {
         repo: "o/r".to_string(),
         name: "size:easy".to_string(),
+        color: None,
+        description: None,
     };
     let milestone = Create::Milestone {
         repo: "o/r".to_string(),
         title: "1.0".to_string(),
+        description: None,
+        due: None,
     };
     for create in [label, milestone] {
         let (root, dir) = stub_root("coord");
