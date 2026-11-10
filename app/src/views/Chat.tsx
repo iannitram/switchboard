@@ -1,10 +1,11 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Empty } from "./Empty";
 import { ErrorBanner } from "../ErrorBanner";
 import { PromptComposer } from "../brocrew/PromptComposer";
 import type { ResolveMessageLink } from "../brocrew/message-links";
 import { UserMessage } from "../brocrew/UserMessage";
 import { AssistantMessage } from "../brocrew/AssistantMessage";
+import { DEV_CHAT_TURNS } from "../dev-fixtures";
 import { call, type CoreError, type CoreResult } from "../core";
 
 // The Chat view (feature:frontdoor, SPEC.md). FD-1: the composer sends a message to the core's
@@ -117,6 +118,11 @@ export type ChatRate = (turnIndex: number, rating: "up" | "down") => Promise<Cor
 
 const defaultRate: ChatRate = (turnIndex, rating) => call<null>("chat_rate", { turnIndex, rating });
 
+// DEV only: VITE_FIXTURE=1 starts the thread with sample turns (see dev-fixtures.ts).
+function devTurns(): ChatTurn[] {
+  return import.meta.env.DEV && import.meta.env.MODE === "development" && import.meta.env.VITE_FIXTURE ? DEV_CHAT_TURNS : [];
+}
+
 export function Chat({
   handoff,
   held,
@@ -127,11 +133,23 @@ export function Chat({
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [route, setRoute] = useState<ChatRoute | null>(null);
-  const [turns, setTurns] = useState<ChatTurn[]>([]);
+  const [turns, setTurns] = useState<ChatTurn[]>(devTurns);
   const [errors, setErrors] = useState<CoreError[]>([]);
   // One rating per turn: the last press. Keyed by the turn's index in the thread.
   const [ratings, setRatings] = useState<Record<number, "up" | "down">>({});
   const inFlight = useRef(false);
+  const scroller = useRef<HTMLDivElement>(null);
+
+  // The newest turn stays in view.
+  useEffect(() => {
+    const el = scroller.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+    const frame = requestAnimationFrame(() => {
+      el.scrollTop = el.scrollHeight;
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [turns]);
 
   const onRate = async (turnIndex: number, rating: "up" | "down") => {
     if (ratings[turnIndex] === rating) return;
@@ -177,7 +195,8 @@ export function Chat({
   };
 
   return (
-    <div>
+    <div className="chat">
+      <div className="chat-scroll" ref={scroller}>
       <ErrorBanner errors={errors} />
       {handoff || held ? (
         <section aria-label="Chat">
@@ -208,10 +227,13 @@ export function Chat({
           )}
         </section>
       )}
-      <PromptComposer value={draft} onChange={setDraft} onSend={onSend} busy={busy} />
-      {route && (
-        <p>{`Picked by: ${route.step}${route.kind ? ` (${route.kind})` : ""}`}</p>
-      )}
+      </div>
+      <div className="chat-dock">
+        {route && (
+          <p>{`Picked by: ${route.step}${route.kind ? ` (${route.kind})` : ""}`}</p>
+        )}
+        <PromptComposer value={draft} onChange={setDraft} onSend={onSend} busy={busy} />
+      </div>
     </div>
   );
 }
