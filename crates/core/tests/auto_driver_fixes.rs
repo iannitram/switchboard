@@ -35,13 +35,86 @@ print(json.dumps({"class": "fleet", "signature": card.get("id", "none")}))
 #[test]
 fn a_card_id_becomes_one_file_name() {
     assert_eq!(card_file_name(Some("sb-248"), 1), "sb-248.json");
-    assert_eq!(card_file_name(Some("../escaped"), 1), "..-escaped.json");
-    assert_eq!(card_file_name(Some("/tmp/abs"), 2), "-tmp-abs.json");
-    assert_eq!(card_file_name(Some("a/b"), 3), "a-b.json");
-    assert_eq!(card_file_name(Some("a\\b"), 3), "a-b.json");
-    assert_eq!(card_file_name(Some(".."), 4), "card-4.json");
+    assert_eq!(card_file_name(Some("../escaped"), 1), "%2E%2E%2Fescaped.json");
+    assert_eq!(card_file_name(Some("/tmp/abs"), 2), "%2Ftmp%2Fabs.json");
+    assert_eq!(card_file_name(Some("a/b"), 3), "a%2Fb.json");
+    assert_eq!(card_file_name(Some("a\\b"), 3), "a%5Cb.json");
+    assert_eq!(card_file_name(Some(".."), 4), "%2E%2E.json");
     assert_eq!(card_file_name(Some(""), 5), "card-5.json");
     assert_eq!(card_file_name(None, 6), "card-6.json");
+}
+
+/// Every name is one plain file name: no separator, no `..`, not empty, not a Windows device
+/// name, no character Windows refuses, and not too long for any file system.
+fn assert_one_plain_file(name: &str) {
+    let stem = name.strip_suffix(".json").unwrap_or_else(|| panic!("{name}"));
+    assert!(!stem.is_empty(), "{name}");
+    assert!(name.len() <= 200, "{name}");
+    assert!(
+        name.bytes().all(|b| b.is_ascii_alphanumeric() || b"%_-~.".contains(&b)),
+        "{name}"
+    );
+    assert!(!stem.contains('.'), "{name}");
+    let device = ["con", "prn", "aux", "nul", "com1", "com9", "lpt1", "lpt0"];
+    assert!(!device.contains(&stem.to_ascii_lowercase().as_str()), "{name}");
+    assert_eq!(Path::new(name).components().count(), 1, "{name}");
+}
+
+#[test]
+fn two_different_ids_never_share_a_file() {
+    // #382 review: `a/b` and `a\\b` both became `a-b.json`, so one card overwrote the other.
+    let long_a = format!("{}a", "x".repeat(300));
+    let long_b = format!("{}b", "x".repeat(300));
+    let long_slash = "a/".repeat(200);
+    let ids: Vec<Option<&str>> = vec![
+        Some("a/b"),
+        Some("a\\b"),
+        Some("a-b"),
+        Some("a b"),
+        Some("a%2Fb"),
+        Some("A-b"),
+        Some("a-B"),
+        Some("card-1"),
+        Some("card-2"),
+        None,
+        Some(""),
+        Some(".."),
+        Some("..."),
+        Some("."),
+        Some("/"),
+        Some("/etc/passwd"),
+        Some("C:\\Windows\\x"),
+        Some("con"),
+        Some("CON"),
+        Some("nul"),
+        Some("com1"),
+        Some("lpt9"),
+        Some("aux.txt"),
+        Some("a:b*c?d\"<e>f|g"),
+        Some("trailing."),
+        Some("trailing "),
+        Some("caf\u{e9}"),
+        Some("cafe\u{301}"),
+        Some(&long_a),
+        Some(&long_b),
+        Some(&long_slash),
+        Some("x~0000000000000000"),
+    ];
+    let mut seen = std::collections::HashMap::new();
+    for (i, id) in ids.iter().enumerate() {
+        // The place among the failed cards: None at 1 and "" at 2, as in one loop's output.
+        let name = card_file_name(*id, i + 1);
+        assert_one_plain_file(&name);
+        // Compared without case: Windows and macOS do not tell capitals apart.
+        if let Some(other) = seen.insert(name.to_ascii_lowercase(), *id) {
+            panic!("{id:?} and {other:?} both map to {name}");
+        }
+    }
+    // The same id always gives the same name (a card's file is replaced, not doubled).
+    assert_eq!(
+        card_file_name(Some(&long_a), 1),
+        card_file_name(Some(&long_a), 9)
+    );
 }
 
 #[test]
@@ -73,8 +146,8 @@ fn an_id_with_a_path_in_it_is_written_inside_the_cards_folder() {
         .collect();
     written.sort();
     assert_eq!(written.len(), 3, "{written:?}");
-    assert!(written.contains(&"..-escaped.json".to_string()));
-    assert!(written.contains(&"a-b.json".to_string()));
+    assert!(written.contains(&"%2E%2E%2Fescaped.json".to_string()));
+    assert!(written.contains(&"a%2Fb.json".to_string()));
 }
 
 // --- #383: a loop that ends with an error ---

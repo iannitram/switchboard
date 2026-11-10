@@ -144,17 +144,50 @@ pub fn failed_cards(stdout: &str) -> Vec<Value> {
         .collect()
 }
 
-/// The file name a failed card is written under in the cards folder: its id with each character
-/// outside `A-Z a-z 0-9 . _ -` turned into `-` (`passes::id_part`), so `../x`, `a/b` or an
-/// absolute path stays one file inside the folder (#382). An id that is empty, or only dots,
-/// once made safe is `card-<n>`.
+/// The longest file name `card_file_name` gives before it shortens one (`<prefix>~<hash>.json`).
+const CARD_NAME_MAX: usize = 150;
+
+/// The file name a failed card is written under in the cards folder (#382). The id is kept as it
+/// is where it is plain (`a-z 0-9 _ -`); every other byte (`/`, `\`, `.`, `%`, a capital letter,
+/// a space, non-ASCII) is written `%XX`, so `../x`, `a/b` or an absolute path stays one file
+/// inside the folder, and two different ids never share a file, also on a file system that does
+/// not tell capitals apart (Windows, macOS). A name that is a Windows device name (`con`,
+/// `nul`, `com1`, ...) or starts with `card-` has its first letter written `%XX` too. A card
+/// with no id, or an empty one, is `card-<n>`. A name longer than `CARD_NAME_MAX` is cut and
+/// ends in `~` and a hash of the whole id.
 pub fn card_file_name(id: Option<&str>, n: usize) -> String {
-    let safe = id.map(super::passes::id_part).unwrap_or_default();
-    if safe.chars().all(|c| c == '.') {
-        format!("card-{n}.json")
-    } else {
-        format!("{safe}.json")
+    let id = match id {
+        Some(id) if !id.is_empty() => id,
+        _ => return format!("card-{n}.json"),
+    };
+    let mut name = String::new();
+    for b in id.bytes() {
+        if b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-' {
+            name.push(b as char);
+        } else {
+            name.push_str(&format!("%{b:02X}"));
+        }
     }
+    let device = matches!(name.as_str(), "con" | "prn" | "aux" | "nul")
+        || ((name.starts_with("com") || name.starts_with("lpt"))
+            && name.len() == 4
+            && name.as_bytes()[3].is_ascii_digit());
+    if device || name.starts_with("card-") {
+        name = format!("%{:02X}{}", name.as_bytes()[0], &name[1..]);
+    }
+    if name.len() > CARD_NAME_MAX {
+        let mut cut = CARD_NAME_MAX - 30;
+        // Never cut inside a `%XX`.
+        while name.as_bytes()[..cut].iter().rev().take(2).any(|&b| b == b'%') {
+            cut -= 1;
+        }
+        // FNV-1a, 64 bits: the same id gives the same name on every run.
+        let hash = id.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+            (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+        });
+        name = format!("{}~{hash:016x}", &name[..cut]);
+    }
+    format!("{name}.json")
 }
 
 /// AUTO-9 for each failed card of a finished loop: the card is written to `dir` under
