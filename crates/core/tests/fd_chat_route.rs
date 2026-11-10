@@ -8,7 +8,7 @@
 use serde_json::{json, Value};
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
-use switchboard_core::abilities::AbilitiesIndex;
+use switchboard_core::abilities::{AbilitiesIndex, FleetModels};
 use switchboard_core::fleet::{FleetBridge, FleetErrorReason};
 use switchboard_core::frontdoor::chat::{
     route_message, route_message_on, route_message_with, ChatPick, ChatRoute, FleetGate,
@@ -322,7 +322,8 @@ fn an_empty_message_is_refused_without_a_call() {
 #[test]
 fn the_router_gets_the_message_the_loaded_index_and_the_complexity() {
     let fleet = fixture_fleet(None);
-    let expected_index = AbilitiesIndex::load(&fleet).unwrap();
+    let expected_index =
+        AbilitiesIndex::load_with(&fleet, FleetModels::local_machine().as_deref()).unwrap();
     let seen: Cell<Option<(String, bool, Complexity)>> = Cell::new(None);
     let got = route_message_with(
         &fleet,
@@ -444,7 +445,7 @@ fn a_failed_index_read_is_the_error_and_the_router_never_runs() {
 fn route_message_is_the_real_router_over_the_fleet() {
     // The fixture stub allows every pool, so the fleet gate answers as AllowAll does.
     let fleet = fixture_fleet(None);
-    let index = AbilitiesIndex::load(&fleet).unwrap();
+    let index = AbilitiesIndex::load_with(&fleet, FleetModels::local_machine().as_deref()).unwrap();
     for message in ["hello there", "search the web for llama-swap"] {
         let got = route_message(&fleet, message, DEFAULT_COMPLEXITY).unwrap();
         let want = router::route(message, &index, &AllowAll, DEFAULT_COMPLEXITY);
