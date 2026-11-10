@@ -143,6 +143,8 @@ fn autopilot_after_poll(
                         eprintln!("autopilot: started {id}");
                     }
                     if let Some(e) = &run.drift_error {
+                        // #379: a Project Manager job that died is recorded like any fleet error.
+                        commands::record_fleet_error(&state, e);
                         eprintln!("autopilot: drift clear: {e}");
                     }
                     if !run.backup.is_empty() {

@@ -7,7 +7,7 @@ use super::review::{first_rung, review_job, Rung};
 use super::weekly::{roadmap_changed, weekly_due};
 use crate::abilities::FleetModels;
 use crate::clock::UnixSeconds;
-use crate::fleet::{clean_child_env, FleetBridge, FLEET_ROOT_ENV};
+use crate::fleet::{clean_child_env, FleetBridge, FleetError, FleetErrorReason, FLEET_ROOT_ENV};
 use crate::github::merge::merge_passed;
 use crate::github::poll::Poller;
 use crate::github::snapshot::{RepoSnapshot, SnapshotStore};
@@ -71,8 +71,10 @@ pub trait JobStarter {
     /// Start `job` with `brief` as its prompt. Does not wait for the job.
     fn start(&mut self, job: &Value, brief: &str) -> Result<(), CoreError>;
     /// Has the job started under `job_id` ended? `FleetStarter` says yes when the job has output,
-    /// has no job file, or its job file is older than `PM_JOB_TIMEOUT_SECS` (a launcher that died
-    /// leaves an empty output, and the queue must not wait for it forever).
+    /// has no job file, its launcher has exited 0, or its job file is older than
+    /// `PM_JOB_TIMEOUT_SECS`. An error means the job has ended with one: its launcher exited
+    /// non-zero with no output (CORE-2, #379); the caller frees the job's slot and passes the
+    /// error on.
     fn finished(&mut self, job_id: &str) -> Result<bool, CoreError>;
 }
 
@@ -260,13 +262,18 @@ fn pm_lane(starter: &mut dyn JobStarter) -> Result<Option<&'static str>, CoreErr
 }
 
 /// AUTO-2, AUTO-5: may a Project Manager job start? Not while the one last started has not
-/// finished; once it has, that is forgotten.
+/// finished; once it has, that is forgotten. A job that ended with an error (`finished` answers
+/// it) is forgotten too, and its error is returned, so the slot is free at the next pass (#379).
 fn pm_free(state: &mut AutopilotState, starter: &mut dyn JobStarter) -> Result<bool, CoreError> {
     if let Some(id) = state.pm_running.clone() {
-        if !starter.finished(&id)? {
-            return Ok(false);
+        match starter.finished(&id) {
+            Ok(false) => return Ok(false),
+            Ok(true) => state.pm_running = None,
+            Err(e) => {
+                state.pm_running = None;
+                return Err(e);
+            }
         }
-        state.pm_running = None;
     }
     Ok(true)
 }
@@ -565,6 +572,13 @@ pub fn job_log_files(job_path: &Path) -> Result<(std::fs::File, std::fs::File), 
     ))
 }
 
+/// The file beside a job file (`<job id>.exit`) where the app's starter writes the launcher's
+/// exit code when it ends (`signal` when it had none), so a later pass can tell a launcher that
+/// died from one still running (#379).
+pub fn job_exit_file(job_path: &Path) -> PathBuf {
+    job_path.with_extension("exit")
+}
+
 /// How long a job with no output may run before the queue stops waiting for it: 2 hours.
 pub const PM_JOB_TIMEOUT_SECS: u64 = 7_200;
 
@@ -629,8 +643,9 @@ pub fn remove_pm_worktree(target: &PmCleanup) {
 }
 
 /// The app's starter: AUTO-1 through the bridge, and `fleet run <job file> --json` in the
-/// background. The launcher's stdout goes to `<job id>.out` and its stderr to `<job id>.err`,
-/// beside the job file, so a crash leaves its reason on disk.
+/// background. The launcher's stdout goes to `<job id>.out`, its stderr to `<job id>.err` and,
+/// when it ends, its exit code to `<job id>.exit`, beside the job file, so a crash leaves its
+/// reason on disk and frees the Project Manager's slot (#379).
 ///
 /// The lane `qwen` may also spend only when the local model server answers: `qwen_probe` is
 /// asked with the `machines.<machine>.qwen_server_url` from the fleet config.
@@ -699,8 +714,13 @@ impl JobStarter for FleetStarter {
             .stderr(Stdio::from(err))
             .spawn()
             .map_err(|e| CoreError::Io(format!("{}: {e}", command[0])))?;
+        let exit_file = job_exit_file(&path);
         std::thread::spawn(move || {
-            let _ = child.wait();
+            let code = match child.wait().map(|status| status.code()) {
+                Ok(Some(code)) => code.to_string(),
+                _ => "signal".to_string(),
+            };
+            let _ = std::fs::write(exit_file, code);
         });
         Ok(())
     }
@@ -720,6 +740,21 @@ impl JobStarter for FleetStarter {
                 remove_pm_worktree(&clean);
             }
             return Ok(true);
+        }
+        // No output: a launcher that has exited 0 is done; one that exited otherwise failed to
+        // run the job, which is a fleet error with its exit code and stderr (CORE-2).
+        if let Ok(text) = std::fs::read_to_string(job_exit_file(&job_file)) {
+            let code = text.trim().parse::<i32>().ok();
+            if code == Some(0) {
+                return Ok(true);
+            }
+            let job_arg = job_file.to_string_lossy().into_owned();
+            return Err(CoreError::Fleet(FleetError {
+                command: self.fleet.command_line(&["run", &job_arg]),
+                exit_code: code,
+                stderr: std::fs::read_to_string(job_file.with_extension("err")).unwrap_or_default(),
+                reason: FleetErrorReason::Exit,
+            }));
         }
         let age = std::fs::metadata(&job_file)
             .and_then(|m| m.modified())
