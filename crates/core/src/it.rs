@@ -112,6 +112,21 @@ impl ProbeRunner for SystemProbeRunner {
     }
 }
 
+/// Kill the probe's whole process group (the child is its leader). `kill` is the system
+/// program, so the core needs no unsafe code or extra crate.
+#[cfg(unix)]
+fn kill_group(child: &std::process::Child) {
+    let _ = std::process::Command::new("kill")
+        .args(["-KILL", "--", &format!("-{}", child.id())])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+#[cfg(not(unix))]
+fn kill_group(_child: &std::process::Child) {}
+
 /// IT-W: run `probe`, killing it when it is still going after `limit`.
 pub fn run_probe_within(probe: &Probe, limit: Duration) -> ProbeResult {
     let none = || ProbeResult {
@@ -119,13 +134,17 @@ pub fn run_probe_within(probe: &Probe, limit: Duration) -> ProbeResult {
         exit_code: None,
         stdout: String::new(),
     };
-    let Ok(mut child) = std::process::Command::new(probe.program)
+    let mut command = std::process::Command::new(probe.program);
+    command
         .args(probe.args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    else {
+        .stderr(std::process::Stdio::null());
+    // Its own process group, so a kill reaches what the probe started too (a shim script's
+    // `sleep` would otherwise outlive it).
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    let Ok(mut child) = command.spawn() else {
         return none();
     };
     // Read stdout on its own thread so a full pipe cannot stall the child. It is never joined
@@ -146,6 +165,7 @@ pub fn run_probe_within(probe: &Probe, limit: Duration) -> ProbeResult {
                 std::thread::sleep(Duration::from_millis(10));
             }
             _ => {
+                kill_group(&child);
                 let _ = child.kill();
                 let _ = child.wait();
                 return none();
