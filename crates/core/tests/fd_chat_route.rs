@@ -581,7 +581,8 @@ fn the_chat_route_command_is_a_thin_call_into_route_message() {
         .find("pub fn chat_route(")
         .expect("commands.rs has pub fn chat_route(");
     let before = &commands[..at];
-    let attr = before.rfind("#[tauri::command]").expect("an attribute");
+    // `#[tauri::command(async)]` counts: chat_route calls a model, so it runs off the main thread.
+    let attr = before.rfind("#[tauri::command").expect("an attribute");
     assert!(
         !before[attr..].contains("fn "),
         "#[tauri::command] is not on chat_route"

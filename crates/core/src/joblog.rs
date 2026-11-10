@@ -43,6 +43,10 @@ pub struct JobRow {
     pub implicit: bool,
     /// FD-10: Some(true) when this thumbs-down also moved the chat to another model, Some(false) when it did not; None on every other row.
     pub moved: Option<bool>,
+    /// FD-13: on a chat turn's row, `user` or `assistant`; None on every other row.
+    pub role: Option<String>,
+    /// FD-13: on a chat turn's row, the turn's text; None on every other row.
+    pub text: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -131,6 +135,8 @@ pub fn row_from_ledger(event: &Value) -> JobRow {
         source: RowSource::Ledger,
         implicit: false,
         moved: None,
+        role: None,
+        text: None,
     }
 }
 
