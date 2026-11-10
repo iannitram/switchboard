@@ -19,7 +19,10 @@ impl WriteCore for NoWrites {
         unreachable!("no role, no write tools")
     }
 
-    fn set_pool_cap(&self, _: &str, _: f64) -> Result<(), String> {
+    fn pool_edit(&self, _: &str, _: &switchboard_core::budget::PoolEdit) -> Result<String, String> {
+        unreachable!("no role, no write tools")
+    }
+    fn budget_refresh(&self) -> Result<Value, String> {
         unreachable!("no role, no write tools")
     }
 

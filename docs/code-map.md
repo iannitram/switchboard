@@ -74,7 +74,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 `crates/core/src/joblog.rs` · CORE-4 · present. One `JobRow` shape for ledger attempts and local chat rows; a missing field is `None` and shows as "not recorded". U9's asked fields (`checks`, `escalation_step`, `review_fix_loc`) are in the shape and read as "not recorded" until the pipeline batch writes them. Read by reports, the router (FD-4) and budget.
 
 ### core-rules
-`crates/core/src/rules.rs` · CORE-3 (and the worktree test for CLI-3, MCP-3) · present. `guard(caller, action)` for merge, repo delete and restore over a live repo; the same `Verdict` and text whichever face asks. Called by github::merge, backup restore, cli, mcp and the Tauri commands.
+`crates/core/src/rules.rs` · CORE-3 (and the worktree test for CLI-3, MCP-3) · present. `guard(caller, action)` for merge, repo delete and restore over a live repo; the same `Verdict` and text whichever face asks. `guard_pool_edit(caller, pool)` for a budget pool edit: the app, or the budget-manager role from the CLI or MCP, never inside a job worktree. Called by github::merge, backup restore, cli, mcp and the Tauri commands.
 
 ### core-platform
 `crates/core/src/platform.rs` · the R04 seams · present. See Platforms above.
@@ -159,6 +159,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - BUD-3 refresh (`refresh`, `RefreshTimer`, `budget_rows`, `budget_refresh`): present.
 - BUD-1 panel (`BudgetPanel`, `Budget`): present.
 - BUD-2 save (`save_edit`, `parse_reset`, `budget_save_edit`): present.
+- BUD-2 save for the CLI and MCP (`save_pool_edit`: file, ledger row in `<data>/pool-edits.jsonl` and Waiting item, all or nothing; `edit_summary`, the reply text naming each new value and the old one): present.
 - BUD-2 editor (`PoolEditor`): present.
 
 ### backup
@@ -237,10 +238,11 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - CLI-1 parse arguments, budget, sky, star, waiting, reports, loadout: present. `sky` and `star` read the stored snapshot in the app data folder (`SWITCHBOARD_DATA`, else the desktop app's) and never call GitHub; `star` reads its running job from the job log when a pipeline checkout is known. The pipeline checkout is `SWITCHBOARD_PIPELINE`, else `pipeline_repo` in `settings.json` (`pipeline_dir`). `budget` text shows points over or under pace, the reading's age and the stale mark (BUD-1); `reports` text shows all five REP-1 parts under each head line.
 - CLI-2 `refresh`, `backup <repo>`, `backup --all`: present. `backup` reads `settings.json` from the app config folder (`SWITCHBOARD_CONFIG`, else `SWITCHBOARD_DATA`, else the desktop app's; `config_dir`). The Refresh and Back up buttons from the CLI, one line per repo (`<repo>: refreshed | unchanged`, `<repo>: backed up to <path>`); a failed or refused repo goes to stderr and the exit is 1 after all were tried; `backup` alone exits 2.
 - CLI-3 delete and restore refused to Waiting on you, `--role` merge through the guard and GH-5's merge (`CliWrites`), none inside a job worktree: present.
+- `--role budget-manager set_pool_cap <pool> <cap>` and `pool_edit <pool> [--plan] [--cap] [--reset] [--cost]` (`pool_command`, `take_pool_flags`) through `rules::guard_pool_edit` and `budget::save_pool_edit`, the same path as MCP's tools; `budget --refresh` re-reads the pools first (`budget::refresh`); `settings` prints the settings file, read only (`settings_command`): present. `refresh` and `backup` write stdout through `emit_to` too.
 
 ### mcp
 `crates/cli/src/mcp.rs` · MCP-1 to MCP-3 present. JSON-RPC over stdio; six read tools; role write tools; none inside a job worktree. Bad lines (non-UTF-8, batch, non-object) get a JSON-RPC error; tool arguments are checked against each tool's input schema.
-- MCP-2 write tools reach the real core (`CoreWrites`: the CLI's merge, BUD-2's save, local Waiting items): present.
+- MCP-2 write tools reach the real core (`CoreWrites`: the CLI's merge, BUD-2's save, local Waiting items): present. budget-manager has `set_pool_cap`, `pool_edit` and `budget_refresh`; a pool edit's reply states what was set. `reports` takes the CLI's `project`, `outcome` and `pool` filters (`cli::reports_answer`).
 - MCP-3 no write tools in a job worktree: present.
 
 ### shell
