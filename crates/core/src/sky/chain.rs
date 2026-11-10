@@ -60,7 +60,10 @@ fn hash_numbers(text: &str) -> Vec<u64> {
 /// SKY-7: the longest chain over the open issues, as issue numbers from the first blocker to
 /// the last blocked. A cycle is broken where a depth-first walk from each open issue, in
 /// ascending order, reaches an issue still on its own stack: that arrow is dropped. Ties go to
-/// the chain whose first issue has the lower number.
+/// the chain whose first issue has the lower number, then the lower next issue.
+///
+/// Neither the walk nor the path search recurses, so a chain of any length fits on the stack
+/// (#337).
 pub fn longest(issues: &[Issue]) -> Vec<u64> {
     let open: BTreeSet<u64> = issues
         .iter()
@@ -75,89 +78,96 @@ pub fn longest(issues: &[Issue]) -> Vec<u64> {
         }
     }
 
-    let mut walk = Walk {
-        arrows: &arrows,
-        visited: BTreeSet::new(),
-        stack: BTreeSet::new(),
-        kept: BTreeMap::new(),
+    let (kept, finished) = walk(&open, &arrows);
+
+    // The kept arrows have no cycle, and the walk finishes an issue only after every issue a
+    // kept arrow leads to, so one pass in finishing order sees each next issue settled. The
+    // best path from an issue is the issue, then the best path of its next issue with the most
+    // issues; on a tie the lower next issue (two paths from different issues differ in their
+    // first number, so that is the smaller list).
+    let mut length: BTreeMap<u64, usize> = BTreeMap::new();
+    let mut next: BTreeMap<u64, u64> = BTreeMap::new();
+    for &node in &finished {
+        let mut best: Option<(usize, u64)> = None;
+        for &target in kept.get(&node).map(Vec::as_slice).unwrap_or_default() {
+            let len = length[&target];
+            if best.map_or(true, |(l, t)| len > l || (len == l && target < t)) {
+                best = Some((len, target));
+            }
+        }
+        length.insert(node, 1 + best.map_or(0, |(l, _)| l));
+        if let Some((_, target)) = best {
+            next.insert(node, target);
+        }
+    }
+
+    // The longest path over all open issues; ascending order keeps the lower first issue.
+    let mut start: Option<(usize, u64)> = None;
+    for &n in &open {
+        let len = length[&n];
+        if start.map_or(true, |(l, _)| len > l) {
+            start = Some((len, n));
+        }
+    }
+    let Some((len, first)) = start else {
+        return Vec::new();
     };
-    for &n in &open {
-        if !walk.visited.contains(&n) {
-            walk.visit(n);
-        }
+    if len < 2 {
+        return Vec::new();
     }
-    let kept = walk.kept;
-
-    let mut memo = BTreeMap::new();
-    let mut best: Vec<u64> = Vec::new();
-    for &n in &open {
-        let path = best_from(n, &kept, &mut memo);
-        if better(&path, &best) {
-            best = path;
-        }
+    let mut path = Vec::with_capacity(len);
+    let mut node = Some(first);
+    while let Some(n) = node {
+        path.push(n);
+        node = next.get(&n).copied();
     }
-    if best.len() < 2 {
-        Vec::new()
-    } else {
-        best
-    }
-}
-
-/// The depth-first walk that decides which arrows are kept.
-struct Walk<'a> {
-    arrows: &'a BTreeMap<u64, BTreeSet<u64>>,
-    visited: BTreeSet<u64>,
-    stack: BTreeSet<u64>,
-    kept: BTreeMap<u64, Vec<u64>>,
-}
-
-impl Walk<'_> {
-    fn visit(&mut self, node: u64) {
-        self.visited.insert(node);
-        self.stack.insert(node);
-        let targets: Vec<u64> = self
-            .arrows
-            .get(&node)
-            .map(|t| t.iter().copied().collect())
-            .unwrap_or_default();
-        for target in targets {
-            if self.stack.contains(&target) {
-                continue;
-            }
-            self.kept.entry(node).or_default().push(target);
-            if !self.visited.contains(&target) {
-                self.visit(target);
-            }
-        }
-        self.stack.remove(&node);
-    }
-}
-
-/// The best path starting at `node`: most issues, then the smaller as a list of numbers.
-fn best_from(
-    node: u64,
-    kept: &BTreeMap<u64, Vec<u64>>,
-    memo: &mut BTreeMap<u64, Vec<u64>>,
-) -> Vec<u64> {
-    if let Some(path) = memo.get(&node) {
-        return path.clone();
-    }
-    let mut tail: Vec<u64> = Vec::new();
-    if let Some(next_nodes) = kept.get(&node) {
-        for &next in next_nodes {
-            let candidate = best_from(next, kept, memo);
-            if better(&candidate, &tail) {
-                tail = candidate;
-            }
-        }
-    }
-    let mut path = vec![node];
-    path.extend(tail);
-    memo.insert(node, path.clone());
     path
 }
 
-/// Longer wins; on equal length the smaller list of numbers wins.
-fn better(a: &[u64], b: &[u64]) -> bool {
-    a.len() > b.len() || (a.len() == b.len() && a < b)
+/// The depth-first walk from each open issue in ascending order, on a stack of its own: the
+/// arrows it keeps (every arrow except one back to an issue still on the walk's stack), each
+/// issue's in the order it met them, and the issues in the order the walk finished them.
+fn walk(
+    open: &BTreeSet<u64>,
+    arrows: &BTreeMap<u64, BTreeSet<u64>>,
+) -> (BTreeMap<u64, Vec<u64>>, Vec<u64>) {
+    let mut visited: HashSet<u64> = HashSet::new();
+    let mut on_stack: HashSet<u64> = HashSet::new();
+    let mut kept: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
+    let mut finished: Vec<u64> = Vec::with_capacity(open.len());
+    let targets_of = |node: u64| -> Vec<u64> {
+        arrows
+            .get(&node)
+            .map(|t| t.iter().copied().collect())
+            .unwrap_or_default()
+    };
+
+    for &root in open {
+        if visited.contains(&root) {
+            continue;
+        }
+        visited.insert(root);
+        on_stack.insert(root);
+        // Each frame: the issue, its targets, and how many of them were looked at.
+        let mut frames: Vec<(u64, Vec<u64>, usize)> = vec![(root, targets_of(root), 0)];
+        while let Some((node, targets, i)) = frames.last_mut() {
+            let node = *node;
+            let Some(&target) = targets.get(*i) else {
+                on_stack.remove(&node);
+                finished.push(node);
+                frames.pop();
+                continue;
+            };
+            *i += 1;
+            if on_stack.contains(&target) {
+                continue;
+            }
+            kept.entry(node).or_default().push(target);
+            if visited.insert(target) {
+                on_stack.insert(target);
+                frames.push((target, targets_of(target), 0));
+            }
+        }
+    }
+    (kept, finished)
 }
