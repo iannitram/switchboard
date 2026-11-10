@@ -127,6 +127,82 @@ fn no_pass_a_pass_on_head_an_unknown_sha_or_no_repo_is_no() {
     assert!(!carried_over_by_patch_id(&plain, &pull(&reviewed, &head)));
 }
 
+// --- review of #381: the cases merge_pr.py's `carried_pass` decides, one by one ---
+
+#[test]
+fn a_fail_after_the_pass_wins() {
+    let (dir, reviewed) = repo("fail-after");
+    git(&dir, &["merge", "-q", "--no-edit", "main"]);
+    let head = git(&dir, &["rev-parse", "HEAD"]);
+    let mut pr = pull(&reviewed, &head);
+    pr.verdicts.push(ReviewVerdict {
+        verdict: "FAIL".to_string(),
+        sha: head.clone(),
+        needs_me: true,
+    });
+    assert!(!carried_over_by_patch_id(&dir, &pr));
+    // A FAIL on the same reviewed sha after the PASS: still the FAIL.
+    pr.verdicts[1].sha = reviewed.clone();
+    assert!(!carried_over_by_patch_id(&dir, &pr));
+}
+
+#[test]
+fn a_rebase_onto_main_with_the_same_change_carries_the_pass() {
+    // merge_pr.py compares each tip with its own merge-base, so a rebase that leaves the
+    // PR's own diff byte-identical keeps the PASS.
+    let (dir, reviewed) = repo("rebase");
+    git(&dir, &["rebase", "-q", "main"]);
+    let head = git(&dir, &["rev-parse", "HEAD"]);
+    assert_ne!(head, reviewed);
+    assert!(carried_over_by_patch_id(&dir, &pull(&reviewed, &head)));
+}
+
+#[test]
+fn a_rebase_that_changes_the_change_does_not() {
+    let (dir, reviewed) = repo("rebase-edit");
+    git(&dir, &["rebase", "-q", "main"]);
+    git(&dir, &["reset", "-q", "--soft", "HEAD~1"]);
+    std::fs::write(dir.join("feature.txt"), "feature, edited in the rebase\n").unwrap();
+    git(&dir, &["add", "feature.txt"]);
+    git(&dir, &["commit", "-q", "-m", "feature"]);
+    let head = git(&dir, &["rev-parse", "HEAD"]);
+    assert!(!carried_over_by_patch_id(&dir, &pull(&reviewed, &head)));
+}
+
+#[test]
+fn a_new_file_after_the_pass_does_not() {
+    let (dir, reviewed) = repo("new-file");
+    let head = commit(&dir, "extra.txt", "more\n", "one more file");
+    assert!(!carried_over_by_patch_id(&dir, &pull(&reviewed, &head)));
+}
+
+#[test]
+fn a_merge_from_main_that_also_changes_the_pr_does_not() {
+    // The merge commit itself edits a file: not only an update from main.
+    let (dir, reviewed) = repo("evil-merge");
+    git(&dir, &["merge", "-q", "--no-commit", "--no-ff", "main"]);
+    std::fs::write(dir.join("feature.txt"), "feature, slipped into the merge\n").unwrap();
+    git(&dir, &["add", "feature.txt"]);
+    git(&dir, &["commit", "-q", "--no-edit"]);
+    let head = git(&dir, &["rev-parse", "HEAD"]);
+    assert!(!carried_over_by_patch_id(&dir, &pull(&reviewed, &head)));
+}
+
+#[test]
+fn a_head_whose_own_change_is_empty_does_not() {
+    // merge_pr.py: an empty change has no patch-id, so nothing carries.
+    let (dir, reviewed) = repo("emptied");
+    git(&dir, &["rm", "-q", "feature.txt"]);
+    git(&dir, &["commit", "-q", "-m", "drop it"]);
+    let head = git(&dir, &["rev-parse", "HEAD"]);
+    assert!(!carried_over_by_patch_id(&dir, &pull(&reviewed, &head)));
+    // And a head sha the clone does not have.
+    assert!(!carried_over_by_patch_id(
+        &dir,
+        &pull(&reviewed, &"d".repeat(40))
+    ));
+}
+
 const STUB: &str = r#"import json, os, sys
 here = os.path.dirname(os.path.abspath(__file__))
 with open(os.path.join(here, "calls.log"), "a") as f:
