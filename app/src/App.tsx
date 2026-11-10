@@ -19,6 +19,17 @@ function devView(): ViewName {
   return asked && asked in VIEWS ? (asked as ViewName) : "Sky";
 }
 
+// Line glyphs for the nav tabs (16x16 grid), drawn as inline SVG so no asset or CSP change is needed.
+const TAB_ICONS: Record<ViewName, string> = {
+  Sky: "M8 1l1.6 5.4L15 8l-5.4 1.6L8 15l-1.6-5.4L1 8l5.4-1.6z",
+  "Waiting on you": "M8 2a4 4 0 0 0-4 4v3l-1.5 2.5h11L12 9V6a4 4 0 0 0-4-4zM6.5 13.5a1.5 1.5 0 0 0 3 0",
+  Reports: "M3 2h8l2 2v10H3zM5.5 6h5M5.5 8.5h5M5.5 11h3",
+  Budget: "M8 2a6 6 0 1 0 0 12A6 6 0 0 0 8 2zM8 5v6M6 8h4",
+  Chat: "M2 3h12v8H7l-3 3v-3H2z",
+  Loadout: "M2 5l6-3 6 3v6l-6 3-6-3zM2 5l6 3 6-3M8 8v6",
+  Settings: "M8 4a4 4 0 1 0 0 8 4 4 0 0 0 0-8zM8 1v14M1 8h14M3 3l10 10M13 3L3 13",
+};
+
 // SHELL-1: one window with the Sky, Waiting on you, Reports, Budget and Chat views. The face
 // holds no rules: every view asks the core through `core.ts`.
 export function App() {
@@ -68,7 +79,9 @@ export function App() {
           <nav aria-label="Views">
             {(Object.keys(VIEWS) as ViewName[]).map((name) => (
               <button key={name} className="key" aria-pressed={name === view} onClick={() => setView(name)}>
-                <span className="key-lamp" aria-hidden="true" />
+                <svg className="key-icon" viewBox="0 0 16 16" aria-hidden="true">
+                  <path d={TAB_ICONS[name]} />
+                </svg>
                 <span className="key-label">{name}</span>
               </button>
             ))}

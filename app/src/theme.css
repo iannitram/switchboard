@@ -155,9 +155,33 @@ body {
   border-top: 1px solid var(--brass-lo);
   opacity: 0.6;
   pointer-events: none;
-  background:
-    repeating-linear-gradient(90deg, var(--brass) 0 1px, transparent 1px 8px) left bottom / 100% 4px no-repeat,
-    repeating-linear-gradient(90deg, var(--brass) 0 1px, transparent 1px 40px) left bottom / 100% 9px no-repeat;
+  /* two tiled strips, explicit tile sizes: fine ticks every 8px (4px tall), long ticks every 40px (9px tall) */
+  background-image:
+    linear-gradient(90deg, var(--brass) 1px, transparent 1px),
+    linear-gradient(90deg, var(--brass) 1px, transparent 1px);
+  background-size: 8px 4px, 40px 9px;
+  background-position: left bottom, left bottom;
+  background-repeat: repeat-x, repeat-x;
+}
+
+.console .key {
+  gap: 8px;
+}
+
+.console .key-icon {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.3;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.console .key[aria-pressed="true"] .key-icon {
+  stroke: var(--aether);
+  filter: drop-shadow(0 0 3px rgba(143, 227, 255, 0.75));
 }
 
 .console .key {
