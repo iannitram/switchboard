@@ -288,6 +288,7 @@ fn main() {
             commands::backup_all,
             commands::chat_route,
             commands::chat_send_as_job,
+            commands::confirm_guarded,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Switchboard");
