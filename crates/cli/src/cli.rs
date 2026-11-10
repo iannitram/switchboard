@@ -39,6 +39,10 @@ pub const PIPELINE_ENV: &str = "SWITCHBOARD_PIPELINE";
 /// The environment variable that names the app data folder (the snapshot is in `snapshot/`).
 /// Unset, the folder is the desktop app's own (see `data_dir`).
 pub const DATA_ENV: &str = "SWITCHBOARD_DATA";
+/// The environment variable that names the app config folder (where the desktop app keeps
+/// `settings.json`). Unset, it falls back to `SWITCHBOARD_DATA`, then the desktop app's own (see
+/// `config_dir`).
+pub const CONFIG_ENV: &str = "SWITCHBOARD_CONFIG";
 /// The environment variable that names the fleet state folder (its `ledger/` holds the job log).
 /// Unset, the app data folder is used.
 pub const STATE_ENV: &str = "SWITCHBOARD_STATE";
@@ -476,14 +480,18 @@ fn refresh_one(
 }
 
 /// CLI-2: `switchboard backup <repo>` or `backup --all` (`target` holds the repo, or
-/// `--all`), the Back up buttons: the settings file in the app data folder and the real GitHub
+/// `--all`), the Back up buttons: the settings file in the app config folder and the real GitHub
 /// backup.
 fn run_backup(target: &[String]) -> ExitCode {
     let Some(data) = data_dir() else {
         eprintln!("switchboard: set {DATA_ENV} to the app data folder");
         return ExitCode::from(2);
     };
-    let settings = match settings::load(&data.join("settings.json")) {
+    let Some(config) = config_dir() else {
+        eprintln!("switchboard: set {CONFIG_ENV} to the app config folder");
+        return ExitCode::from(2);
+    };
+    let settings = match settings::load(&config.join("settings.json")) {
         Ok(settings) => settings,
         Err(e) => {
             eprintln!("switchboard: backup: {e}");
@@ -703,6 +711,40 @@ pub(crate) fn data_dir() -> Option<PathBuf> {
         Os::Mac => home.map(|h| h.join("Library").join("Application Support").join(APP_DIR)),
         Os::Linux => env_path("XDG_DATA_HOME")
             .or_else(|| home.map(|h| h.join(".local").join("share")))
+            .map(|d| d.join(APP_DIR)),
+    }
+}
+
+/// The app config folder (`settings.json`): `SWITCHBOARD_CONFIG`, else `SWITCHBOARD_DATA` (the
+/// earlier workaround), else the desktop app's folder for this OS.
+pub(crate) fn config_dir() -> Option<PathBuf> {
+    config_dir_from(
+        current_os(),
+        env_path(CONFIG_ENV),
+        env_path(DATA_ENV),
+        env_path("HOME"),
+        env_path("XDG_CONFIG_HOME"),
+        env_path("APPDATA"),
+    )
+}
+
+/// `config_dir` over the values it reads, so the tests need not touch the process environment.
+fn config_dir_from(
+    os: Os,
+    config_env: Option<PathBuf>,
+    data_env: Option<PathBuf>,
+    home: Option<PathBuf>,
+    xdg_config: Option<PathBuf>,
+    appdata: Option<PathBuf>,
+) -> Option<PathBuf> {
+    if let Some(dir) = config_env.or(data_env) {
+        return Some(dir);
+    }
+    match os {
+        Os::Windows => appdata.map(|d| d.join(APP_DIR)),
+        Os::Mac => home.map(|h| h.join("Library").join("Application Support").join(APP_DIR)),
+        Os::Linux => xdg_config
+            .or_else(|| home.map(|h| h.join(".config")))
             .map(|d| d.join(APP_DIR)),
     }
 }
@@ -1349,6 +1391,78 @@ pub fn loadout_text(loadout: &Loadout) -> String {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod config_dir_tests {
+    use super::*;
+
+    fn base() -> PathBuf {
+        PathBuf::from("base")
+    }
+
+    #[test]
+    fn linux_uses_xdg_config_home() {
+        let xdg = base().join("xdg");
+        let got = config_dir_from(Os::Linux, None, None, Some(base()), Some(xdg.clone()), None);
+        assert_eq!(got, Some(xdg.join(APP_DIR)));
+    }
+
+    #[test]
+    fn linux_falls_back_to_home_dot_config() {
+        let got = config_dir_from(Os::Linux, None, None, Some(base()), None, None);
+        assert_eq!(got, Some(base().join(".config").join(APP_DIR)));
+    }
+
+    #[test]
+    fn config_env_wins_over_data_env() {
+        let config = base().join("cfg");
+        let data = base().join("data");
+        let got = config_dir_from(
+            Os::Linux,
+            Some(config.clone()),
+            Some(data),
+            Some(base()),
+            None,
+            None,
+        );
+        assert_eq!(got, Some(config));
+    }
+
+    #[test]
+    fn data_env_is_the_fallback() {
+        let data = base().join("data");
+        let got = config_dir_from(
+            Os::Linux,
+            None,
+            Some(data.clone()),
+            Some(base()),
+            None,
+            None,
+        );
+        assert_eq!(got, Some(data));
+    }
+
+    #[test]
+    fn mac_uses_application_support() {
+        let got = config_dir_from(Os::Mac, None, None, Some(base()), None, None);
+        assert_eq!(
+            got,
+            Some(
+                base()
+                    .join("Library")
+                    .join("Application Support")
+                    .join(APP_DIR)
+            )
+        );
+    }
+
+    #[test]
+    fn windows_uses_appdata() {
+        let appdata = base().join("appdata");
+        let got = config_dir_from(Os::Windows, None, None, None, None, Some(appdata.clone()));
+        assert_eq!(got, Some(appdata.join(APP_DIR)));
+    }
 }
 
 #[cfg(test)]
