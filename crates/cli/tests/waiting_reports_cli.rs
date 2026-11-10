@@ -1,6 +1,7 @@
 //! CLI-1 (#64) with #50 and #44/#48: `switchboard waiting` and `switchboard reports` as the built
 //! binary. The snapshot is written to a temp data folder with the core's own store; the reports
-//! come from the fleet stub's `cards` answer.
+//! come from the done cards in that folder's `fleet-state` (named by `FLEET_STATE_DIR`, as the app
+//! reads them).
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -21,6 +22,14 @@ Fix the sync retry | failed | owner/app-a
 Scratch run | failed | not recorded
 ";
 
+/// The done cards behind REPORTS_TEXT: one file each under `jobs/done/`.
+const CARDS: &str = r#"[
+  {"id": "job-a1", "title": "Add the settings screen", "repo": "owner/app-a", "outcome": "passed", "lane": "qwen", "model": "qwen3-coder", "at": "2026-11-06T13:00:43-07:00"},
+  {"id": "job-a2", "title": "Fix the sync retry", "repo": "owner/app-a", "outcome": "failed", "failure_mode": "tests", "lane": "gemini", "model": "gemini-2.5-pro", "at": "2026-11-05T09:00:00-07:00"},
+  {"id": "job-b1", "title": "Tidy the budget copy", "pr_url": "https://github.com/owner/app-b/pull/3", "outcome": "passed", "lane": "gemini", "model": "gemini-2.5-pro", "at": "2026-11-07T08:00:00-07:00"},
+  {"id": "job-n1", "title": "Scratch run", "outcome": "failed", "lane": "qwen", "model": "qwen3-coder", "at": "2026-11-04T10:00:00-07:00"}
+]"#;
+
 fn stub_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../core/tests/fixtures/fleet-stub")
 }
@@ -31,6 +40,19 @@ fn data_dir(name: &str) -> PathBuf {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
+}
+
+/// An app data folder whose fleet-state folder (`<data>/fleet-state`) holds the done CARDS.
+fn reports_data(name: &str) -> PathBuf {
+    let data = data_dir(name);
+    let done = data.join("fleet-state").join("jobs").join("done");
+    std::fs::create_dir_all(&done).unwrap();
+    let cards: Vec<Value> = serde_json::from_str(CARDS).unwrap();
+    for card in cards {
+        let id = card["id"].as_str().unwrap();
+        std::fs::write(done.join(format!("{id}.json")), card.to_string()).unwrap();
+    }
+    data
 }
 
 fn save(data: &Path, snaps: &[RepoSnapshot]) {
@@ -75,6 +97,7 @@ fn switchboard(argv: &[&str], data: &Path) -> Output {
         .args(argv)
         .env("SWITCHBOARD_DATA", data)
         .env("SWITCHBOARD_STATE", data)
+        .env("FLEET_STATE_DIR", data.join("fleet-state"))
         .env("SWITCHBOARD_PIPELINE", stub_root())
         .env_remove("FLEET_ROOT")
         .env_remove("FLEET_STUB_EXIT")
@@ -157,7 +180,7 @@ fn waiting_without_a_snapshot_exits_1_with_the_message() {
 
 #[test]
 fn reports_lists_the_fixture_reports_newest_first() {
-    let data = data_dir("reports-text");
+    let data = reports_data("reports-text");
     let out = switchboard(&["reports"], &data);
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
     assert_eq!(stdout(&out), REPORTS_TEXT);
@@ -165,7 +188,7 @@ fn reports_lists_the_fixture_reports_newest_first() {
 
 #[test]
 fn reports_json_is_an_array_of_reports() {
-    let data = data_dir("reports-json");
+    let data = reports_data("reports-json");
     let out = switchboard(&["reports", "--json"], &data);
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
     let printed: Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
@@ -179,7 +202,7 @@ fn reports_json_is_an_array_of_reports() {
 
 #[test]
 fn reports_project_flag_keeps_that_project() {
-    let data = data_dir("reports-project");
+    let data = reports_data("reports-project");
     let out = switchboard(&["reports", "--project", "owner/app-a"], &data);
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
     assert_eq!(
@@ -191,7 +214,7 @@ fn reports_project_flag_keeps_that_project() {
 
 #[test]
 fn reports_outcome_flag_keeps_that_outcome() {
-    let data = data_dir("reports-outcome");
+    let data = reports_data("reports-outcome");
     let out = switchboard(&["reports", "--outcome", "failed"], &data);
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
     assert_eq!(
@@ -203,7 +226,7 @@ fn reports_outcome_flag_keeps_that_outcome() {
 
 #[test]
 fn reports_pool_flag_keeps_that_pool() {
-    let data = data_dir("reports-pool");
+    let data = reports_data("reports-pool");
     let out = switchboard(&["--json", "reports", "--pool", "qwen"], &data);
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
     let printed: Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
