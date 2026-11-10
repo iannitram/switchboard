@@ -216,6 +216,9 @@ pub fn classify_failed(
 /// (ten satellite ticks), so a loop that dies at once is not restarted every tick (#383).
 pub const FAILED_LOOP_HOLD: Duration = Duration::from_secs(600);
 
+/// The exit code of a fleet command that says "not now" (CORE-1): an answer, not an error.
+pub const NOT_NOW: i32 = 75;
+
 /// One loop that has ended: its lane, its stdout, and how it ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoopEnd {
@@ -235,9 +238,10 @@ impl LoopEnd {
     }
 
     /// CORE-2: the fleet error of a loop that failed, with its command, exit code and stderr;
-    /// `None` for a loop that exited 0.
+    /// `None` for a loop that exited 0, or 75 ("not now": quiet hours, a braked pool, a busy dev
+    /// gate), which the fleet answers on purpose (CORE-1); the lane is still held.
     pub fn fleet_error(&self) -> Option<CoreError> {
-        self.failed().then(|| {
+        (self.failed() && self.exit_code != Some(NOT_NOW)).then(|| {
             CoreError::Fleet(FleetError {
                 command: self.command.clone(),
                 exit_code: self.exit_code,

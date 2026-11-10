@@ -158,6 +158,12 @@ sys.stderr.write("no queue for lane " + sys.argv[sys.argv.index("--next") + 1] +
 sys.exit(1)
 "#;
 
+/// `fleet run --next <lane>` that says "not now" (quiet hours) and exits 75.
+const NOT_NOW_FLEET: &str = r#"import sys
+print("fleet run --next gemini: 0 job(s); quiet hours")
+sys.exit(75)
+"#;
+
 /// `fleet run --next <lane>` that prints one card and exits 0.
 const QUIET_FLEET: &str = r#"import json
 print(json.dumps({"id": "sb-1", "outcome": "done"}))
@@ -241,4 +247,20 @@ fn a_loop_that_exits_0_is_no_error_and_holds_nothing() {
     assert!(runner.held().is_empty());
     assert_eq!(tick(&gemini_on(), &mut runner, &spend).unwrap(), ["gemini"]);
     wait_for_end(&mut runner);
+}
+
+#[test]
+fn a_loop_that_says_not_now_is_no_fleet_error_but_holds_its_lane() {
+    // Review of #383: exit 75 is the fleet's "not now" (CORE-1), not a failure, so it must not
+    // be recorded (and filed as an IT ticket); it still waits out the hold.
+    let root = temp_dir("not-now");
+    let fleet = stub_fleet(&root, NOT_NOW_FLEET);
+    let mut runner = ChildRunner::new(fleet, &root.join("satellite"));
+    let spend = |_: &str| -> Result<bool, CoreError> { Ok(true) };
+    assert_eq!(tick(&gemini_on(), &mut runner, &spend).unwrap(), ["gemini"]);
+    let ended = wait_for_end(&mut runner);
+    assert_eq!(ended[0].exit_code, Some(75));
+    assert_eq!(ended[0].fleet_error(), None);
+    assert_eq!(runner.held(), ["gemini"]);
+    assert!(tick(&gemini_on(), &mut runner, &spend).unwrap().is_empty());
 }
