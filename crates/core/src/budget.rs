@@ -192,6 +192,63 @@ pub fn save_edit(
     edits_log: &std::path::Path,
     clock: &dyn Clock,
 ) -> Result<EditSaved, CoreError> {
+    save_edit_then(fleet, edit, edits_log, clock, &|_| Ok(()))
+}
+
+/// BUD-2 for every face (#340): `save_edit` with the ledger in `<data>/pool-edits.jsonl` and its
+/// Waiting on you item added to the local items in `data`, all or nothing. The item is added
+/// last, after the re-read; when it cannot be added, the file and the ledger are put back as
+/// they were, so an `Err` still means nothing changed.
+pub fn save_pool_edit(
+    fleet: &FleetBridge,
+    edit: &PoolEdit,
+    data: &std::path::Path,
+    clock: &dyn Clock,
+) -> Result<EditSaved, CoreError> {
+    save_edit_then(fleet, edit, &data.join(POOL_EDITS_LOG), clock, &|item| {
+        crate::waiting::LocalItems::new(data).add(item.clone())
+    })
+}
+
+/// BUD-2: the pool-edit ledger's file name in the app data folder.
+pub const POOL_EDITS_LOG: &str = "pool-edits.jsonl";
+
+/// BUD-2 (#362): what an edit set, from its ledger row, as one line: each field in the row's
+/// order as `<field> is now <new> (was <old>)`, joined by `, `; a field with no old value says
+/// `was not set`. A row that set nothing says `nothing changed`.
+pub fn edit_summary(ledger_row: &Value) -> String {
+    let shown = |v: &Value| match v {
+        Value::Null => "not set".to_string(),
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+    let parts: Vec<String> = ledger_row["set"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .map(|(field, new)| {
+            format!(
+                "{field} is now {} (was {})",
+                shown(new),
+                shown(&ledger_row["before"][field])
+            )
+        })
+        .collect();
+    if parts.is_empty() {
+        return "nothing changed".to_string();
+    }
+    parts.join(", ")
+}
+
+/// `save_edit`, then `finish` with the Waiting item once the re-read is done; a `finish` that
+/// fails takes the edit back as a failed re-read does.
+fn save_edit_then(
+    fleet: &FleetBridge,
+    edit: &PoolEdit,
+    edits_log: &std::path::Path,
+    clock: &dyn Clock,
+    finish: &dyn Fn(&crate::waiting::Item) -> Result<(), CoreError>,
+) -> Result<EditSaved, CoreError> {
     let pool = edit.pool.as_str();
     if edit.plan.is_none() && edit.cap.is_none() && edit.reset.is_none() && edit.cost_usd.is_none()
     {
@@ -298,6 +355,11 @@ pub fn save_edit(
         action: "Open config.json".to_string(),
         since: now,
     };
+    if let Err(err) = finish(&waiting) {
+        let mut stuck: Vec<String> = ledger_undo.undo().err().into_iter().collect();
+        stuck.extend(replace_file(&path, &text).err().map(|e| e.to_string()));
+        return Err(with_undo_failures(err, stuck));
+    }
     Ok(EditSaved {
         rows,
         ledger_row,

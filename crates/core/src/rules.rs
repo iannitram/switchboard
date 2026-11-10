@@ -89,6 +89,23 @@ pub fn guard(caller: &Caller, action: &GuardedAction) -> Verdict {
     }
 }
 
+/// MCP-2, MCP-3, CLI-3: who may edit a budget pool (BUD-2: the cap, plan, reset or cost). The
+/// app may; the CLI and MCP only with the budget-manager role (MCP-2 gives it the pool cap);
+/// nothing inside a job worktree. A pool edit is not one of CORE-3's guarded actions, so it
+/// never becomes a Waiting on you item here; the saved edit adds its own (U5).
+pub fn guard_pool_edit(caller: &Caller, pool: &str) -> Verdict {
+    let what = format!("edit pool {pool}");
+    if caller.in_job_worktree {
+        return Verdict::Refuse(format!("{what}: refused inside a job worktree"));
+    }
+    match (caller.face, &caller.role) {
+        (Face::Gui, _) | (Face::Cli | Face::Mcp, Some(Role::BudgetManager)) => Verdict::Allow,
+        _ => Verdict::Refuse(format!(
+            "{what}: only the budget-manager role may edit a pool"
+        )),
+    }
+}
+
 /// True when `dir` is inside a job worktree (the fleet's worktrees folder, or a git worktree
 /// whose `.git` file points into one).
 ///
