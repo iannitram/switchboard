@@ -139,12 +139,25 @@ pub fn serve<R: BufRead, W: Write>(
     } else {
         role
     };
-    for line in reader.lines() {
-        let line = line?;
-        if line.trim().is_empty() {
+    // Split on bytes, not `lines()`: a line that is not UTF-8 gets a parse error and the loop
+    // carries on (#336).
+    for raw in reader.split(b'\n') {
+        let mut raw = raw?;
+        if raw.last() == Some(&b'\r') {
+            raw.pop();
+        }
+        if raw.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
-        if let Some(reply) = handle(&line, core, role.as_ref(), write, in_job_worktree) {
+        let reply = match String::from_utf8(raw) {
+            Ok(line) => handle(&line, core, role.as_ref(), write, in_job_worktree),
+            Err(_) => Some(error(
+                &Value::Null,
+                PARSE_ERROR,
+                "parse error: line is not valid UTF-8",
+            )),
+        };
+        if let Some(reply) = reply {
             writeln!(writer, "{reply}")?;
             writer.flush()?;
         }
@@ -170,9 +183,39 @@ fn handle(
             ))
         }
     };
-    let id = msg.get("id").cloned();
-    let Some(method) = msg.get("method").and_then(Value::as_str) else {
-        return id.map(|id| error(&id, INVALID_REQUEST, "invalid request: no method"));
+    // JSON-RPC 2.0 sec. 6 batches are not supported: MCP's stdio transport (2024-11-05, the
+    // version this server speaks) sends one message per line, and later revisions drop batching.
+    // A batch, like any other non-object, gets one Invalid Request with a null id (#353).
+    let Some(obj) = msg.as_object() else {
+        let what = if msg.is_array() {
+            "invalid request: batch requests are not supported, send one request per line"
+        } else {
+            "invalid request: a request is a JSON object"
+        };
+        return Some(error(&Value::Null, INVALID_REQUEST, what));
+    };
+    // An id is a string or a number; anything else cannot be echoed back, so it is null.
+    let id = match obj.get("id") {
+        Some(id) if id.is_string() || id.is_number() => Some(id.clone()),
+        Some(Value::Null) | None => None,
+        Some(_) => {
+            return Some(error(
+                &Value::Null,
+                INVALID_REQUEST,
+                "invalid request: id must be a string or a number",
+            ))
+        }
+    };
+    let Some(method) = obj.get("method").and_then(Value::as_str) else {
+        // A response to a server request (none are sent) is not a request: no reply.
+        if id.is_some() && (obj.contains_key("result") || obj.contains_key("error")) {
+            return None;
+        }
+        return Some(error(
+            &id.unwrap_or(Value::Null),
+            INVALID_REQUEST,
+            "invalid request: method must be a string",
+        ));
     };
     // A message without an id is a notification, e.g. `notifications/initialized`: no reply.
     let id = id?;
@@ -207,23 +250,92 @@ fn call_tool(
     write: &dyn WriteCore,
     in_job_worktree: bool,
 ) -> Value {
-    let name = params
-        .get("name")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let args = params
-        .get("arguments")
-        .cloned()
-        .unwrap_or_else(|| json!({}));
+    let Some(name) = params.get("name").and_then(Value::as_str) else {
+        return error(id, INVALID_PARAMS, "tools/call needs name (string)");
+    };
+    let raw_args = params.get("arguments").unwrap_or(&Value::Null);
+    let held = role.is_some_and(|r| write_tools(r).contains(&name));
+    if !READ_TOOLS.contains(&name) && !held {
+        return error(id, INVALID_PARAMS, &format!("unknown tool: {name}"));
+    }
+    let args = match tool_schema(name).map(|schema| check_args(name, &schema, raw_args)) {
+        Some(Ok(args)) => args,
+        Some(Err(message)) => return error(id, INVALID_PARAMS, &message),
+        None => raw_args.clone(),
+    };
     if READ_TOOLS.contains(&name) {
         return read_call(id, name, &args, core);
     }
     match role {
-        Some(role) if write_tools(role).contains(&name) => {
-            write_call(id, name, &args, role, write, in_job_worktree)
-        }
+        Some(role) if held => write_call(id, name, &args, role, write, in_job_worktree),
         _ => error(id, INVALID_PARAMS, &format!("unknown tool: {name}")),
     }
+}
+
+/// A tool's `inputSchema`, from the same lists `tools/list` serves.
+fn tool_schema(name: &str) -> Option<Value> {
+    let all = read_tools().as_array().cloned().unwrap_or_default();
+    all.into_iter()
+        .chain(write_schemas().into_iter().map(|(_, schema)| schema))
+        .find(|tool| tool["name"] == name)
+        .map(|tool| tool["inputSchema"].clone())
+}
+
+/// Check `args` against a tool's `inputSchema` (#360): an object; every `required` property
+/// present; each given property the right `type` (`string`, `integer`, `number`) and at least its
+/// `minimum` (integers only). The error names the tool and the argument. An integer written `2.0` is one and
+/// comes back as `2`. Properties the schema does not list are left alone.
+fn check_args(tool: &str, schema: &Value, args: &Value) -> Result<Value, String> {
+    let mut args = match args {
+        Value::Null => serde_json::Map::new(),
+        Value::Object(map) => map.clone(),
+        _ => return Err(format!("{tool}: arguments must be an object")),
+    };
+    let required = schema["required"].as_array().cloned().unwrap_or_default();
+    for name in required.iter().filter_map(Value::as_str) {
+        if !args.contains_key(name) {
+            return Err(format!("{tool}: {name} is required"));
+        }
+    }
+    let props = schema["properties"]
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    for (name, prop) in props {
+        let Some(value) = args.get(&name).cloned() else {
+            continue;
+        };
+        let kind = prop["type"].as_str().unwrap_or_default();
+        let bad = |want: &str| format!("{tool}: {name} must be {want}, got {value}");
+        let min = prop["minimum"].as_f64();
+        let low = |n: f64| min.is_some_and(|m| n < m);
+        let want_min = |want: &str| match min {
+            Some(m) => format!("{want} of at least {m}"),
+            None => want.to_string(),
+        };
+        match kind {
+            "string" if !value.is_string() => return Err(bad("a string")),
+            "integer" => {
+                let n = value
+                    .as_i64()
+                    .map(Value::from)
+                    .or_else(|| value.as_u64().map(Value::from))
+                    .or_else(|| {
+                        let f = value.as_f64()?;
+                        (f.fract() == 0.0 && f.abs() < 9.0e15).then(|| Value::from(f as i64))
+                    })
+                    .ok_or_else(|| bad("an integer"))?;
+                if low(n.as_f64().unwrap_or(0.0)) {
+                    return Err(bad(&want_min("an integer")));
+                }
+                args.insert(name, n);
+            }
+            // A number's `minimum` (a pool cap's 0) is left to the core, whose refusal says why.
+            "number" if value.as_f64().is_none() => return Err(bad("a number")),
+            _ => {}
+        }
+    }
+    Ok(Value::Object(args))
 }
 
 /// A read tool: the core's answer as one JSON text content block; a core error as text with
@@ -319,38 +431,7 @@ fn tools(role: Option<&Role>) -> Value {
     let mut list = read_tools().as_array().cloned().unwrap_or_default();
     if let Some(role) = role {
         let held = write_tools(role);
-        let all: [(&str, Value); 2] = [
-            (
-                "merge",
-                json!({
-                    "name": "merge",
-                    "description": "Merge a PR once its latest PASS is on its head and CI is green on that head.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "repo": { "type": "string", "description": "The repo's name, e.g. switchboard" },
-                            "pr": { "type": "integer", "minimum": 1 }
-                        },
-                        "required": ["repo", "pr"]
-                    }
-                }),
-            ),
-            (
-                "set_pool_cap",
-                json!({
-                    "name": "set_pool_cap",
-                    "description": "Set one budget pool's cap.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "pool": { "type": "string", "description": "The pool's name" },
-                            "cap": { "type": "number", "minimum": 0 }
-                        },
-                        "required": ["pool", "cap"]
-                    }
-                }),
-            ),
-        ];
+        let all = write_schemas();
         list.extend(
             all.into_iter()
                 .filter(|(name, _)| held.iter().any(|h| h == name))
@@ -358,6 +439,42 @@ fn tools(role: Option<&Role>) -> Value {
         );
     }
     Value::Array(list)
+}
+
+/// MCP-2: every write tool's `(name, schema)`; `tools` lists the ones a role holds.
+fn write_schemas() -> [(&'static str, Value); 2] {
+    [
+        (
+            "merge",
+            json!({
+                "name": "merge",
+                "description": "Merge a PR once its latest PASS is on its head and CI is green on that head.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "repo": { "type": "string", "description": "The repo's name, e.g. switchboard" },
+                        "pr": { "type": "integer", "minimum": 1 }
+                    },
+                    "required": ["repo", "pr"]
+                }
+            }),
+        ),
+        (
+            "set_pool_cap",
+            json!({
+                "name": "set_pool_cap",
+                "description": "Set one budget pool's cap.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "pool": { "type": "string", "description": "The pool's name" },
+                        "cap": { "type": "number", "minimum": 0 }
+                    },
+                    "required": ["pool", "cap"]
+                }
+            }),
+        ),
+    ]
 }
 
 /// MCP-1: the six read tools with one-sentence descriptions and small input schemas.
