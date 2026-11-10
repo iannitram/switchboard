@@ -849,10 +849,26 @@ fn budget_text(rows: &[PoolRow]) -> String {
 
 /// Every stored snapshot in the data folder, or the failure saying why there is none.
 fn snapshots(command: &str, data: &Path) -> Result<Vec<RepoSnapshot>, Fail> {
-    match SnapshotStore::new(data).load_all() {
-        Ok(snaps) if snaps.is_empty() => Err(fail(1, NO_SNAPSHOT.to_string())),
-        Ok(snaps) => Ok(snaps),
+    match SnapshotStore::new(data).load_each() {
+        Ok((snaps, bad)) if snaps.is_empty() => {
+            warn_unreadable(command, &bad);
+            Err(fail(1, NO_SNAPSHOT.to_string()))
+        }
+        Ok((snaps, bad)) => {
+            warn_unreadable(command, &bad);
+            Ok(snaps)
+        }
         Err(e) => Err(fail(1, format!("switchboard {command}: {e}"))),
+    }
+}
+
+/// GH-1 (#350): name each snapshot file that does not read on stderr; the views show the rest.
+fn warn_unreadable(command: &str, bad: &[switchboard_core::github::snapshot::Unreadable]) {
+    for file in bad {
+        eprintln!(
+            "switchboard {command}: {}; skipped, run switchboard refresh",
+            file.error
+        );
     }
 }
 
@@ -873,16 +889,21 @@ fn waiting(json: bool) -> ExitCode {
 
 /// MCP-1: the items `waiting` prints, newest first.
 pub(crate) fn waiting_items(data: &Path) -> Result<Vec<Item>, Fail> {
-    let snaps = SnapshotStore::new(data)
-        .load_all()
+    let (snaps, bad) = SnapshotStore::new(data)
+        .load_each()
         .map_err(|e| fail(1, format!("switchboard waiting: {e}")))?;
+    warn_unreadable("waiting", &bad);
     let local = LocalItems::new(data)
         .load()
         .map_err(|e| fail(1, format!("switchboard waiting: {e}")))?;
     if snaps.is_empty() && local.is_empty() {
         return Err(fail(1, NO_SNAPSHOT.to_string()));
     }
-    Ok(waiting::assemble(&snaps, &local))
+    let priority = waiting::priority_items(data, SystemClock.now());
+    Ok(waiting::merge(vec![
+        waiting::assemble(&snaps, &local),
+        priority,
+    ]))
 }
 
 /// One line per item, in list order: `<what> | <why> | <action> | <link>`; no items gives the
@@ -974,6 +995,8 @@ struct SkyRow {
     brightness: f64,
     open: usize,
     drifted: usize,
+    /// The priority copy's age in days, the same on every row (SKY-9, #345).
+    priority_age_days: Option<i64>,
 }
 
 /// `switchboard sky`: one row per repo in the Sky view's placement order, from the same
@@ -994,7 +1017,8 @@ fn sky_command(json: bool) -> ExitCode {
 /// The sky model and the snapshots it was built from.
 fn sky_model(data: &Path) -> Result<(sky::model::SkyModel, Vec<RepoSnapshot>), Fail> {
     let snaps = snapshots("sky", data)?;
-    let model = sky::model::load(data, SystemClock.now())
+    let events = ledger_events().map_err(|e| fail(1, format!("switchboard sky: {e}")))?;
+    let model = sky::model::load_with_ledger(data, &events.unwrap_or_default(), SystemClock.now())
         .map_err(|e| fail(1, format!("switchboard sky: {e}")))?;
     Ok((model, snaps))
 }
@@ -1013,6 +1037,7 @@ fn sky_rows(data: &Path) -> Result<Vec<SkyRow>, Fail> {
                 .find(|s| s.repo == c.repo)
                 .map_or(0, |s| s.issues.iter().filter(|i| i.state == "open").count()),
             drifted: c.drift.len(),
+            priority_age_days: model.priority_age_days,
         })
         .collect())
 }
@@ -1027,6 +1052,7 @@ fn sky_json(rows: &[SkyRow]) -> Value {
                     "brightness": row.brightness,
                     "open": row.open,
                     "drifted": row.drifted,
+                    "priority_age_days": row.priority_age_days,
                 })
             })
             .collect(),
@@ -1061,23 +1087,29 @@ pub(crate) fn constellation_answer(data: &Path, repo: &str) -> Result<Value, Fai
     }
 }
 
-/// One line per repo: `<repo>: brightness <b>, <n> open, <d> drifted`.
+/// One line per repo: `<repo>: brightness <b>, <n> open, <d> drifted`, then the priority
+/// copy's age (`sky::priority::age_line`).
 fn sky_text(rows: &[SkyRow]) -> String {
-    rows.iter()
+    let mut text: String = rows
+        .iter()
         .map(|row| {
             format!(
                 "{}: brightness {:.2}, {} open, {} drifted\n",
                 row.repo, row.brightness, row.open, row.drifted
             )
         })
-        .collect()
+        .collect();
+    text.push_str(&sky::priority::age_line(
+        rows.first().and_then(|r| r.priority_age_days),
+    ));
+    text
 }
 
 /// The PR that closes a star, as `star` prints it.
 struct StarPr {
     number: u64,
     state: String,
-    /// The last R25 verdict, `PASS` or `FAIL`.
+    /// The last R25 verdict, `PASS` or `FAIL`, marked when not on the head (`review_text`).
     review: Option<String>,
     /// The combined check state on the head.
     ci: String,
@@ -1155,11 +1187,7 @@ fn star_facts(data: &Path, target: &str) -> Result<Star, Fail> {
             .map(|pr| StarPr {
                 number: pr.number,
                 state: pr.state.clone(),
-                review: pr
-                    .verdicts
-                    .last()
-                    .filter(|v| matches!(v.verdict.as_str(), "PASS" | "FAIL"))
-                    .map(|v| v.verdict.clone()),
+                review: gh_merge::review_text(pr),
                 ci: pr.ci_on_head.clone(),
             }),
         job,
@@ -1233,10 +1261,8 @@ fn star_text(star: &Star) -> String {
     )
 }
 
-/// The fleet job running on `repo#number`: the last ledger `start` event for it with no `end`
-/// after it, as `<lane> <model> on <machine>, attempt <n>`. `Ok(None)` when the pipeline
-/// checkout is not set, so the job log cannot be read.
-fn running_job(repo: &str, number: u64) -> Result<Option<Option<String>>, String> {
+/// The fleet ledger's events; `Ok(None)` when the pipeline checkout is not set.
+fn ledger_events() -> Result<Option<Vec<Value>>, String> {
     let Some(pipeline) = env_path(PIPELINE_ENV) else {
         return Ok(None);
     };
@@ -1247,8 +1273,18 @@ fn running_job(repo: &str, number: u64) -> Result<Option<Option<String>>, String
             name.push("-fleet-state");
             pipeline.with_file_name(name)
         });
-    let events =
-        joblog::read_ledger(&joblog::ledger_files(&pipeline, &state)).map_err(|e| e.to_string())?;
+    joblog::read_ledger(&joblog::ledger_files(&pipeline, &state))
+        .map(Some)
+        .map_err(|e| e.to_string())
+}
+
+/// The fleet job running on `repo#number`: the last ledger `start` event for it with no `end`
+/// after it, as `<lane> <model> on <machine>, attempt <n>`. `Ok(None)` when the pipeline
+/// checkout is not set, so the job log cannot be read.
+fn running_job(repo: &str, number: u64) -> Result<Option<Option<String>>, String> {
+    let Some(events) = ledger_events()? else {
+        return Ok(None);
+    };
     let short = repo.rsplit('/').next().unwrap_or(repo);
     let ids = [format!("{repo}#{number}"), format!("{short}#{number}")];
     let field = |event: &Value, key: &str| -> Option<String> {
