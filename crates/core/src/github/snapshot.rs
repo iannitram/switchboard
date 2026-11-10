@@ -110,27 +110,65 @@ impl SnapshotStore {
         read_one(&self.path_for(repo))
     }
 
-    /// Every stored snapshot, sorted by repo name.
+    /// Every stored snapshot that reads, sorted by repo name. A file that does not read is
+    /// skipped (`load_each` names it), so one bad file hides no other repo (#350).
     pub fn load_all(&self) -> Result<Vec<RepoSnapshot>, CoreError> {
+        self.load_each().map(|(snaps, _)| snaps)
+    }
+
+    /// Every stored snapshot that reads, sorted by repo name, and every file that does not,
+    /// sorted by path. Only a snapshot folder that cannot be listed is an error; a missing one
+    /// is no snapshots.
+    pub fn load_each(&self) -> Result<(Vec<RepoSnapshot>, Vec<Unreadable>), CoreError> {
         let entries = match std::fs::read_dir(&self.dir) {
             Ok(entries) => entries,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok((Vec::new(), Vec::new()))
+            }
             Err(e) => return Err(CoreError::Io(format!("{}: {e}", self.dir.display()))),
         };
         let mut snaps = Vec::new();
+        let mut unreadable = Vec::new();
         for entry in entries {
             let entry = entry.map_err(|e| CoreError::Io(format!("{}: {e}", self.dir.display())))?;
             let path = entry.path();
             if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
                 continue;
             }
-            if let Some(snap) = read_one(&path)? {
-                snaps.push(snap);
+            match read_one(&path) {
+                Ok(Some(snap)) => snaps.push(snap),
+                Ok(None) => {}
+                Err(e) => unreadable.push(Unreadable {
+                    repo: repo_of(&path),
+                    error: e.to_string(),
+                    path,
+                }),
             }
         }
         snaps.sort_by(|a, b| a.repo.cmp(&b.repo));
-        Ok(snaps)
+        unreadable.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok((snaps, unreadable))
     }
+}
+
+/// A snapshot file that does not read (#350): the repo its name gives, the file, and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unreadable {
+    /// `owner/name`, from the file name `<owner>__<name>.json`.
+    pub repo: String,
+    pub path: PathBuf,
+    /// The read or parse error, naming the file.
+    pub error: String,
+}
+
+/// `owner/name` from `<dir>/<owner>__<name>.json` (an owner has no `_`, so the first `__` is
+/// the `/`).
+fn repo_of(path: &Path) -> String {
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    stem.replacen("__", "/", 1)
 }
 
 fn read_one(path: &Path) -> Result<Option<RepoSnapshot>, CoreError> {
