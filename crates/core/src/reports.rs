@@ -337,6 +337,22 @@ pub fn newest_first(reports: &[Report]) -> Vec<Report> {
     sorted
 }
 
+/// `state_dir_from` with the pipeline checkout's own `git worktree list` (none when git cannot
+/// list them).
+pub fn state_dir(pipeline_root: &Path, env: Option<&OsStr>) -> PathBuf {
+    let worktrees = Command::new("git")
+        .arg("-C")
+        .arg(pipeline_root)
+        .args(["worktree", "list", "--porcelain"])
+        .stdin(Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    state_dir_from(pipeline_root, env, &worktrees)
+}
+
 /// The env var that names the fleet-state folder outright (the rule `fleet` uses too).
 pub const FLEET_STATE_DIR_ENV: &str = "FLEET_STATE_DIR";
 
@@ -434,17 +450,7 @@ pub fn load(
     f: Option<&Filter>,
 ) -> Result<Vec<Report>, CoreError> {
     let root = fleet.root();
-    let worktrees = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["worktree", "list", "--porcelain"])
-        .stdin(Stdio::null())
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-        .unwrap_or_default();
-    let state = state_dir_from(root, env, &worktrees);
+    let state = state_dir(root, env);
     let cards = read_done_cards(&state)?;
     let events = read_ledger(&ledger_files(root, &state))?;
     Ok(assemble(&cards, &events, threads, f))

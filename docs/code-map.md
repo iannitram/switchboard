@@ -18,7 +18,7 @@ Cargo.toml                    one Rust workspace (core, cli, app/src-tauri)
 crates/core/                  switchboard-core: every rule, read and write
   src/{settings,fleet,abilities,joblog,rules,platform,clock,error}.rs
   src/github/                 snapshot, transport, poll, queue, merge
-  src/sky/                    features, layout, drift, chain, codemap, priority, labels
+  src/sky/                    features, layout, drift, chain, codemap, priority, labels, jobs
   src/{waiting,reports,budget,backup,it}.rs
   src/frontdoor/              router, labeller, adapters, packet, sticky, thread
   src/autopilot/              review, driver, instructions, classify, weekly
@@ -119,8 +119,11 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 ### sky-labels
 `crates/core/src/sky/labels.rs` · SKY-10 · present. The `feature:` label for a design-pass issue and an automatic bug.
 
+### sky-jobs
+`crates/core/src/sky/jobs.rs` · SKY-4, SKY-8 · present. The fleet jobs in flight from the fleet ledger's events (a `start` with no later `end` from the same machine), the job `star` names.
+
 ### sky-model
-`crates/core/src/sky/model.rs` · SKY-1 to SKY-9 · present. The SkyModel the `sky` command answers: the snapshot store and the priority copy in the app data folder, assembled from the sky modules; no snapshot is `GitHub: no snapshot yet`.
+`crates/core/src/sky/model.rs` · SKY-1 to SKY-9 · present. The SkyModel the `sky` command answers: the snapshot store and the priority copy in the app data folder, with the jobs in flight from the fleet ledger (`load_with_ledger`), assembled from the sky modules; no snapshot is `GitHub: no snapshot yet`.
 
 ### sky-face
 `app/src/views/Sky.tsx` (+ `app/src/sky/`) · SKY-1, SKY-3, SKY-4, SKY-5, SKY-6, SKY-7, SKY-8 · present. SVG: the sky, the zoomed constellation (clusters, stars, blocked-by lines, milestone rings), star states, the drift list, reuse lines, the chain highlight, the star panel. Paints what the core worked out.

@@ -186,14 +186,37 @@ pub fn fleet_errors(state: tauri::State<'_, AppState>) -> Vec<FleetErrorRow> {
     log.errors.iter().map(FleetErrorRow::from).collect()
 }
 
-/// SKY-W: the sky the Sky view paints, from the snapshot in the app data folder.
+/// SKY-W: the sky the Sky view paints, from the snapshot in the app data folder, with the
+/// jobs in flight from the fleet ledger (SKY-4, #343).
 #[tauri::command]
-pub fn sky(app: tauri::AppHandle) -> Result<switchboard_core::sky::model::SkyModel, FaceError> {
-    app.path()
-        .app_data_dir()
-        .map_err(|e| CoreError::Io(format!("app data dir: {e}")))
-        .and_then(|data| switchboard_core::sky::model::load(&data, SystemClock.now()))
+pub fn sky(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<switchboard_core::sky::model::SkyModel, FaceError> {
+    let env = std::env::var_os(FLEET_STATE_DIR_ENV);
+    ledger_events(&state.settings_path, env.as_deref())
+        .and_then(|events| {
+            let data = app
+                .path()
+                .app_data_dir()
+                .map_err(|e| CoreError::Io(format!("app data dir: {e}")))?;
+            switchboard_core::sky::model::load_with_ledger(&data, &events, SystemClock.now())
+        })
         .map_err(|e| FaceError::new("sky", &e))
+}
+
+/// SKY-4 (#343): the fleet ledger's events, from the fleet state `reports` reads; none while
+/// the settings name no pipeline repo, as the CLI has none without its pipeline checkout.
+pub fn ledger_events(
+    settings_path: &Path,
+    env: Option<&std::ffi::OsStr>,
+) -> Result<Vec<serde_json::Value>, CoreError> {
+    let settings = settings::load(settings_path)?;
+    let Ok(root) = settings.pipeline_repo() else {
+        return Ok(Vec::new());
+    };
+    let state = reports::state_dir(root, env);
+    switchboard_core::joblog::read_ledger(&switchboard_core::joblog::ledger_files(root, &state))
 }
 
 /// The fleet bridge over the pipeline repo the settings file names.
@@ -500,6 +523,9 @@ mod it_tickets_tests;
 #[cfg(test)]
 #[path = "loadout_tests.rs"]
 mod loadout_tests;
+#[cfg(test)]
+#[path = "sky_ledger_tests.rs"]
+mod sky_ledger_tests;
 #[cfg(test)]
 #[path = "commands_tests.rs"]
 mod tests;
