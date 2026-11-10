@@ -724,7 +724,18 @@ pub fn backup_with(
         match row {
             Ok(row) => match &row.reason {
                 None => {
-                    let line = format!("{repo}: backed up to {}\n", row.folder);
+                    let renamed = row
+                        .manifest
+                        .as_ref()
+                        .and_then(|m| m.resolved_repo.as_deref())
+                        .map(|now| {
+                            format!(
+                                " (GitHub answered for {}: renamed or moved)",
+                                terminal_safe(now)
+                            )
+                        })
+                        .unwrap_or_default();
+                    let line = format!("{repo}: backed up to {}{renamed}\n", row.folder);
                     emit_more(out, &mut written, &line);
                 }
                 Some(reason) => {

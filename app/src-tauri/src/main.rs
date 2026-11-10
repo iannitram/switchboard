@@ -142,12 +142,18 @@ fn autopilot_after_poll(
                         std::thread::spawn(move || {
                             match switchboard_core::backup::backup_all(&settings, &run.backup) {
                                 Ok(outcomes) => {
+                                    use switchboard_core::backup::BackupOutcome;
                                     for (repo, outcome) in outcomes {
-                                        if let switchboard_core::backup::BackupOutcome::Refused(
-                                            why,
-                                        ) = outcome
-                                        {
-                                            eprintln!("weekly backup: {repo} refused: {why}");
+                                        match outcome {
+                                            Ok(BackupOutcome::Written(manifest)) => {
+                                                if let Some(now) = manifest.resolved_repo {
+                                                    eprintln!("weekly backup: {repo}: GitHub answered for {now}: renamed or moved");
+                                                }
+                                            }
+                                            Ok(BackupOutcome::Refused(why)) => {
+                                                eprintln!("weekly backup: {repo} refused: {why}");
+                                            }
+                                            Err(e) => eprintln!("weekly backup: {e}"),
                                         }
                                     }
                                 }

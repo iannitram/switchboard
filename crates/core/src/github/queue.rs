@@ -25,19 +25,26 @@ pub enum Create {
         body: String,
         marker: Option<String>,
     },
+    /// `color` is six hex digits (the queue's own default when `None`); `description` one line.
     Label {
         repo: String,
         name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        color: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
     },
+    /// `due` is `YYYY-MM-DD`.
     Milestone {
         repo: String,
         title: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        due: Option<String>,
     },
     /// A new repo `repo` (owner/name), created private when `private` is set.
-    Repo {
-        repo: String,
-        private: bool,
-    },
+    Repo { repo: String, private: bool },
 }
 
 /// What the queue said after a run.

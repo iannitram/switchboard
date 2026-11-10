@@ -77,6 +77,8 @@ fn manifest_counts_match_the_fixture() {
             releases: 0,
             closed_without_pr: 2,
             wiki: false,
+            bundle_hash: String::new(),
+            resolved_repo: None,
         }
     );
 }
