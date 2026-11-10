@@ -1275,17 +1275,16 @@ fn star_text(star: &Star) -> String {
 }
 
 /// The fleet ledger's events; `Ok(None)` when the pipeline checkout is not set.
+/// The fleet state folder is `SWITCHBOARD_STATE` when set, else the one `reports` and the app
+/// read (`reports::state_dir`: `FLEET_STATE_DIR`, then the pipeline checkout's rule).
 fn ledger_events() -> Result<Option<Vec<Value>>, String> {
     let Some(pipeline) = env_path(PIPELINE_ENV) else {
         return Ok(None);
     };
-    let state = env_path(STATE_ENV)
-        .or_else(|| env_path("FLEET_STATE_DIR"))
-        .unwrap_or_else(|| {
-            let mut name = pipeline.file_name().unwrap_or_default().to_os_string();
-            name.push("-fleet-state");
-            pipeline.with_file_name(name)
-        });
+    let state = env_path(STATE_ENV).unwrap_or_else(|| {
+        let env = std::env::var_os(reports::FLEET_STATE_DIR_ENV);
+        reports::state_dir(&pipeline, env.as_deref())
+    });
     joblog::read_ledger(&joblog::ledger_files(&pipeline, &state))
         .map(Some)
         .map_err(|e| e.to_string())
