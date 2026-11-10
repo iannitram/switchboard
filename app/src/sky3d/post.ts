@@ -19,7 +19,8 @@ void main() {
  * The black hole on screen. Gravitational lensing as a thin lens: a pixel at apparent radius r
  * shows the scene from r - E^2 / r, so the horizon (radius uRs) grows into a shadow of radius
  * S = uRs * XS, edged by a thin, sharp photon ring. The accretion disc is drawn here too, in
- * screen space, so it and its lensed image agree: a thin hot band seen nearly edge-on, its near
+ * screen space from the camera's real angle to the galaxy plane each frame, so it and its lensed
+ * image agree and turn as the camera orbits: a hot band, an ellipse that opens and closes, its near
  * side crossing in front of the shadow, white-hot within, orange outward, the approaching side
  * brighter and bluer (Doppler beaming); its far side, hidden behind the hole, bent up into an arc
  * over the top of the shadow (and a faint one under it). Calm: no flicker, no flare.
@@ -32,6 +33,9 @@ uniform float uRs;
 uniform float uOn;
 uniform float uDisc;
 uniform float uTime;
+uniform vec2 uU;
+uniform vec2 uV;
+uniform float uTilt;
 varying vec2 vUv;
 const float E2 = 2.2;
 const float XS = 2.06;      // the shadow's edge, where r - E2 / r = 1 (in horizon radii)
@@ -76,28 +80,37 @@ void main() {
   col *= smoothstep(XS, XS + 1.5 * px1, x);
   col += vec3(1.0, 0.88, 0.7) * exp(-pow((x - XS - 0.6 * px1) / max(0.02, 0.8 * px1), 2.0)) * 1.6;
   if (uDisc > 0.0) {
+    // The disc lies in the galaxy plane and is seen as the camera sees it this frame: uU is its
+    // major axis on screen (the approaching side towards +uU), uV points to its far half, and
+    // uTilt is how open it is (0 edge-on, 1 face-on). In disc coordinates a pixel is at
+    // (a, b / tilt) from the centre.
     vec2 q = d / max(uRs, 1e-3);   // in horizon radii, y up
-    float ang = atan(q.y, q.x);
-    // The far side, lensed up over the shadow (a bright arc) and, fainter, under it.
+    float qa = dot(q, uU);
+    float qb = dot(q, uV);
+    float tilt = max(uTilt, 0.05);
+    float sinI = sqrt(max(0.0, 1.0 - uTilt * uTilt));
+    float rd = length(vec2(qa, qb / tilt));
+    float ang = atan(qb / tilt, qa);
+    float side = qa / max(rd, 1e-3) * sinI;
+    // The far side, bent round the hole: up over the shadow's far edge as a bright arc and,
+    // fainter, under the near edge. Strongest edge-on; face-on it closes into a thin ring.
     float over = x - XS;
     if (over > 0.0) {
-      float up = q.y / x;
-      float rdTop = RIN + over * 9.0;
-      vec3 top = disc(rdTop, -q.x / x, ang) * smoothstep(0.0, 0.6, up) * 1.1;
-      float rdLow = RIN + over * 10.0;
-      vec3 low = disc(rdLow, -q.x / x, ang) * smoothstep(-0.1, 0.7, -up) * 0.3;
-      col += (top + low) * uDisc;
+      float up = qb / x;
+      float along = -qa / x * sinI;
+      float arcs = 1.0 - 0.75 * uTilt;
+      float rdTop = RIN + over * mix(4.5, 3.0, uTilt);
+      vec3 top = disc(rdTop, along, ang) * smoothstep(-0.2 * uTilt, 0.55, up) * 1.5;
+      float rdLow = RIN + over * mix(6.0, 3.5, uTilt);
+      vec3 low = disc(rdLow, along, ang) * smoothstep(-0.1, 0.7, -up) * 0.45;
+      col += (top + low) * uDisc * arcs;
     }
-    // The near side: the band itself, below the centre, in front of everything.
-    if (q.y < 0.0) {
-      float zd = q.y / TILT;
-      float rd = length(vec2(q.x, zd));
-      col += disc(rd, -q.x / max(rd, 1e-3), ang) * uDisc * 1.5;
+    if (qb < 0.0) {
+      // The near half, in front of everything, the shadow included.
+      col += disc(rd, side, ang) * uDisc * 1.5;
     } else {
-      // The band's far half, where it shows beside the shadow.
-      float zd = q.y / TILT;
-      float rd = length(vec2(q.x, zd));
-      col += disc(rd, -q.x / max(rd, 1e-3), ang) * uDisc * smoothstep(XS, XS + 1.5 * px1, x);
+      // The far half, hidden where the shadow covers it.
+      col += disc(rd, side, ang) * uDisc * 1.5 * smoothstep(XS, XS + 1.5 * px1, x);
     }
   }
   gl_FragColor = vec4(col, 1.0);
@@ -166,6 +179,9 @@ export function makeOptics(renderer: THREE.WebGLRenderer, scene: THREE.Scene, ca
         uOn: { value: 0 },
         uDisc: { value: 0 },
         uTime: { value: 0 },
+        uU: { value: new THREE.Vector2(1, 0) },
+        uV: { value: new THREE.Vector2(0, 1) },
+        uTilt: { value: 0.1 },
       },
     }),
   );

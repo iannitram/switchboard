@@ -251,7 +251,7 @@ export function dustParticles(seed: string, count: number): DiscParticles {
     orbit.set([dd * GAL_R, a, gauss(r) * 0.25, 2.2 + r() * 3.6], i * 4);
     const t = r();
     colors.set([0.035 + t * 0.03, 0.025 + t * 0.02, 0.02 + t * 0.015], i * 3);
-    phase[i] = 0.2 + r() * 0.28; // dust opacity
+    phase[i] = 0.26 + r() * 0.34; // dust opacity
   }
   return { orbit, colors, phase, kind, count };
 }

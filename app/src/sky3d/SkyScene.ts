@@ -15,10 +15,13 @@ import { spanningTree } from "./wayfind";
 import { blackbody, exposureForZoom, interiorHush, nebulaStage, populationTemp, powerLawBrightness, STAR_CORE_MAX, starCorePx } from "./optics";
 import { makeOptics, type Optics } from "./post";
 import { gauss, seeded } from "./random";
+import { lit as isLit, NO_FILTER, winkDelay, winkedOut, winkLook, winkSeed, winkStep, type SkyFilter } from "./wink";
 
 const FOV = 42;
 const OVER_ELEV = 0.72;
 const SYS_ELEV = 1.05;
+/** CSS px the picture is framed above the canvas centre, clear of the bottom bar. */
+const FRAME_LIFT = 26;
 /** A click lands this many system radii away: the whole constellation in view. */
 const SYS_DIST = 2.35;
 const IDLE_MS = 20000;
@@ -571,6 +574,11 @@ export class SkyScene {
   private open: string | null = null;
   private hovered: string | null = null;
   private focusStar: number | null = null;
+  // The live search filter: each project ("g:repo"), and inside the open one each star ("s:n"),
+  // winks out or back (see wink.ts). p: 0 lit, 1 gone; since: when its way was last decided.
+  private filter: SkyFilter = NO_FILTER;
+  private winks = new Map<string, { p: number; out: boolean; since: number; delay: number; seed: number }>();
+  private filterDim = 1;
   private picked: number | null = null;
   private lens: Lens = "natural";
   private tmp = new THREE.Vector3();
@@ -760,6 +768,7 @@ export class SkyScene {
     this.buildDebris();
     this.buildBridges(sky);
     this.applyLens();
+    this.syncWinks();
 
     if (!this.placed) {
       this.placed = true;
@@ -1038,6 +1047,7 @@ export class SkyScene {
 
     this.skyGroup.add(group);
     this.interior = { repo, group, layout, R, stars, starGeo, starMat, darkMat, flowGeo, flowMat, flowEdge, edgeGeo, edges: drawn, chainPairs, fadeMats, own, fade: 0 };
+    this.syncWinks();
     this.paintInterior();
   }
 
@@ -1046,6 +1056,76 @@ export class SkyScene {
     this.skyGroup.remove(this.interior.group);
     for (const d of this.interior.own) d.dispose();
     this.interior = null;
+    for (const k of [...this.winks.keys()]) if (k.startsWith("s:")) this.winks.delete(k);
+  }
+
+  /** The live search: what stays lit. Everything else winks out; widening winks it back. */
+  setFilter(f: SkyFilter) {
+    this.filter = f;
+    this.syncWinks();
+    this.dirty = true;
+  }
+
+  /** Out of play: a project (`g:repo`) or star (`s:n`) the filter has winked out. */
+  isOut(key: string): boolean {
+    const w = this.winks.get(key);
+    return !!w && winkedOut(w.p);
+  }
+
+  private syncWinks() {
+    const now = performance.now();
+    const want = (key: string, out: boolean) => {
+      const w = this.winks.get(key);
+      if (!w) {
+        if (out) this.winks.set(key, { p: 0, out, since: now, delay: winkDelay(key), seed: winkSeed(key) });
+      } else if (w.out !== out) {
+        w.out = out;
+        w.since = now;
+      }
+    };
+    for (const repo of this.systems.keys()) want(`g:${repo}`, !isLit(this.filter.repos, repo));
+    const it = this.interior;
+    if (it) for (const st of it.stars) want(`s:${st.number}`, !isLit(this.filter.stars, st.number));
+  }
+
+  /** Advance every wink a frame; true while any is still moving. */
+  private stepWinks(dtMs: number): boolean {
+    const now = performance.now();
+    let moving = false;
+    let stars = false;
+    let systems = false;
+    for (const [key, w] of this.winks) {
+      const p = winkStep(w.p, w.out, dtMs, now - w.since, w.delay, this.reducedMotion);
+      if (p !== w.p) {
+        moving = true;
+        if (key.startsWith("s:")) stars = true;
+        else systems = true;
+      }
+      w.p = p;
+      if (!w.out && p === 0) this.winks.delete(key);
+    }
+    if (stars) this.paintInterior();
+    if (systems) this.paintDebris();
+    return moving;
+  }
+
+  /** Drift debris alpha: the lens, and each project's wink (searched out, its debris goes too). */
+  private paintDebris() {
+    if (!this.debris) return;
+    const a = this.debris.geo.getAttribute("aAlpha") as THREE.BufferAttribute;
+    const base = this.debris.geo.getAttribute("aBase") as THREE.BufferAttribute;
+    const m = lensDebris(this.lens);
+    for (const sys of this.systems.values()) {
+      const [from, n] = sys.debris;
+      const k = m * this.winkOf(`g:${sys.c.repo}`).alpha;
+      for (let i = from; i < from + n; i++) a.setX(i, base.getX(i) * k);
+    }
+    a.needsUpdate = true;
+  }
+
+  private winkOf(key: string) {
+    const w = this.winks.get(key);
+    return w ? winkLook(w.p, w.seed, this.reducedMotion) : { alpha: 1, scale: 1 };
   }
 
   /** Colour, size and alpha of each star and filament, from state, chain, hover, pick, lens. */
@@ -1073,6 +1153,9 @@ export class SkyScene {
         px = Math.max(px, STAR_CORE_MAX * 0.8);
       }
       a *= lensStar(this.lens, s);
+      const wk = this.winkOf(`s:${s.number}`);
+      a *= wk.alpha;
+      px *= wk.scale;
       col.setXYZ(s.index, c[0], c[1], c[2]);
       size.setX(s.index, px);
       alpha.setX(s.index, a);
@@ -1108,13 +1191,7 @@ export class SkyScene {
     this.discMat.uniforms.uDim.value = k;
     this.dustMat.uniforms.uDim.value = Math.max(k, 0.6);
     for (const s of this.systems.values()) s.lens = lensSystem(this.lens, systemFacts(s.c));
-    if (this.debris) {
-      const a = this.debris.geo.getAttribute("aAlpha") as THREE.BufferAttribute;
-      const base = this.debris.geo.getAttribute("aBase") as THREE.BufferAttribute;
-      const m = lensDebris(this.lens);
-      for (let i = 0; i < a.count; i++) a.setX(i, base.getX(i) * m);
-      a.needsUpdate = true;
-    }
+    this.paintDebris();
     if (this.bridges) this.bridges.uniforms.uAlpha.value = this.lens === "natural" ? 0.7 : 0.15;
     this.paintInterior();
     this.dirty = true;
@@ -1324,6 +1401,9 @@ export class SkyScene {
     this.renderer.setSize(this.width, this.height, false);
     this.optics.setSize(this.width, this.height, this.dpr);
     this.camera.aspect = this.width / this.height;
+    // The bottom bar (lenses, ages, legend) takes the lowest strip of the view: the picture is
+    // framed a little higher so a project's lower ring does not slide under it.
+    this.camera.setViewOffset(this.width, this.height, 0, FRAME_LIFT, this.width, this.height);
     this.camera.updateProjectionMatrix();
     // Until the camera has been moved, the overview follows the window's shape.
     if (!this.moved && !this.open && !this.tween) {
@@ -1348,14 +1428,43 @@ export class SkyScene {
     return this.devStages?.get(c.repo) ?? condensation(c);
   }
 
-  devPlace(repo: string, k: number) {
+  devPlace(repo: string, k: number, az: number | null = null, elev: number | null = null) {
     if (!this.systems.has(repo)) return;
     this.moved = true;
     this.cam = this.systemPose(repo, k);
+    if (az !== null) this.cam.az = az;
+    if (elev !== null) this.cam.elev = Math.max(0.2, Math.min(1.45, elev));
     this.goal = { ...this.cam, target: { ...this.cam.target } };
     this.tween = null;
     this.dirty = true;
   }
+
+  /**
+   * How the camera sees the hole's disc this frame, for the lens pass. In camera space (x right,
+   * y up, z towards the viewer) the disc's normal n is the galaxy's +Y. Its in-plane direction
+   * towards the viewer, w, projects to the minor axis (the near half); m = n x w is the major
+   * axis, and the disc turns as the galaxy does (a star at angle th sits at (cos th, ., sin th)
+   * with th growing), so the side at +m is the one coming towards the camera. Tilt is |n.z|.
+   */
+  private discOnScreen(u: Record<string, THREE.IUniform>) {
+    const inv = this.qInv.copy(this.camera.quaternion).invert();
+    const n = this.vN.set(0, 1, 0).applyQuaternion(inv);
+    const w = this.vW.set(0, 0, 1).addScaledVector(n, -n.z);
+    if (w.lengthSq() < 1e-8) w.set(0, 1, 0).addScaledVector(n, -n.y);
+    w.normalize();
+    const m = this.vM.crossVectors(n, w);
+    const mu = Math.hypot(m.x, m.y) || 1;
+    (u.uU.value as THREE.Vector2).set(m.x / mu, m.y / mu);
+    const wl = Math.hypot(w.x, w.y);
+    // The far half is opposite the near one; face-on (no near half) any perpendicular will do.
+    if (wl > 1e-5) (u.uV.value as THREE.Vector2).set(-w.x / wl, -w.y / wl);
+    else (u.uV.value as THREE.Vector2).set(-m.y / mu, m.x / mu);
+    u.uTilt.value = Math.min(1, Math.abs(n.z));
+  }
+  private qInv = new THREE.Quaternion();
+  private vN = new THREE.Vector3();
+  private vW = new THREE.Vector3();
+  private vM = new THREE.Vector3();
 
   // -- where things are on screen (CSS pixels in the canvas box) ----------------------------
   private toScreen(v: Vec3, worldR: number): Screen {
@@ -1538,6 +1647,13 @@ export class SkyScene {
       it.fade = detailFade(Math.hypot(eye.x - o.x, eye.y - o.y, eye.z - o.z), it.R);
     }
     const hush = interiorHush(it ? it.fade : 0);
+    // A search on: the survivors stand out against a slightly dimmer galaxy.
+    if (this.stepWinks(dt * 1000)) this.dirty = true;
+    const dimGoal = this.filter.count >= 0 ? 0.7 : 1;
+    this.filterDim += (dimGoal - this.filterDim) * Math.min(1, dt * 8);
+    if (Math.abs(dimGoal - this.filterDim) > 1e-3) this.dirty = true;
+    this.discMat.uniforms.uDim.value = lensDisc(this.lens) * this.filterDim;
+    this.dustMat.uniforms.uDim.value = Math.max(lensDisc(this.lens), 0.6) * this.filterDim;
     const inCentre = it ? (this.systems.get(it.repo)?.place.centre ?? false) : false;
     for (const m of [this.discMat, this.dustMat]) m.uniforms.uHush.value.set(hush.stars, hush.gas);
     this.optics.bloom.threshold = hush.bloomThreshold;
@@ -1551,9 +1667,11 @@ export class SkyScene {
       s.mat.uniforms.uTime.value = t;
       s.mat.uniforms.uPx.value = pxScale;
       s.mat.uniforms.uDpr.value = this.dpr;
-      s.mat.uniforms.uAlpha.value = s.lens * hover * inside;
-      (s.core.material as THREE.SpriteMaterial).opacity = coreGlow(this.progressOf(s.c)) * s.lens * hover * inside;
-      this.nebulae.setAlpha(s.c.repo, s.lens * hover * inside);
+      const wk = this.winkOf(`g:${s.c.repo}`);
+      s.mat.uniforms.uAlpha.value = s.lens * hover * inside * wk.alpha;
+      (s.core.material as THREE.SpriteMaterial).opacity = coreGlow(this.progressOf(s.c)) * s.lens * hover * inside * wk.alpha;
+      this.nebulae.setAlpha(s.c.repo, s.lens * hover * inside * wk.alpha);
+      if (s.points) s.points.scale.setScalar(s.place.scale * Math.max(wk.scale, 1e-3));
     }
     if (this.hole) {
       const d = Math.hypot(eye.x, eye.z);
@@ -1563,7 +1681,8 @@ export class SkyScene {
       const hover = sw.c.repo === this.hovered ? 1.3 : 1;
       // Calm from afar: at the overview the disc is a few pixels, and a full-strength one blooms
       // into a white donut; it comes up to full heat as the camera closes in.
-      this.hole.disc.uniforms.uAlpha.value = Math.max(0.35, sw.lens) * hover * (1 - 0.7 * Math.min(1, share * 1.4));
+      // Searched out by name, the disc winks out with the rest; the shadow stays.
+      this.hole.disc.uniforms.uAlpha.value = Math.max(0.35, sw.lens) * hover * (1 - 0.7 * Math.min(1, share * 1.4)) * this.winkOf(`g:${sw.c.repo}`).alpha;
       this.hole.core.opacity = 0.12 * hush.gas;
       // Inside switchboard the hole draws in, small beside the figures round it: they are the subject.
       const k = inCentre ? 1 - 0.6 * it!.fade : 1;
@@ -1580,6 +1699,7 @@ export class SkyScene {
       // (they must agree); the scene's own disc stands in only while it is a few pixels.
       pass.uniforms.uDisc.value = this.hole.disc.uniforms.uAlpha.value;
       pass.uniforms.uTime.value = t;
+      this.discOnScreen(pass.uniforms);
       this.hole.discMesh.visible = !pass.enabled;
     } else this.optics.lens.enabled = false;
     if (this.debris) {

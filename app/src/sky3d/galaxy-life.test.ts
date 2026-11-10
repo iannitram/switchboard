@@ -459,8 +459,8 @@ describe("pass 4: inside a project, stars are points and the backdrop steps back
     const out = interiorHush(0);
     expect(out).toEqual({ gas: 1, stars: 1, others: 1, bloomThreshold: 0.72, bloomStrength: 0.62 });
     const inside = interiorHush(1);
-    expect(inside.gas).toBeGreaterThanOrEqual(0.1);
-    expect(inside.gas).toBeLessThanOrEqual(0.2);
+    expect(inside.gas).toBeGreaterThanOrEqual(0.3);
+    expect(inside.gas).toBeLessThanOrEqual(0.4);
     expect(inside.bloomThreshold).toBeGreaterThan(out.bloomThreshold + 0.8);
     expect(interiorHush(0.5).gas).toBeGreaterThan(inside.gas);
     expect(interiorHush(0.5).gas).toBeLessThan(out.gas);

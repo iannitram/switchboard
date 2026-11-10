@@ -110,9 +110,9 @@ export type Hush = { gas: number; stars: number; others: number; bloomThreshold:
 export function interiorHush(inside: number): Hush {
   const h = clamp(Number.isFinite(inside) ? inside : 0, 0, 1);
   return {
-    gas: 1 - 0.8 * h,
+    gas: 1 - 0.64 * h,
     stars: 1 - 0.5 * h,
-    others: 1 - 0.6 * h,
+    others: 1 - 0.45 * h,
     bloomThreshold: 0.72 + 1.1 * h,
     bloomStrength: 0.62 - 0.17 * h,
   };

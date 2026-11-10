@@ -11,6 +11,7 @@ import { labelBudget, pinchFactor, wheelFactor } from "./camera";
 import { LENSES, lensMatches, systemFacts, type Lens } from "./physics";
 import { breadcrumbs, searchSky, type Crumb, type Hit } from "./wayfind";
 import { devSkyStart, prefersReducedMotion } from "./support";
+import { matchSky } from "./wink";
 import "./sky3d.css";
 
 // The 3D Sky (SKY-1 to SKY-9, #297, #299): one living galaxy. The scene draws; this overlay
@@ -65,7 +66,7 @@ const ageLine = (sky: SkyModel) =>
     : `snapshot ${sky.ageMinutes} min old · priority copy ${sky.priorityAgeDays} days old`;
 
 /** Controls that keep their own pointer and wheel: no orbit or zoom starts on them. */
-const OWN_INPUT = ".sky3d-panel, .sky3d-drawer, .sky3d-drawer-toggle, .sky3d-toolbar, .sky3d-search, .sky3d-lenses, .sky3d-crumbs, .sky3d-head";
+const OWN_INPUT = ".sky3d-panel, .sky3d-drawer, .sky3d-drawer-toggle, .sky3d-toolbar, .sky3d-search, .sky3d-bottom, .sky3d-crumbs, .sky3d-head";
 
 const isLens = (v: string | null): v is Lens => LENSES.some((l) => l.id === v);
 
@@ -96,6 +97,7 @@ export default function Sky3D({ sky, open, onOpen, onBack, picked, onPick, toolb
   const [hoverFeature, setHoverFeature] = useState<string | null>(null);
   const [nearFeature, setNearFeature] = useState<string | null>(null);
   const [drawer, setDrawer] = useState(false);
+  const [legend, setLegend] = useState(false);
   const [reduced, setReduced] = useState(prefersReducedMotion);
   const [lens, setLens] = useState<Lens>(isLens(dev.lens) ? dev.lens : "natural");
   const [search, setSearch] = useState<string | null>(dev.search);
@@ -104,6 +106,23 @@ export default function Sky3D({ sky, open, onOpen, onBack, picked, onPick, toolb
   const zoomed: Constellation | undefined = open === null ? undefined : sky.constellations.find((c) => c.repo === open);
   const stars = useMemo(() => new Map((zoomed?.features ?? []).flatMap((f) => f.stars.map((s) => [s.number, s] as const))), [zoomed]);
   const hits = useMemo(() => (search ? searchSky(sky, search) : []), [sky, search]);
+  // Live, as it is typed: what does not match winks out of the map (see wink.ts).
+  const filter = useMemo(() => matchSky(sky.constellations, search ?? "", zoomed ?? null), [sky, search, zoomed]);
+  useEffect(() => {
+    sceneRef.current?.setFilter(filter);
+  }, [filter]);
+  // The search closes on a click anywhere outside it (its own toggle button included: that
+  // toggles it itself).
+  useEffect(() => {
+    if (search === null) return;
+    const onDown = (e: PointerEvent) => {
+      const t = e.target as Element | null;
+      if (t?.closest?.(".sky3d-search, .sky3d-search-open")) return;
+      setSearch(null);
+    };
+    document.addEventListener("pointerdown", onDown, true);
+    return () => document.removeEventListener("pointerdown", onDown, true);
+  }, [search === null]);
   const crumbs = useMemo(() => breadcrumbs(sky, open, nearFeature, picked), [sky, open, nearFeature, picked]);
 
   // The renderer: made once per mount, on a canvas of its own, disposed on unmount.
@@ -153,7 +172,7 @@ export default function Sky3D({ sky, open, onOpen, onBack, picked, onPick, toolb
     if (!scene) return;
     if (dev.stages) scene.devSpreadProgress();
     scene.setSky(sky);
-    if (dev.near && !scene.hasMoved()) scene.devPlace(dev.near, dev.dist ?? 4);
+    if (dev.near && !scene.hasMoved()) scene.devPlace(dev.near, dev.dist ?? 4, dev.az, dev.elev);
   }, [sky, dev]);
   // DEV only: the frame time, as the rAF delta averaged over 5 s with every frame drawn.
   const [devFps, setDevFps] = useState<string | null>(null);
@@ -398,6 +417,9 @@ export default function Sky3D({ sky, open, onOpen, onBack, picked, onPick, toolb
     const view = { width: W, height: H };
     const rootBox = root.getBoundingClientRect();
     const blockers = blockersRef.current.filter((el) => el.isConnected && el.offsetWidth > 0).map((el) => rel(el.getBoundingClientRect(), rootBox));
+    // Nothing is placed below the top of the bottom bar, forced labels included.
+    const bar = rootRef.current?.querySelector<HTMLElement>(".sky3d-bottom");
+    const floor = bar && bar.offsetHeight > 0 ? rel(bar.getBoundingClientRect(), rootBox).top : H - 64;
     const E = els.current;
     const cands: LabelCandidate[] = [];
     const size = (el: HTMLElement) => ({ width: el.offsetWidth, height: el.offsetHeight });
@@ -422,7 +444,7 @@ export default function Sky3D({ sky, open, onOpen, onBack, picked, onPick, toolb
       const hit = E.hit.get(c.repo);
       if (!s || !hit) continue;
       const d = Math.min(Math.max(26, s.r * 1.5), 260);
-      const shown = s.visible && c.repo !== open && s.x > -d && s.x < W + d && s.y > -d && s.y < H + d;
+      const shown = s.visible && c.repo !== open && !scene.isOut(`g:${c.repo}`) && s.x > -d && s.x < W + d && s.y > -d && s.y < H + d;
       hit.style.width = hit.style.height = `${Math.round(d)}px`;
       place(hit, s.x - d / 2, s.y - d / 2, shown);
       if (shown) onScreen.push({ c, s });
@@ -463,14 +485,14 @@ export default function Sky3D({ sky, open, onOpen, onBack, picked, onPick, toolb
         if (!s) continue;
         const d = Math.min(Math.max(20, s.r * 2.4), 120);
         el.style.width = el.style.height = `${Math.round(d)}px`;
-        place(el, s.x - d / 2, s.y - d / 2, s.visible);
+        place(el, s.x - d / 2, s.y - d / 2, s.visible && !scene.isOut(`s:${n}`));
       }
       // Feature names sit on the outer side of their figure, away from the bright core.
       const hub = scene.galaxyScreen(zoomed.repo) ?? { x: W / 2, y: H / 2, r: 0 };
       zoomed.features.forEach((f, i) => {
         const el = E.feature.get(f.id);
         const s = scene.featureScreen(f.id);
-        if (!el || !s || !s.visible) return;
+        if (!el || !s || !s.visible || (filter.features && !filter.features.has(f.id))) return;
         const sz = size(el);
         const order = f.release === "1.0" ? 0 : f.release === "after-1.0" ? 100 : 200;
         cands.push({ id: `f:${f.id}`, x: outsideX(f.stars.length ? s : { x: s.x, r: s.r * 1.3 }, hub, sz.width, 6), y: s.y - sz.height / 2, ...sz, priority: order - f.stars.length + i * 0.01, forced: f.id === hoverFeature });
@@ -481,7 +503,7 @@ export default function Sky3D({ sky, open, onOpen, onBack, picked, onPick, toolb
         const sz = size(el);
         // Always shown (the brief): pulled into the view when the ring is larger than the screen.
         const x = Math.min(Math.max(s.x, sz.width / 2 + 8), W - sz.width / 2 - 8);
-        const y = Math.min(Math.max(s.y + 6, 64), H - sz.height - 64);
+        const y = Math.min(Math.max(s.y + 6, 64), floor - sz.height - 8);
         cands.push({ id: `r:${release}`, x, y, ...sz, priority: -5, forced: true });
       }
       const tip = tipRef.current;
@@ -670,13 +692,23 @@ export default function Sky3D({ sky, open, onOpen, onBack, picked, onPick, toolb
               </li>
             ))}
           </ol>
-          <button className="btn sky3d-search-open" aria-label="Search the sky" aria-keyshortcuts="/" onClick={() => setSearch("")}>
+          <button
+            className="btn sky3d-search-open"
+            aria-label="Search the sky"
+            aria-keyshortcuts="/"
+            aria-expanded={search !== null}
+            aria-controls="sky3d-search"
+            onClick={() => {
+              setSearch((q) => (q === null ? "" : null));
+              setHitIndex(0);
+            }}
+          >
             ⌕
           </button>
         </nav>
 
         {search !== null && (
-          <div className="sky3d-search" role="dialog" aria-label="Search the sky">
+          <div id="sky3d-search" className="sky3d-search" role="dialog" aria-label="Search the sky">
             <input
               autoFocus
               value={search}
@@ -707,7 +739,11 @@ export default function Sky3D({ sky, open, onOpen, onBack, picked, onPick, toolb
                   </button>
                 </li>
               ))}
-              {search.trim() && hits.length === 0 && <li className="sky3d-dim">Nothing by that name</li>}
+              {search.trim() && filter.count === 0 && (
+                <li className="sky3d-dim" role="status">
+                  No match
+                </li>
+              )}
             </ul>
           </div>
         )}
@@ -751,14 +787,6 @@ export default function Sky3D({ sky, open, onOpen, onBack, picked, onPick, toolb
           {toolbar}
         </div>
 
-        <div ref={blocker} className="seg-group sky3d-lenses" role="group" aria-label="Lens">
-          {LENSES.map((l) => (
-            <button key={l.id} className="seg" aria-pressed={lens === l.id} aria-keyshortcuts={l.key} title={`${l.asks} (${l.key})`} onClick={() => setLens(l.id)}>
-              {l.name}
-            </button>
-          ))}
-        </div>
-
         <button
           ref={blocker}
           className={`btn sky3d-drawer-toggle${drift.length ? " has-drift" : ""}`}
@@ -780,27 +808,43 @@ export default function Sky3D({ sky, open, onOpen, onBack, picked, onPick, toolb
         </aside>
 
         {devFps && <p className="sky3d-devfps">{devFps}</p>}
-        <p ref={blocker} className="sky3d-ages" data-testid="ages">
-          {ageLine(sky)}
-        </p>
-        <div ref={blocker} className="sky3d-hint" aria-hidden="true">
-          {lens !== "natural" ? (
-            <p>
-              <b>{lensInfo.name}</b> · {lensInfo.asks} · {lensCount === 0 ? "none right now" : `${lensCount} of ${sky.constellations.length} projects`} · n for natural
-            </p>
-          ) : zoomed && zoomed.features.length > 0 ? (
-            <p>
-              <i className="k closed" /> closed <i className="k open" /> open <i className="k flight" /> in flight <i className="k pass" /> PR pass{" "}
-              <i className="k fail" /> PR fail <i className="k dark" /> no issues <i className="k chain" /> longest chain · bigger = harder
-            </p>
-          ) : (
-            <p>
-              <i className="k hole" /> switchboard <i className="k nebula" /> nebula: uncharted <i className="k cluster" /> cluster: near 1.0{" "}
-              <i className="k debris" /> drift <i className="k bridge" /> reuse
-            </p>
-          )}
-          <p className="sky3d-dim">Scroll or pinch to zoom · drag to orbit · / to search · Esc to step back</p>
-        </div>
+        {/* The bottom bar: the snapshot ages, the lens switch and the legend share one row and
+            wrap rather than overlap; narrow, the legend folds into a toggle. */}
+        <footer ref={blocker} className="sky3d-bottom">
+          <p className="sky3d-ages" data-testid="ages">
+            {ageLine(sky)}
+          </p>
+          <div className="seg-group sky3d-lenses" role="group" aria-label="Lens">
+            {LENSES.map((l) => (
+              <button key={l.id} className="seg" aria-pressed={lens === l.id} aria-keyshortcuts={l.key} title={`${l.asks} (${l.key})`} onClick={() => setLens(l.id)}>
+                {l.name}
+              </button>
+            ))}
+          </div>
+          <div className="sky3d-legend">
+            <button className="btn sky3d-legend-toggle" aria-expanded={legend} aria-controls="sky3d-legend" onClick={() => setLegend((v) => !v)}>
+              Legend
+            </button>
+            <div id="sky3d-legend" className={`sky3d-hint${legend ? " is-open" : ""}`}>
+              {lens !== "natural" ? (
+                <p>
+                  <b>{lensInfo.name}</b> · {lensInfo.asks} · {lensCount === 0 ? "none right now" : `${lensCount} of ${sky.constellations.length} projects`} · n for natural
+                </p>
+              ) : zoomed && zoomed.features.length > 0 ? (
+                <p>
+                  <i className="k closed" /> closed <i className="k open" /> open <i className="k flight" /> in flight <i className="k pass" /> PR pass{" "}
+                  <i className="k fail" /> PR fail <i className="k dark" /> no issues <i className="k chain" /> longest chain · bigger = harder
+                </p>
+              ) : (
+                <p>
+                  <i className="k hole" /> switchboard <i className="k nebula" /> nebula: uncharted <i className="k cluster" /> cluster: near 1.0{" "}
+                  <i className="k debris" /> drift <i className="k bridge" /> reuse
+                </p>
+              )}
+              <p className="sky3d-dim">Scroll or pinch to zoom · drag to orbit · / to search · Esc to step back</p>
+            </div>
+          </div>
+        </footer>
       </section>
     </>
   );
