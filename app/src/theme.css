@@ -1,5 +1,6 @@
-/* Switchboard's look (#297, #300): dark glass on a starship comm panel. One palette, one set of
-   controls, system fonts only, everything CSS or inline SVG. The 3D Sky (sky3d.css) uses the same
+/* Switchboard's look (#297, #300): the Astrolabe rail. A brass instrument limb with a tick scale,
+   riveted plates, Marcellus SC engraved type (bundled, SIL OFL 1.1) for labels, system fonts for text.
+   One palette, one set of controls, everything CSS or inline SVG. The 3D Sky (sky3d.css) uses the same
    colours through these custom properties. */
 
 :root {
@@ -12,9 +13,16 @@
   --line-soft: rgba(148, 163, 184, 0.11);
   --glass: rgba(9, 14, 28, 0.78);
   --glass-hi: rgba(20, 29, 50, 0.72);
-  --accent: #7dd3fc;
+  --accent: #8fe3ff;
   --accent-deep: #0ea5e9;
-  --accent-glow: rgba(125, 211, 252, 0.34);
+  --accent-glow: rgba(143, 227, 255, 0.26);
+  --aether: #8fe3ff;
+  --brass: #c9a25a;
+  --brass-hi: #f3dfa6;
+  --brass-lo: #6b5326;
+  --brass-idle: #b2955b;
+  --brass-lit: #f7ebc6;
+  --brass-rule: rgba(201, 162, 90, 0.26);
   --amber: #f5a524;
   --gold: #fbbf24;
   --red: #f87171;
@@ -24,12 +32,22 @@
   --font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", Cantarell, "Helvetica Neue", Arial, sans-serif;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
 
-  --radius: 10px;
-  --radius-sm: 7px;
+  --font-engraved: "Marcellus SC", "Trajan Pro", Georgia, serif;
+
+  --radius: 3px;
+  --radius-sm: 2px;
   --console-h: 62px;
   --t-quick: 0.12s;
   --t-view: 0.14s;
   color-scheme: dark;
+}
+
+@font-face {
+  font-family: "Marcellus SC";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("./assets/fonts/MarcellusSC-Regular.ttf") format("truetype");
 }
 
 *,
@@ -84,35 +102,17 @@ body {
   top: 0;
   z-index: 50;
   flex: 0 0 auto;
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.055) 0%, rgba(255, 255, 255, 0) 38%),
-    linear-gradient(180deg, rgba(22, 31, 52, 0.94) 0%, rgba(8, 12, 22, 0.96) 100%);
-  -webkit-backdrop-filter: blur(14px) saturate(1.2);
-  backdrop-filter: blur(14px) saturate(1.2);
-  border-bottom: 1px solid rgba(148, 163, 184, 0.28);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.1),
-    0 1px 0 rgba(0, 0, 0, 0.8),
-    0 10px 28px rgba(0, 0, 0, 0.5);
-}
-
-/* a thin lit seam under the strip */
-.console::after {
-  content: "";
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: -1px;
-  height: 1px;
-  background: linear-gradient(90deg, transparent 0%, var(--accent-glow) 30%, rgba(125, 211, 252, 0.7) 50%, var(--accent-glow) 70%, transparent 100%);
-  pointer-events: none;
+  background: linear-gradient(180deg, rgba(14, 18, 34, 0.96) 0%, rgba(6, 9, 18, 0.97) 100%);
+  border-bottom: 1px solid var(--brass-rule);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.45);
 }
 
 .console-bar {
   display: flex;
   align-items: center;
-  gap: 18px;
-  padding: 10px 16px;
+  gap: 22px;
+  flex-wrap: wrap;
+  padding: 12px 16px 16px;
   min-height: var(--console-h);
 }
 
@@ -122,31 +122,42 @@ body {
   gap: 9px;
   flex: 0 0 auto;
   color: var(--ink);
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.22em;
+  font-family: var(--font-engraved);
+  font-size: 13px;
+  font-weight: 400;
+  letter-spacing: 0.3em;
   text-transform: uppercase;
+  white-space: nowrap;
   user-select: none;
 }
 
 .console-brand svg {
   display: block;
-  color: var(--accent);
-  filter: drop-shadow(0 0 5px var(--accent-glow));
+  color: var(--brass);
 }
 
+/* the engraved limb: warm dark gradient, brass-lo rule on top, a tick scale along the bottom edge */
 .console nav {
+  position: relative;
   display: flex;
   flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  padding: 5px;
-  border-radius: 14px;
-  background: linear-gradient(180deg, rgba(0, 0, 0, 0.5), rgba(0, 0, 0, 0.2));
-  box-shadow:
-    inset 0 2px 5px rgba(0, 0, 0, 0.65),
-    inset 0 0 0 1px rgba(148, 163, 184, 0.12),
-    0 1px 0 rgba(255, 255, 255, 0.07);
+  min-width: 0;
+  padding-bottom: 10px;
+  border-top: 1px solid var(--brass-lo);
+  background: linear-gradient(180deg, #1b1609, #0c0a07);
+}
+
+.console nav::after {
+  content: "";
+  position: absolute;
+  inset: auto 0 0 0;
+  height: 10px;
+  border-top: 1px solid var(--brass-lo);
+  opacity: 0.6;
+  pointer-events: none;
+  background:
+    repeating-linear-gradient(90deg, var(--brass) 0 1px, transparent 1px 8px) left bottom / 100% 4px no-repeat,
+    repeating-linear-gradient(90deg, var(--brass) 0 1px, transparent 1px 40px) left bottom / 100% 9px no-repeat;
 }
 
 .console .key {
@@ -155,111 +166,58 @@ body {
   position: relative;
   display: inline-flex;
   align-items: center;
-  gap: 9px;
   margin: 0;
-  padding: 9px 16px 9px 13px;
-  font: 600 13px/1 var(--font);
-  letter-spacing: 0.025em;
-  color: var(--ink-dim);
-  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.7);
+  padding: 10px 16px;
+  font: 400 13.5px/1.2 var(--font-engraved);
+  letter-spacing: 0.12em;
+  color: var(--brass-idle);
   white-space: nowrap;
   cursor: pointer;
-  border: 1px solid rgba(148, 163, 184, 0.26);
-  border-radius: 9px;
-  background: linear-gradient(180deg, #27344f 0%, #1a2539 47%, #101829 53%, #151f33 100%);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.2),
-    inset 0 -2px 4px rgba(0, 0, 0, 0.5),
-    inset 0 0 0 1px rgba(0, 0, 0, 0.25),
-    0 2px 0 #04070d,
-    0 4px 8px rgba(0, 0, 0, 0.55);
+  border: 0;
+  border-right: 1px solid rgba(201, 162, 90, 0.2);
+  border-radius: 0;
+  background: none;
   transition:
     color var(--t-quick),
-    border-color var(--t-quick),
     background var(--t-quick),
-    box-shadow var(--t-quick),
-    transform var(--t-quick);
-}
-
-/* the glass sheen across the top half of each key */
-.console .key::before {
-  content: "";
-  position: absolute;
-  left: 2px;
-  right: 2px;
-  top: 2px;
-  height: 46%;
-  border-radius: 7px 7px 12px 12px / 7px 7px 5px 5px;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.2), rgba(255, 255, 255, 0.02));
-  pointer-events: none;
-  transition: opacity var(--t-quick);
-}
-
-.console .key-lamp {
-  position: relative;
-  flex: 0 0 auto;
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: #0b111d;
-  box-shadow:
-    inset 0 1px 2px rgba(0, 0, 0, 0.9),
-    0 0 0 1px rgba(148, 163, 184, 0.22);
-  transition: background var(--t-quick), box-shadow var(--t-quick);
-}
-
-.console .key-label {
-  position: relative;
+    box-shadow var(--t-quick);
 }
 
 .console .key:hover {
-  color: var(--ink);
-  border-color: rgba(186, 214, 255, 0.5);
-  background: linear-gradient(180deg, #324264 0%, #223049 47%, #15203a 53%, #1b2845 100%);
-}
-
-.console .key:hover .key-lamp {
-  background: rgba(125, 211, 252, 0.4);
+  color: var(--brass-hi);
+  background: rgba(201, 162, 90, 0.08);
 }
 
 .console .key:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
+  outline: 2px solid var(--aether);
+  outline-offset: -2px;
 }
 
-.console .key:active,
 .console .key[aria-pressed="true"] {
-  transform: translateY(1px);
-}
-
-.console .key:active {
-  background: linear-gradient(180deg, #131c2e 0%, #18233a 100%);
-}
-
-/* the active key: pushed in and lit from within */
-.console .key[aria-pressed="true"] {
-  color: #f2fbff;
-  text-shadow: 0 0 10px rgba(125, 211, 252, 0.75);
-  border-color: rgba(125, 211, 252, 0.75);
-  background: linear-gradient(180deg, #0a2236 0%, #0f3a56 45%, #0b3150 55%, #0d4666 100%);
+  color: var(--brass-lit);
+  text-shadow: 0 0 6px rgba(243, 223, 166, 0.3);
+  background: linear-gradient(180deg, rgba(201, 162, 90, 0.27), rgba(201, 162, 90, 0.05));
   box-shadow:
-    inset 0 3px 8px rgba(0, 0, 0, 0.7),
-    inset 0 -1px 0 rgba(125, 211, 252, 0.35),
-    inset 0 0 20px rgba(56, 189, 248, 0.32),
-    0 0 0 1px rgba(125, 211, 252, 0.18),
-    0 0 16px rgba(56, 189, 248, 0.28);
+    inset 0 1px 0 rgba(243, 223, 166, 0.49),
+    inset 0 -10px 14px rgba(0, 0, 0, 0.38);
 }
 
-.console .key[aria-pressed="true"]::before {
-  opacity: 0.45;
-}
-
-.console .key[aria-pressed="true"] .key-lamp {
-  background: #e8f8ff;
-  box-shadow:
-    0 0 0 1px rgba(186, 230, 253, 0.9),
-    0 0 6px 2px rgba(125, 211, 252, 0.95),
-    0 0 14px 3px rgba(56, 189, 248, 0.6);
+/* the vernier cursor: straddles the scale below the lit plate, aether hairline at its centre */
+.console .key[aria-pressed="true"]::after {
+  content: "";
+  position: absolute;
+  z-index: 1;
+  left: 0;
+  right: 0;
+  bottom: -10px;
+  height: 10px;
+  border: 1px solid var(--brass-hi);
+  border-top: 0;
+  box-shadow: 0 0 6px rgba(143, 227, 255, 0.28);
+  background:
+    linear-gradient(90deg, transparent calc(50% - 1px), var(--aether) calc(50% - 1px) calc(50% + 1px), transparent calc(50% + 1px)),
+    rgba(143, 227, 255, 0.12);
+  pointer-events: none;
 }
 
 /* readouts under the keys: needs-attention in amber, errors in red */
@@ -355,8 +313,9 @@ body {
 .pane h2,
 .pane h3 {
   margin: 0 0 12px;
-  font-weight: 650;
-  letter-spacing: 0.01em;
+  font-family: var(--font-engraved);
+  font-weight: 400;
+  letter-spacing: 0.1em;
 }
 
 .pane p {
@@ -379,7 +338,7 @@ body {
 
 .pane a {
   color: var(--accent);
-  text-decoration-color: rgba(125, 211, 252, 0.4);
+  text-decoration-color: rgba(143, 227, 255, 0.4);
   text-underline-offset: 3px;
   transition: color var(--t-quick);
 }
@@ -405,12 +364,11 @@ body {
 .pane section[aria-label="Loadout"] > ul > li {
   position: relative;
   background: linear-gradient(180deg, rgba(24, 34, 58, 0.72) 0%, rgba(11, 17, 32, 0.82) 100%);
-  border: 1px solid var(--line);
+  border: 1px solid var(--brass-rule);
   border-radius: var(--radius);
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.07),
-    inset 0 -1px 0 rgba(0, 0, 0, 0.4),
-    0 6px 18px rgba(0, 0, 0, 0.35);
+    inset 0 1px 0 rgba(243, 223, 166, 0.08),
+    0 4px 14px rgba(0, 0, 0, 0.35);
 }
 
 .pane .report,
@@ -555,8 +513,11 @@ body {
 
 /* ---------- controls: one set ---------- */
 
+/* riveted plate: shared by .btn, every button in a pane and the banner actions */
 .pane button,
-.error-banner button {
+.error-banner button,
+.btn,
+.badge {
   appearance: none;
   -webkit-appearance: none;
   position: relative;
@@ -565,66 +526,75 @@ body {
   justify-content: center;
   gap: 8px;
   margin: 0;
-  padding: 8px 16px;
-  font: 600 13px/1.1 var(--font);
-  letter-spacing: 0.02em;
-  color: var(--ink);
+  padding: 6px 15px;
+  font: 400 12.5px/1.2 var(--font-engraved);
+  letter-spacing: 0.1em;
+  color: var(--brass-hi);
   cursor: pointer;
-  border: 1px solid rgba(148, 163, 184, 0.3);
+  border: 1px solid var(--brass-lo);
   border-radius: var(--radius-sm);
-  background: linear-gradient(180deg, #2a3855 0%, #1b2740 50%, #16213a 100%);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.16),
-    inset 0 -1px 2px rgba(0, 0, 0, 0.4),
-    0 2px 5px rgba(0, 0, 0, 0.4);
+  background:
+    radial-gradient(circle at 5px 5px, var(--brass) 1px, transparent 1.7px),
+    radial-gradient(circle at calc(100% - 5px) 5px, var(--brass) 1px, transparent 1.7px),
+    radial-gradient(circle at 5px calc(100% - 5px), var(--brass) 1px, transparent 1.7px),
+    radial-gradient(circle at calc(100% - 5px) calc(100% - 5px), var(--brass) 1px, transparent 1.7px),
+    linear-gradient(180deg, rgba(34, 27, 12, 0.92), rgba(14, 11, 7, 0.92));
   transition:
     color var(--t-quick),
     border-color var(--t-quick),
-    background var(--t-quick),
     box-shadow var(--t-quick),
     transform var(--t-quick);
 }
 
+.badge {
+  cursor: default;
+}
+
+.badge b {
+  color: var(--amber);
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+
 .pane button:hover,
-.error-banner button:hover {
-  border-color: rgba(186, 214, 255, 0.5);
-  background: linear-gradient(180deg, #364768 0%, #24324f 50%, #1d2a47 100%);
+.error-banner button:hover,
+.btn:hover {
+  border-color: var(--brass);
 }
 
 .pane button:active,
-.error-banner button:active {
+.error-banner button:active,
+.btn:active {
   transform: translateY(1px);
-  box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.6);
+  box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.7);
 }
 
 .pane button:focus-visible,
-.error-banner button:focus-visible {
-  outline: 2px solid var(--accent);
+.error-banner button:focus-visible,
+.btn:focus-visible,
+.seg:focus-visible {
+  outline: 2px solid var(--aether);
   outline-offset: 2px;
 }
 
-.pane button:disabled {
+.pane button:disabled,
+.btn:disabled {
   opacity: 0.5;
   cursor: default;
   transform: none;
 }
 
-/* primary: Save, Send, Open in Claude, the action on a waiting item */
+/* primary: the same plate with a brass-hi border and a lit label */
 .pane button[type="submit"],
 .pane section[aria-label="Settings"] > button,
 .pane form[aria-label^="Edit "] > button:first-of-type,
 .pane [data-part="handoff"] > button,
 .pane [data-part="held"] > button,
-.pane [data-part="action"] {
-  color: #04202f;
-  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.3);
-  border-color: rgba(186, 230, 253, 0.85);
-  background: linear-gradient(180deg, #a5e4ff 0%, #5cc3f2 48%, #2ba8e4 52%, #4cbcf0 100%);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.65),
-    inset 0 -2px 3px rgba(3, 105, 161, 0.5),
-    0 0 14px rgba(56, 189, 248, 0.22),
-    0 2px 5px rgba(0, 0, 0, 0.45);
+.pane [data-part="action"],
+.btn.primary {
+  color: var(--brass-lit);
+  text-shadow: 0 0 6px rgba(243, 223, 166, 0.3);
+  border-color: var(--brass-hi);
 }
 
 .pane button[type="submit"]:hover,
@@ -632,21 +602,62 @@ body {
 .pane form[aria-label^="Edit "] > button:first-of-type:hover,
 .pane [data-part="handoff"] > button:hover,
 .pane [data-part="held"] > button:hover,
-.pane [data-part="action"]:hover {
-  border-color: #fff;
-  background: linear-gradient(180deg, #c3edff 0%, #7dd3fc 48%, #44b6ee 52%, #66cbf6 100%);
+.pane [data-part="action"]:hover,
+.btn.primary:hover {
+  border-color: #fff4cf;
 }
 
 .pane button[type="submit"]:disabled {
-  filter: saturate(0.4) brightness(0.8);
+  filter: saturate(0.5) brightness(0.8);
 }
 
-/* danger: for any destructive control */
-.pane button.danger {
-  color: #fff;
-  border-color: rgba(248, 113, 113, 0.8);
-  background: linear-gradient(180deg, #ef6b6b 0%, #c42f2f 50%, #a82020 100%);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.35), 0 2px 5px rgba(0, 0, 0, 0.45);
+/* danger: red text and border */
+.pane button.danger,
+.btn.danger {
+  color: var(--red);
+  border-color: rgba(248, 113, 113, 0.7);
+}
+
+.pane button.danger:hover,
+.btn.danger:hover {
+  border-color: var(--red);
+}
+
+/* segmented control: a flat rail, the active item gets a brass-hi window and a faint aether fill */
+.seg-group {
+  display: inline-flex;
+  flex-wrap: wrap;
+  border-block: 1px solid var(--brass-lo);
+  background: rgba(14, 11, 7, 0.9);
+}
+
+.seg {
+  appearance: none;
+  -webkit-appearance: none;
+  margin: 0;
+  padding: 5px 13px;
+  font: 400 12px/1.2 var(--font-engraved);
+  letter-spacing: 0.1em;
+  color: var(--brass-idle);
+  cursor: pointer;
+  border: 1px solid transparent;
+  border-radius: 0;
+  background: none;
+  transition:
+    color var(--t-quick),
+    background var(--t-quick),
+    box-shadow var(--t-quick);
+}
+
+.seg:hover {
+  color: var(--brass-hi);
+}
+
+.seg[aria-pressed="true"] {
+  color: var(--brass-lit);
+  border-color: var(--brass-hi);
+  background: rgba(143, 227, 255, 0.1);
+  box-shadow: 0 0 6px rgba(143, 227, 255, 0.2);
 }
 
 .pane input[type="text"],
@@ -659,9 +670,9 @@ body {
   font: 13.5px/1.4 var(--font);
   color: var(--ink);
   background: rgba(2, 5, 12, 0.7);
-  border: 1px solid rgba(148, 163, 184, 0.28);
+  border: 1px solid var(--brass-lo);
   border-radius: var(--radius-sm);
-  box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.55), 0 1px 0 rgba(255, 255, 255, 0.05);
+  box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.55);
   transition: border-color var(--t-quick), box-shadow var(--t-quick);
 }
 
@@ -673,7 +684,7 @@ body {
 .pane input:hover,
 .pane select:hover,
 .pane textarea:hover {
-  border-color: rgba(186, 214, 255, 0.45);
+  border-color: var(--brass);
 }
 
 .pane input:focus-visible,
@@ -681,7 +692,7 @@ body {
 .pane textarea:focus-visible {
   outline: none;
   border-color: var(--accent);
-  box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.55), 0 0 0 2px rgba(125, 211, 252, 0.4);
+  box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.55), 0 0 0 2px rgba(143, 227, 255, 0.35);
 }
 
 .pane select {
@@ -781,7 +792,7 @@ body {
 .pane summary {
   list-style: none;
   cursor: pointer;
-  border-radius: 6px;
+  border-radius: 3px;
 }
 
 .pane summary::-webkit-details-marker {
@@ -834,7 +845,7 @@ body {
 .pane .report [data-part="outcome"] {
   order: -1;
   padding: 2px 9px;
-  border-radius: 999px;
+  border-radius: 2px;
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.1em;
@@ -949,19 +960,19 @@ body {
 
 .pane details[aria-label] [data-part="verdict"] {
   padding: 2px 9px;
-  border-radius: 999px;
+  border-radius: 2px;
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--accent);
-  background: rgba(125, 211, 252, 0.1);
-  border: 1px solid rgba(125, 211, 252, 0.35);
+  background: rgba(143, 227, 255, 0.1);
+  border: 1px solid rgba(143, 227, 255, 0.35);
 }
 
 .pane details[aria-label] [data-part="stale"] {
   padding: 2px 9px;
-  border-radius: 999px;
+  border-radius: 2px;
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.1em;
@@ -975,14 +986,14 @@ body {
   flex: 1 0 100%;
   height: 10px !important;
   margin-top: 6px;
-  border-radius: 999px;
+  border-radius: 2px;
   background: rgba(2, 5, 12, 0.75);
   box-shadow: inset 0 1px 4px rgba(0, 0, 0, 0.7), 0 1px 0 rgba(255, 255, 255, 0.06);
   overflow: visible;
 }
 
 .pane [data-part="bar"] {
-  border-radius: 999px;
+  border-radius: 2px;
   background: linear-gradient(180deg, #a5e4ff 0%, #38bdf8 55%, #0ea5e9 100%);
   box-shadow: 0 0 10px rgba(56, 189, 248, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.5);
 }
@@ -1095,7 +1106,7 @@ body {
   grid-column: 1 / -1;
   margin-top: 4px;
   padding: 7px 9px;
-  border-radius: 6px;
+  border-radius: 3px;
   background: rgba(2, 5, 12, 0.5);
   box-shadow: inset 0 1px 4px rgba(0, 0, 0, 0.5);
   color: var(--ink-faint);
@@ -1160,7 +1171,7 @@ body {
   position: relative;
   max-width: min(78%, 640px);
   padding: 10px 14px 11px;
-  border-radius: 16px;
+  border-radius: 3px;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 5px 14px rgba(0, 0, 0, 0.35);
   animation: pane-fade var(--t-view) ease-out both;
 }
@@ -1173,27 +1184,26 @@ body {
 
 .msg.user {
   align-self: flex-end;
-  color: #eaf8ff;
-  border-bottom-right-radius: 5px;
-  background: linear-gradient(180deg, #14516f 0%, #0d3b55 100%);
-  border: 1px solid rgba(125, 211, 252, 0.45);
+  color: var(--brass-lit);
+  background: linear-gradient(180deg, rgba(201, 162, 90, 0.2), rgba(201, 162, 90, 0.07));
+  border: 1px solid var(--brass-lo);
 }
 
 .msg.user > strong {
   display: block;
   margin-bottom: 2px;
-  color: rgba(186, 230, 253, 0.7);
-  font-size: 10.5px;
-  font-weight: 700;
+  color: var(--brass);
+  font-family: var(--font-engraved);
+  font-size: 11px;
+  font-weight: 400;
   letter-spacing: 0.14em;
   text-transform: uppercase;
 }
 
 .msg.assistant {
   align-self: flex-start;
-  border-bottom-left-radius: 5px;
   background: linear-gradient(180deg, rgba(30, 42, 70, 0.85) 0%, rgba(15, 22, 40, 0.9) 100%);
-  border: 1px solid var(--line);
+  border: 1px solid var(--brass-rule);
 }
 
 .msg [data-part="picked"],
@@ -1213,22 +1223,22 @@ body {
 
 .pane .msg [data-part="rating"] button {
   padding: 4px 8px;
-  color: var(--ink-dim);
-  background: transparent;
-  border-color: var(--line-soft);
+  color: var(--brass-idle);
+  background: none;
+  border-color: transparent;
+  border-radius: 0;
   box-shadow: none;
 }
 
 .pane .msg [data-part="rating"] button:hover {
-  color: var(--ink);
-  background: rgba(148, 163, 184, 0.12);
+  color: var(--brass-hi);
 }
 
 .pane .msg [data-part="rating"] button[aria-pressed="true"] {
-  color: var(--accent);
-  border-color: rgba(125, 211, 252, 0.6);
-  background: rgba(125, 211, 252, 0.14);
-  box-shadow: inset 0 1px 4px rgba(0, 0, 0, 0.5), 0 0 10px rgba(56, 189, 248, 0.2);
+  color: var(--brass-lit);
+  border-color: var(--brass-hi);
+  background: rgba(143, 227, 255, 0.1);
+  box-shadow: 0 0 6px rgba(143, 227, 255, 0.2);
 }
 
 .pane .message-link {
@@ -1238,7 +1248,7 @@ body {
   color: var(--accent);
   background: none;
   border: 0;
-  border-bottom: 1px dashed rgba(125, 211, 252, 0.6);
+  border-bottom: 1px dashed rgba(143, 227, 255, 0.6);
   border-radius: 0;
   box-shadow: none;
   text-decoration: none;
@@ -1256,7 +1266,7 @@ body {
   align-items: end;
   gap: 8px 10px;
   padding: 10px;
-  border-radius: 14px;
+  border-radius: 3px;
   background: linear-gradient(180deg, rgba(20, 29, 50, 0.9), rgba(9, 14, 28, 0.95));
   border: 1px solid rgba(148, 163, 184, 0.28);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 8px 24px rgba(0, 0, 0, 0.45);

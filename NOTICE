@@ -21,3 +21,7 @@ licensed under the MIT License.
 This product bundles tauri-plugin-opener and @tauri-apps/plugin-opener (https://github.com/tauri-apps/plugins-workspace),
 copyright the Tauri Programme within The Commons Conservancy, licensed under the MIT License or the
 Apache License, Version 2.0, at your option.
+
+This product bundles the Marcellus SC typeface (app/src/assets/fonts/MarcellusSC-Regular.ttf),
+copyright 2012 Brian J. Bonislawsky DBA Astigmatic (AOETI), licensed under the SIL Open Font
+License, Version 1.1. A copy of that license is in app/src/assets/fonts/OFL.txt.
