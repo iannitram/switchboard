@@ -21,6 +21,8 @@ fn old() -> Manifest {
         releases: 4,
         closed_without_pr: 4,
         wiki: true,
+        bundle_hash: String::new(),
+        resolved_repo: None,
     }
 }
 

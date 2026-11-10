@@ -25,10 +25,12 @@ export type Manifest = {
   releases: number;
   closed_without_pr: number;
   wiki: boolean;
+  // The repo GitHub answered for, when the backed-up name was renamed or moved.
+  resolved_repo?: string;
 };
 export type BackupRow = {
   repo: string;
-  outcome: "written" | "refused";
+  outcome: "written" | "refused" | "failed";
   folder: string;
   manifest: Manifest | null;
   reason: string | null;
@@ -45,12 +47,17 @@ function when(rfc3339: string): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${h}${min}${ampm}`;
 }
 
-// One line per backup: what was written, or why the last backup was kept (BAK-2).
+// One line per backup: what was written, why the last backup was kept (BAK-2), or the error
+// that stopped this repo's backup while the others went on.
 export function backupLine(row: BackupRow): string {
   const m = row.manifest;
   if (row.outcome === "written" && m) {
     const wiki = m.wiki ? ", the wiki" : "";
-    return `${row.repo} backed up at ${when(m.taken_at)}: ${m.refs} refs, ${m.issues} issues, ${m.pulls} PRs, ${m.comments} comments, ${m.labels} labels, ${m.milestones} milestones${wiki}, in ${row.folder}`;
+    const renamed = m.resolved_repo ? ` (GitHub answered for ${m.resolved_repo}: renamed or moved)` : "";
+    return `${row.repo}${renamed} backed up at ${when(m.taken_at)}: ${m.refs} refs, ${m.issues} issues, ${m.pulls} PRs, ${m.comments} comments, ${m.labels} labels, ${m.milestones} milestones${wiki}, in ${row.folder}`;
+  }
+  if (row.outcome === "failed") {
+    return `${row.repo} backup failed, the last backup (if there was one) was kept: ${row.reason ?? "no reason given"}`;
   }
   return `${row.repo} not backed up, the last backup was kept: ${row.reason ?? "refused"}`;
 }

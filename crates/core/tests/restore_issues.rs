@@ -1,4 +1,5 @@
-//! BAK-3: `restore_issues` queues a backup's issues and comments through the create queue, and
+//! BAK-3: `restore_issues` queues a backup's issues and comments through the create queue, each
+//! comment on the number its issue has in the repo now and nothing the repo already has, and
 //! `restore_over_live` restores over an existing repo only when `rules::guard` allows it and the
 //! caller confirmed. Git pushes go to a local bare repo (standing in for `https://github.com`),
 //! the API is recorded answers, and the create queue is a stub `fleet.py` that keeps its own
@@ -8,7 +9,8 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use switchboard_core::backup::{
-    restore_issues, restore_over_live_from, write_json, RecordedAnswers, Remote, RestoreReport,
+    restore_issues, restore_over_live_from, write_json, FileSource, IssuesReport, RecordedAnswers,
+    Remote, RestoreReport,
 };
 use switchboard_core::fleet::FleetBridge;
 use switchboard_core::github::transport::{Recorded, RestAnswer};
@@ -16,6 +18,15 @@ use switchboard_core::rules::{Caller, Face, Role};
 use switchboard_core::CoreError;
 
 const NEW: &str = "owner/restored";
+
+/// No test here has a release file to fetch.
+struct NoFiles;
+
+impl FileSource for NoFiles {
+    fn fetch(&self, url: &str) -> Result<Vec<u8>, CoreError> {
+        Err(CoreError::GitHub(format!("GET {url}: not expected")))
+    }
+}
 
 /// A fixture `fleet ghq`: logs each call, keeps every batch item in `items.json`, and answers
 /// `status` with counts: a repo named in `taken` is `exists`, an item whose kind is in `fail` is
@@ -115,20 +126,6 @@ struct Fixture {
 /// comment on the first; two labels; one milestone; the manifest), an empty bare repo at
 /// `<server>/owner/restored.git`, and the stub queue.
 fn fixture(tag: &str) -> Fixture {
-    let root = scratch(tag);
-    let source = root.join("source");
-    std::fs::create_dir_all(&source).unwrap();
-    git(&source, &["init", "-q", "-b", "master"]);
-    std::fs::write(source.join("a.txt"), "a\n").unwrap();
-    git(&source, &["add", "a.txt"]);
-    git(&source, &["commit", "-q", "-m", "first"]);
-    git(&source, &["tag", "v1"]);
-    git(&source, &["branch", "feature"]);
-    std::fs::write(source.join("b.txt"), "b\n").unwrap();
-    git(&source, &["add", "b.txt"]);
-    git(&source, &["commit", "-q", "-m", "second"]);
-
-    let backup = root.join("backup");
     let answers = RecordedAnswers {
         repo: "owner/demo".to_string(),
         issues: vec![
@@ -146,7 +143,32 @@ fn fixture(tag: &str) -> Fixture {
         milestones: vec![json!({"title": "1.0"})],
         ..RecordedAnswers::default()
     };
-    write_json(&answers, &backup, "2026-11-09T14:00:00Z").unwrap();
+    fixture_of(tag, &answers)
+}
+
+/// `fixture`, the backup's JSON written from `answers`.
+fn fixture_of(tag: &str, answers: &RecordedAnswers) -> Fixture {
+    let root = scratch(tag);
+    let source = root.join("source");
+    std::fs::create_dir_all(&source).unwrap();
+    git(&source, &["init", "-q", "-b", "master"]);
+    std::fs::write(source.join("a.txt"), "a\n").unwrap();
+    git(&source, &["add", "a.txt"]);
+    git(&source, &["commit", "-q", "-m", "first"]);
+    git(&source, &["tag", "v1"]);
+    git(&source, &["branch", "feature"]);
+    std::fs::write(source.join("b.txt"), "b\n").unwrap();
+    git(&source, &["add", "b.txt"]);
+    git(&source, &["commit", "-q", "-m", "second"]);
+
+    let backup = root.join("backup");
+    let mut manifest = write_json(answers, &backup, "2026-11-09T14:00:00Z").unwrap();
+    manifest.refs = 3;
+    std::fs::write(
+        backup.join("manifest.json"),
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
     git(
         &source,
         &[
@@ -191,6 +213,7 @@ fn remote<'a>(f: &Fixture, api: &'a Recorded) -> Remote<'a> {
         git_base: f.server.to_string_lossy().into_owned(),
         git_config: Vec::new(),
         api,
+        files: &NoFiles,
     }
 }
 
@@ -222,30 +245,166 @@ fn expected_issue_queue() -> Vec<Value> {
     ]
 }
 
+/// The repo's issues as the API lists them: `(number, title)`.
+fn listed(issues: &[(u64, &str)]) -> RestAnswer {
+    answer(
+        200,
+        Value::Array(
+            issues
+                .iter()
+                .map(|(number, title)| json!({"number": number, "title": title}))
+                .collect(),
+        ),
+    )
+}
+
+const CLOSED_LEFT_OPEN: &str =
+    "1 closed issues come back open: the create queue cannot close an issue";
+
 #[test]
 fn every_issue_and_comment_is_queued_once_and_the_count_is_the_manifests() {
     let f = fixture("ok");
-    let queued_count = restore_issues(&f.fleet, &f.backup, NEW).unwrap();
-    assert_eq!(queued_count, 3);
+    // The new repo: no issues, then the two the queue made, then no comments.
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            listed(&[]),
+            listed(&[(1, "Bug"), (2, "Old")]),
+            answer(200, json!([])),
+        ],
+    );
+    let report = restore_issues(&f.fleet, &f.backup, NEW, &remote(&f, &api)).unwrap();
+    assert_eq!(
+        report,
+        IssuesReport {
+            issues: 2,
+            comments: 1,
+            left_out: vec![CLOSED_LEFT_OPEN.to_string()],
+            ..IssuesReport::default()
+        }
+    );
     assert_eq!(queued(&f), expected_issue_queue());
+}
+
+/// #365: a new repo numbers the issues 1, 2, 3, so the comment on the old #5 goes to #3, and a
+/// comment on a PR (not restored) goes nowhere.
+#[test]
+fn a_comment_goes_to_the_number_its_issue_has_in_the_new_repo() {
+    let issue = |n: u64, state: &str| {
+        json!({"number": n, "title": format!("issue {n}"), "body": "", "state": state,
+               "labels": [], "milestone": null})
+    };
+    let comment = |on: u64, body: &str| {
+        json!({"body": body,
+               "issue_url": format!("https://api.github.com/repos/owner/demo/issues/{on}")})
+    };
+    // Newest first, as the API lists them.
+    let answers = RecordedAnswers {
+        repo: "owner/demo".to_string(),
+        issues: vec![issue(5, "open"), issue(2, "closed"), issue(1, "open")],
+        pulls: vec![json!({"number": 4, "state": "closed", "merged_at": null, "body": ""})],
+        comments: vec![
+            comment(5, "c on five"),
+            comment(4, "c on the PR"),
+            comment(1, "c on one"),
+        ],
+        ..RecordedAnswers::default()
+    };
+    let f = fixture_of("renumber", &answers);
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            listed(&[]),
+            listed(&[(3, "issue 5"), (2, "issue 2"), (1, "issue 1")]),
+            answer(200, json!([])),
+        ],
+    );
+
+    let report = restore_issues(&f.fleet, &f.backup, NEW, &remote(&f, &api)).unwrap();
+
+    let queue = queued(&f);
+    let titles: Vec<&str> = queue
+        .iter()
+        .filter(|item| item["kind"] == "issue")
+        .map(|item| item["title"].as_str().unwrap())
+        .collect();
+    assert_eq!(titles, ["issue 1", "issue 2", "issue 5"], "oldest first");
+    let comments: Vec<(u64, &str)> = queue
+        .iter()
+        .filter(|item| item["kind"] == "comment")
+        .map(|item| {
+            (
+                item["number"].as_u64().unwrap(),
+                item["body"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(comments, [(3, "c on five"), (1, "c on one")]);
+    assert_eq!(
+        report,
+        IssuesReport {
+            issues: 3,
+            comments: 2,
+            left_out: vec![
+                CLOSED_LEFT_OPEN.to_string(),
+                "1 comments on PRs are not restored: PRs are not".to_string(),
+            ],
+            ..IssuesReport::default()
+        }
+    );
 }
 
 #[test]
 fn a_comments_file_that_is_not_the_manifests_count_stops_before_the_queue() {
     let f = fixture("mismatch");
     std::fs::write(f.backup.join("comments.json"), "[]").unwrap();
+    let api = Recorded::new(Vec::new(), Vec::new());
     assert!(matches!(
-        restore_issues(&f.fleet, &f.backup, NEW),
+        restore_issues(&f.fleet, &f.backup, NEW, &remote(&f, &api)),
         Err(CoreError::Parse(_))
     ));
+    assert!(api.log.lock().unwrap().is_empty(), "no API call at all");
     assert!(!f.stub.join("calls.log").exists(), "no fleet call at all");
 }
 
+/// A rate limit leaves the issues queued, so the repo does not have them yet: their comments
+/// wait (they are never queued on the backup's numbers), and a second call queues them.
 #[test]
-fn a_rate_limit_stop_leaves_the_items_queued_not_failed() {
+fn a_rate_limit_stop_leaves_the_issues_queued_and_holds_their_comments_back() {
     let f = fixture("ratelimit");
     std::fs::write(f.stub.join("ratelimit"), "").unwrap();
-    assert_eq!(restore_issues(&f.fleet, &f.backup, NEW).unwrap(), 3);
+    let api = Recorded::new(
+        Vec::new(),
+        vec![listed(&[]), listed(&[]), answer(200, json!([]))],
+    );
+    let report = restore_issues(&f.fleet, &f.backup, NEW, &remote(&f, &api)).unwrap();
+    assert_eq!(
+        report,
+        IssuesReport {
+            issues: 2,
+            comments_waiting: 1,
+            left_out: vec![CLOSED_LEFT_OPEN.to_string()],
+            ..IssuesReport::default()
+        }
+    );
+    assert_eq!(queued(&f), expected_issue_queue()[..2]);
+
+    // Later the queue has made them: the second call queues only the comment.
+    std::fs::remove_file(f.stub.join("ratelimit")).unwrap();
+    let api = Recorded::new(
+        Vec::new(),
+        vec![listed(&[(1, "Bug"), (2, "Old")]), answer(200, json!([]))],
+    );
+    let report = restore_issues(&f.fleet, &f.backup, NEW, &remote(&f, &api)).unwrap();
+    assert_eq!(
+        report,
+        IssuesReport {
+            issues_there: 2,
+            comments: 1,
+            left_out: vec![CLOSED_LEFT_OPEN.to_string()],
+            ..IssuesReport::default()
+        }
+    );
     assert_eq!(queued(&f), expected_issue_queue());
 }
 
@@ -286,7 +445,18 @@ fn a_guard_refusal_over_a_live_repo_writes_nothing() {
 #[test]
 fn a_confirmed_restore_over_a_live_repo_pushes_every_ref_and_queues_the_rest() {
     let f = fixture("live");
-    let api = Recorded::new(Vec::new(), vec![answer(200, json!({"private": true}))]);
+    // The live repo has no labels, milestones, issues or comments yet.
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            answer(200, json!({"private": true})),
+            answer(200, json!([])),
+            answer(200, json!([])),
+            listed(&[]),
+            listed(&[(1, "Bug"), (2, "Old")]),
+            answer(200, json!([])),
+        ],
+    );
     let report = restore_over_live_from(
         &caller(Face::Gui, false),
         &f.fleet,
@@ -301,7 +471,14 @@ fn a_confirmed_restore_over_a_live_repo_pushes_every_ref_and_queues_the_rest() {
         RestoreReport {
             refs: 3,
             labels: 2,
-            milestones: 1
+            milestones: 1,
+            issues: IssuesReport {
+                issues: 2,
+                comments: 1,
+                left_out: vec![CLOSED_LEFT_OPEN.to_string()],
+                ..IssuesReport::default()
+            },
+            left_out: Vec::new(),
         }
     );
     for pattern in ["refs/heads", "refs/tags"] {
@@ -314,7 +491,97 @@ fn a_confirmed_restore_over_a_live_repo_pushes_every_ref_and_queues_the_rest() {
     ];
     expected.extend(expected_issue_queue());
     assert_eq!(queued(&f), expected);
-    assert_eq!(*api.log.lock().unwrap(), vec![format!("GET /repos/{NEW}")]);
+    assert_eq!(
+        *api.log.lock().unwrap(),
+        vec![
+            format!("GET /repos/{NEW}"),
+            format!("GET /repos/{NEW}/labels?per_page=100&page=1"),
+            format!("GET /repos/{NEW}/milestones?state=all&per_page=100&page=1"),
+            format!("GET /repos/{NEW}/issues?state=all&per_page=100&page=1"),
+            format!("GET /repos/{NEW}/issues?state=all&per_page=100&page=1"),
+            format!("GET /repos/{NEW}/issues/comments?per_page=100&page=1"),
+        ]
+    );
+}
+
+/// #366: the live repo already holds everything the backup does (as after one restore), so a
+/// restore over it creates nothing again.
+#[test]
+fn a_restore_over_a_repo_that_has_it_all_queues_nothing() {
+    let f = fixture("live-again");
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            answer(200, json!({"private": true})),
+            answer(200, json!([{"name": "Bug"}, {"name": "size:Easy"}])),
+            answer(200, json!([{"title": "1.0"}])),
+            listed(&[(2, "Old"), (1, "Bug")]),
+            // As the queue posts a comment: the body, then its own marker line.
+            answer(
+                200,
+                json!([{"body": "me too\n\n<!-- ghq:0123456789ab -->\n",
+                        "issue_url": format!("https://api.github.com/repos/{NEW}/issues/1")}]),
+            ),
+        ],
+    );
+    let report = restore_over_live_from(
+        &caller(Face::Gui, false),
+        &f.fleet,
+        &f.backup,
+        NEW,
+        true,
+        &remote(&f, &api),
+    )
+    .unwrap();
+    assert_eq!(queued(&f), Vec::<Value>::new(), "nothing is created again");
+    assert_eq!(
+        report,
+        RestoreReport {
+            refs: 3,
+            issues: IssuesReport {
+                issues_there: 2,
+                comments_there: 1,
+                left_out: vec![CLOSED_LEFT_OPEN.to_string()],
+                ..IssuesReport::default()
+            },
+            ..RestoreReport::default()
+        }
+    );
+}
+
+/// #366: only what the live repo lacks is created: here one label, one issue and its comment.
+#[test]
+fn a_restore_over_a_repo_that_has_some_of_it_queues_only_the_rest() {
+    let f = fixture("live-some");
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            answer(200, json!({"private": true})),
+            answer(200, json!([{"name": "size:Easy"}])),
+            answer(200, json!([{"title": "1.0"}])),
+            listed(&[(7, "Old")]),
+            listed(&[(8, "Bug"), (7, "Old")]),
+            answer(200, json!([])),
+        ],
+    );
+    restore_over_live_from(
+        &caller(Face::Gui, false),
+        &f.fleet,
+        &f.backup,
+        NEW,
+        true,
+        &remote(&f, &api),
+    )
+    .unwrap();
+    assert_eq!(
+        queued(&f),
+        vec![
+            json!({"kind": "label", "repo": NEW, "name": "bug"}),
+            json!({"kind": "issue", "repo": NEW, "title": "Bug", "body": "broken",
+                   "labels": ["bug"], "milestone": "1.0"}),
+            json!({"kind": "comment", "repo": NEW, "number": 8, "body": "me too", "marker": null}),
+        ]
+    );
 }
 
 #[test]

@@ -5,13 +5,23 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use switchboard_core::backup::{
-    backup_all, backup_all_from, backup_repo, backup_repo_from, BackupOutcome, Manifest, Remote,
+    backup_all, backup_all_from, backup_repo, backup_repo_from, BackupOutcome, FileSource,
+    Manifest, Remote,
 };
 use switchboard_core::github::transport::{Recorded, RestAnswer};
 use switchboard_core::settings::Settings;
 use switchboard_core::CoreError;
 
 const REPO: &str = "owner/demo";
+
+/// No test here has a release file to fetch.
+struct NoFiles;
+
+impl FileSource for NoFiles {
+    fn fetch(&self, url: &str) -> Result<Vec<u8>, CoreError> {
+        Err(CoreError::GitHub(format!("GET {url}: not expected")))
+    }
+}
 
 fn scratch(tag: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
@@ -112,7 +122,7 @@ fn issue(n: u64, state: &str) -> Value {
 }
 
 /// The answers for one backup, in the order it asks: issues (with one PR mixed in, as the REST
-/// issues list has), pulls, comments, labels, milestones.
+/// issues list has), pulls, comments, labels, milestones, releases (none).
 fn answers(open: u64, closed: u64) -> Vec<RestAnswer> {
     let mut issues: Vec<Value> = (1..=open).map(|n| issue(n, "open")).collect();
     issues.extend((open + 1..=open + closed).map(|n| issue(n, "closed")));
@@ -126,6 +136,7 @@ fn answers(open: u64, closed: u64) -> Vec<RestAnswer> {
         ok(json!([{"id": 1, "body": "hi"}, {"id": 2, "body": "there"}])),
         ok(json!([{"name": "bug"}, {"name": "size:hard"}])),
         ok(json!([{"number": 1, "title": "1.0"}])),
+        ok(json!([])),
     ]
 }
 
@@ -141,6 +152,7 @@ fn remote<'a>(server: &Path, api: &'a Recorded) -> Remote<'a> {
         git_base: server.to_string_lossy().into_owned(),
         git_config: Vec::new(),
         api,
+        files: &NoFiles,
     }
 }
 
@@ -197,6 +209,8 @@ fn a_backup_writes_one_folder_with_a_verified_bundle_the_json_the_wiki_and_the_m
             "manifest.json",
             "milestones.json",
             "pulls.json",
+            "releases",
+            "releases.json",
             "repo.bundle",
             "wiki.git"
         ]
@@ -235,6 +249,7 @@ fn a_backup_writes_one_folder_with_a_verified_bundle_the_json_the_wiki_and_the_m
             "GET /repos/owner/demo/issues/comments?per_page=100&page=1",
             "GET /repos/owner/demo/labels?per_page=100&page=1",
             "GET /repos/owner/demo/milestones?state=all&per_page=100&page=1",
+            "GET /repos/owner/demo/releases?per_page=100&page=1",
         ]
     );
     assert_eq!(names(&backups.join("github").join("owner")), ["demo"]);
@@ -459,7 +474,7 @@ fn backup_all_backs_up_each_repo_in_order() {
     let got: Vec<(String, u64, bool)> = outcomes
         .into_iter()
         .map(|(repo, outcome)| {
-            let m = written(outcome);
+            let m = written(outcome.unwrap());
             (repo, m.issues, m.wiki)
         })
         .collect();
