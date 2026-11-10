@@ -331,15 +331,22 @@ impl LedgerUndo<'_> {
 }
 
 /// `err`, and when taking the edit back failed too, say so: an `Err` from `save_edit` must not
-/// hide that part of the edit is still in place.
+/// hide that part of the edit is still in place. A fleet error stays a fleet error (the app
+/// logs those), with the note on it.
 fn with_undo_failures(err: CoreError, stuck: Vec<String>) -> CoreError {
     if stuck.is_empty() {
         return err;
     }
-    CoreError::Io(format!(
-        "{err}; the edit could not be fully taken back, check: {}",
-        stuck.join("; ")
-    ))
+    let note = stuck.join("; ");
+    match err {
+        CoreError::Fleet(mut e) => {
+            e.undo_note = Some(note);
+            CoreError::Fleet(e)
+        }
+        other => CoreError::Io(format!(
+            "{other}; the edit could not be fully taken back, check: {note}"
+        )),
+    }
 }
 
 /// One JSON line appended to `log`, its parent folders created first. Gives back the way to

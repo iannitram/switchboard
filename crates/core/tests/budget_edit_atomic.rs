@@ -160,6 +160,14 @@ fn an_undo_that_fails_is_reported() {
     .unwrap();
     let bridge = FleetBridge::new(&r).with_env("LEDGER", log.to_str().unwrap());
     let err = save_edit(&bridge, &cap("deepseek", 7.0), &log, &FixedClock::at(1)).unwrap_err();
+    // Still a fleet error (the app logs those), with the undo note on it.
+    match &err {
+        switchboard_core::CoreError::Fleet(e) => {
+            let note = e.undo_note.as_deref().unwrap_or("");
+            assert!(note.contains("pool-edits.jsonl"), "{note}");
+        }
+        other => panic!("expected a fleet error, got {other:?}"),
+    }
     let text = err.to_string();
     assert!(text.contains("fleet error"), "{text}");
     assert!(text.contains("could not be fully taken back"), "{text}");

@@ -64,6 +64,9 @@ pub struct FleetError {
     /// Its stderr (all of it; the face shows the first lines).
     pub stderr: String,
     pub reason: FleetErrorReason,
+    /// BUD-2: set when this error ended a pool edit and taking the edit back failed too: what
+    /// is still in place. `None` for every other fleet error.
+    pub undo_note: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,8 +83,18 @@ pub enum FleetErrorReason {
 
 impl std::fmt::Display for FleetError {
     /// CORE-2: the command, then what went wrong: the exit code and the first lines of stderr,
-    /// the JSON parser's message, the spawn error or the time limit.
+    /// the JSON parser's message, the spawn error or the time limit; then the undo note, if any.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.fmt_reason(f)?;
+        if let Some(note) = &self.undo_note {
+            write!(f, "; the edit could not be fully taken back, check: {note}")?;
+        }
+        Ok(())
+    }
+}
+
+impl FleetError {
+    fn fmt_reason(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let command = self.command.join(" ");
         match &self.reason {
             FleetErrorReason::Exit => {
@@ -249,6 +262,7 @@ impl FleetBridge {
             read_in_thread(proc.stdout.take()),
             read_in_thread(proc.stderr.take()),
         ];
+        let pid = proc.id();
 
         let deadline = Instant::now() + self.timeout;
         let mut timed_out = false;
@@ -258,19 +272,30 @@ impl FleetBridge {
             }
             if Instant::now() >= deadline {
                 timed_out = true;
-                kill_tree(&mut proc);
+                kill_group(pid);
+                let _ = proc.kill();
                 break proc.wait()?;
             }
             std::thread::sleep(Duration::from_millis(5));
         };
         // A grandchild that outlives the child (or left the group after a kill) can keep a pipe
-        // open: wait a moment past the limit, then take what was read rather than hang.
-        let grace = if timed_out {
-            Duration::from_secs(2)
+        // open. One end time for both pipes: the limit plus 2 s (2 s after a kill). Past it, take
+        // what was read so far and kill what is left in the group, so nothing keeps running and
+        // the reader threads end.
+        let end = if timed_out {
+            Instant::now()
         } else {
-            deadline.saturating_duration_since(Instant::now()) + Duration::from_secs(2)
-        };
-        let [stdout, stderr] = readers.map(|rx| rx.recv_timeout(grace).unwrap_or_default());
+            deadline.max(Instant::now())
+        } + Duration::from_secs(2);
+        let mut leftover = false;
+        let [stdout, stderr] = readers.map(|reader| {
+            let wait = end.saturating_duration_since(Instant::now());
+            leftover |= !reader.wait_done(wait);
+            reader.take()
+        });
+        if leftover {
+            kill_group(pid);
+        }
         if let Some(writer) = writer {
             if !timed_out {
                 let _ = writer.join();
@@ -303,6 +328,7 @@ impl FleetBridge {
                     exit_code: None,
                     stderr: String::new(),
                     reason: FleetErrorReason::Spawn(err.to_string()),
+                    undo_note: None,
                 })
             }
         };
@@ -314,6 +340,7 @@ impl FleetBridge {
                 exit_code: None,
                 stderr,
                 reason: FleetErrorReason::Timeout(self.timeout.as_secs()),
+                undo_note: None,
             });
         }
         Ok((command, output.status.code(), stdout, stderr))
@@ -330,12 +357,14 @@ impl FleetBridge {
                 exit_code: Some(0),
                 stderr,
                 reason: FleetErrorReason::BadJson(err.to_string()),
+                undo_note: None,
             }),
             code => Err(FleetError {
                 command,
                 exit_code: code,
                 stderr,
                 reason: FleetErrorReason::Exit,
+                undo_note: None,
             }),
         }
     }
@@ -363,38 +392,71 @@ impl FleetBridge {
                 exit_code: code,
                 stderr,
                 reason: FleetErrorReason::Exit,
+                undo_note: None,
             }),
         }
     }
 }
 
-/// Read `pipe` to its end on a thread; the bytes arrive on the channel.
-fn read_in_thread<R: std::io::Read + Send + 'static>(
-    pipe: Option<R>,
-) -> std::sync::mpsc::Receiver<Vec<u8>> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(mut pipe) = pipe {
-            let _ = pipe.read_to_end(&mut buf);
-        }
-        let _ = tx.send(buf);
-    });
-    rx
+/// A pipe read on a thread: the bytes so far are always in `buf`; `done` gets a message at EOF.
+struct PipeReader {
+    buf: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    done: std::sync::mpsc::Receiver<()>,
 }
 
-/// Kill `proc` and, on Unix, the process group it leads (`kill` is the same tool a shell uses; no
-/// extra dependency).
-fn kill_tree(proc: &mut std::process::Child) {
+impl PipeReader {
+    /// True when the pipe reached its end within `wait`.
+    fn wait_done(&self, wait: Duration) -> bool {
+        // A closed channel (the thread ended) also means the pipe is finished.
+        !matches!(
+            self.done.recv_timeout(wait),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        )
+    }
+
+    /// What was read so far.
+    fn take(&self) -> Vec<u8> {
+        std::mem::take(&mut *self.buf.lock().unwrap_or_else(|p| p.into_inner()))
+    }
+}
+
+/// Read `pipe` on a thread, chunk by chunk, into the reader's shared buffer.
+fn read_in_thread<R: std::io::Read + Send + 'static>(pipe: Option<R>) -> PipeReader {
+    let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (tx, done) = std::sync::mpsc::channel();
+    let shared = std::sync::Arc::clone(&buf);
+    std::thread::spawn(move || {
+        if let Some(mut pipe) = pipe {
+            let mut chunk = [0u8; 8192];
+            while let Ok(n) = pipe.read(&mut chunk) {
+                if n == 0 {
+                    break;
+                }
+                shared
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .extend_from_slice(&chunk[..n]);
+            }
+        }
+        let _ = tx.send(());
+    });
+    PipeReader { buf, done }
+}
+
+/// Kill the process group led by `pid` on Unix (`kill` is the same tool a shell uses; no extra
+/// dependency). The group id stays valid while any member lives, so this is safe after the
+/// leader was reaped.
+fn kill_group(pid: u32) {
     #[cfg(unix)]
     {
         let _ = Command::new("kill")
-            .args(["-s", "KILL", "--", &format!("-{}", proc.id())])
+            .args(["-s", "KILL", "--", &format!("-{pid}")])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
     }
-    let _ = proc.kill();
+    #[cfg(not(unix))]
+    let _ = pid;
 }
 
 /// CORE-2: how many fleet errors `FleetErrorLog` keeps.

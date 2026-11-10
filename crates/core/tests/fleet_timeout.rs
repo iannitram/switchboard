@@ -126,18 +126,49 @@ fn the_timeout_also_kills_what_the_child_started() {
 }
 
 #[cfg(unix)]
+fn running(pid: &str) -> bool {
+    // Gone, or a zombie waiting to be reaped (not running).
+    std::fs::read_to_string(format!("/proc/{}/stat", pid.trim()))
+        .map(|s| !s.contains(") Z"))
+        .unwrap_or(false)
+}
+
+/// The child exits 0 at once with its JSON, but a grandchild keeps both pipes open: the call
+/// returns the child's JSON within limit + 2 s, and the grandchild is stopped (not by the test).
+#[cfg(unix)]
 #[test]
-fn a_grandchild_holding_the_pipe_after_the_child_exits_does_not_hang_the_call() {
+fn a_grandchild_holding_the_pipes_after_the_child_exits_costs_one_wait_and_is_stopped() {
     let pidfile = std::env::temp_dir().join(format!("sb-fleet-holder-{}", std::process::id()));
     let _ = std::fs::remove_file(&pidfile);
     let bridge = FleetBridge::with_root(&stub())
         .with_env("FLEET_STUB_GRANDCHILD", pidfile.to_str().unwrap())
         .with_timeout(Duration::from_secs(2));
     let started = Instant::now();
-    let _ = bridge.run_json(&["budget"]);
-    assert!(started.elapsed() < Duration::from_secs(15));
-    if let Ok(pid) = std::fs::read_to_string(&pidfile) {
+    let result = bridge.run_json(&["budget"]);
+    let elapsed = started.elapsed();
+    let pid = std::fs::read_to_string(&pidfile).unwrap_or_default();
+    // Give a killed process a moment to leave the table.
+    let mut alive = running(&pid);
+    for _ in 0..20 {
+        if !alive {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+        alive = running(&pid);
+    }
+    // Clean up first, so a failed assertion below leaves no `sleep` behind.
+    if alive {
         let _ = std::process::Command::new("kill").arg(pid.trim()).status();
     }
     let _ = std::fs::remove_file(&pidfile);
+    let json = result.expect("the child's JSON, not an error");
+    assert!(json.is_object() || json.is_array(), "{json}");
+    assert!(
+        elapsed < Duration::from_millis(4_800),
+        "one wait of limit + 2 s, took {elapsed:?}"
+    );
+    assert!(
+        !pid.trim().is_empty() && !alive,
+        "grandchild {pid} still running"
+    );
 }
