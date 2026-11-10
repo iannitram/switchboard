@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { openExternalLinksInBrowser } from "./external-links";
+import { reportBug } from "./report-bug";
 import { VIEWS, type ViewName } from "./views";
 import { ErrorBanner, fromFleetError } from "./ErrorBanner";
 import { fleetErrors, settingsMissing, type CoreError, type CoreResult } from "./core";
@@ -86,6 +87,12 @@ export function App() {
               </button>
             ))}
           </nav>
+          <button type="button" className="btn console-report" onClick={() => reportBug(view)}>
+            <svg className="btn-icon" viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M5.5 5.5a2.5 2.5 0 0 1 5 0v4a2.5 2.5 0 0 1-5 0zM5.5 7H2.5M13.5 7h-3M5.5 10H3M13 10h-2.5M6 3L4.5 1.5M10 3l1.5-1.5M8 6v6" />
+            </svg>
+            Report bug
+          </button>
         </div>
         <div className="console-readouts">
           <ErrorBanner errors={errors} />

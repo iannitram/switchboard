@@ -1,5 +1,5 @@
-/* Switchboard's look (#297, #300): the Astrolabe rail. A brass instrument limb with a tick scale,
-   riveted plates, Marcellus SC engraved type (bundled, SIL OFL 1.1) for labels, system fonts for text.
+/* Switchboard's look (#297, #300): the Astrolabe rail. A clear-glass instrument limb with a tick scale,
+   glass plates, Marcellus SC engraved type (bundled, SIL OFL 1.1) for labels, system fonts for text.
    One palette, one set of controls, everything CSS or inline SVG. The 3D Sky (sky3d.css) uses the same
    colours through these custom properties. */
 
@@ -17,9 +17,9 @@
   --accent-deep: #0ea5e9;
   --accent-glow: rgba(143, 227, 255, 0.26);
   --aether: #8fe3ff;
-  --brass: #c9a25a;
-  --brass-hi: #f3dfa6;
-  --brass-lo: #6b5326;
+  --brass: #d5dae4;
+  --brass-hi: rgba(255, 255, 255, 0.72);
+  --brass-lo: rgba(255, 255, 255, 0.18);
   --brass-idle: rgba(248, 243, 228, 0.72);
   --brass-lit: #fbf7ea;
   --glass-ink: #f8f3e4;
@@ -27,7 +27,8 @@
   --glass-line-hi: rgba(255, 250, 235, 0.2);
   --glass-hl: inset 0 1px 0 rgba(255, 255, 255, 0.22);
   --glass-fill: linear-gradient(180deg, rgba(255, 250, 235, 0.1), rgba(255, 250, 235, 0.03));
-  --brass-rule: rgba(201, 162, 90, 0.26);
+  --brass-rule: rgba(255, 255, 255, 0.14);
+  --glass-fill-strong: linear-gradient(180deg, rgba(255, 250, 235, 0.18), rgba(255, 250, 235, 0.07));
   --amber: #f5a524;
   --gold: #fbbf24;
   --red: #f87171;
@@ -138,7 +139,38 @@ body {
 
 .console-brand svg {
   display: block;
-  color: var(--brass);
+  color: var(--glass-ink);
+}
+
+.console .console-report {
+  margin-left: auto;
+  order: 2;
+}
+
+.console nav {
+  order: 1;
+}
+
+.btn-icon {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.3;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+/* narrow: the report button stays on the top row at the right, the rail drops to its own row */
+@media (max-width: 1480px) {
+  .console .console-report {
+    order: 1;
+  }
+  .console nav {
+    order: 2;
+    flex: 1 0 100%;
+  }
 }
 
 /* the engraved limb: clear frosted glass with a pale hairline, a tick scale along the bottom edge */
@@ -235,7 +267,7 @@ body {
 
 .console .key[aria-pressed="true"] {
   color: var(--brass-lit);
-  text-shadow: 0 0 6px rgba(243, 223, 166, 0.2);
+  text-shadow: 0 0 6px rgba(255, 255, 255, 0.22);
   background: rgba(255, 250, 235, 0.09);
   box-shadow:
     inset 0 0 0 1px rgba(255, 250, 235, 0.2),
@@ -281,10 +313,12 @@ body {
   border-radius: var(--radius-sm);
   font: 12.5px/1.4 var(--mono);
   letter-spacing: 0.01em;
-  color: #fde7b0;
-  background: linear-gradient(180deg, rgba(245, 165, 36, 0.14), rgba(245, 165, 36, 0.07));
-  border: 1px solid rgba(245, 165, 36, 0.4);
-  box-shadow: inset 0 1px 6px rgba(0, 0, 0, 0.45), 0 0 14px rgba(245, 165, 36, 0.08);
+  color: var(--glass-ink);
+  background: linear-gradient(180deg, rgba(255, 250, 235, 0.07), rgba(255, 250, 235, 0.025));
+  -webkit-backdrop-filter: blur(12px) saturate(1.3);
+  backdrop-filter: blur(12px) saturate(1.3);
+  border: 1px solid var(--glass-line);
+  box-shadow: var(--glass-hl);
 }
 
 .readout::before {
@@ -437,9 +471,9 @@ body {
   padding: 7px 12px;
   border-radius: var(--radius-sm);
   font-size: 12.5px;
-  color: #fde7b0;
-  background: rgba(245, 165, 36, 0.09);
-  border: 1px solid rgba(245, 165, 36, 0.35);
+  color: var(--glass-ink);
+  background: linear-gradient(180deg, rgba(255, 250, 235, 0.07), rgba(255, 250, 235, 0.025));
+  border: 1px solid var(--glass-line);
 }
 
 .pane section[aria-label="Settings"] p.hint.ok {
@@ -556,9 +590,8 @@ body {
 
 /* ---------- controls: one set ---------- */
 
-/* riveted plate: shared by .btn, every button in a pane and the banner actions */
-.pane button,
-.error-banner button,
+/* glass plate: shared by .btn, every button in a pane and the banner actions */
+:where(.pane button, .error-banner button),
 .btn,
 .badge {
   appearance: none;
@@ -579,12 +612,7 @@ body {
   -webkit-backdrop-filter: blur(12px) saturate(1.3);
   backdrop-filter: blur(12px) saturate(1.3);
   box-shadow: var(--glass-hl);
-  background:
-    radial-gradient(circle at 5px 5px, var(--brass) 1px, transparent 1.7px),
-    radial-gradient(circle at calc(100% - 5px) 5px, var(--brass) 1px, transparent 1.7px),
-    radial-gradient(circle at 5px calc(100% - 5px), var(--brass) 1px, transparent 1.7px),
-    radial-gradient(circle at calc(100% - 5px) calc(100% - 5px), var(--brass) 1px, transparent 1.7px),
-    var(--glass-fill);
+  background: var(--glass-fill);
   transition:
     color var(--t-quick),
     border-color var(--t-quick),
@@ -602,35 +630,32 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
-.pane button:hover,
-.error-banner button:hover,
+:where(.pane button, .error-banner button):hover,
 .btn:hover {
   border-color: var(--brass-hi);
 }
 
-.pane button:active,
-.error-banner button:active,
+:where(.pane button, .error-banner button):active,
 .btn:active {
   transform: translateY(1px);
   box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.5);
 }
 
-.pane button:focus-visible,
-.error-banner button:focus-visible,
+:where(.pane button, .error-banner button):focus-visible,
 .btn:focus-visible,
 .seg:focus-visible {
   outline: 2px solid var(--aether);
   outline-offset: 2px;
 }
 
-.pane button:disabled,
+:where(.pane button, .error-banner button):disabled,
 .btn:disabled {
   opacity: 0.5;
   cursor: default;
   transform: none;
 }
 
-/* primary: the same plate with a brass-hi border and a lit label */
+/* primary: the same glass, a brighter white hairline and a stronger fill */
 .pane button[type="submit"],
 .pane section[aria-label="Settings"] > button,
 .pane form[aria-label^="Edit "] > button:first-of-type,
@@ -639,8 +664,9 @@ body {
 .pane [data-part="action"],
 .btn.primary {
   color: var(--brass-lit);
-  text-shadow: 0 0 6px rgba(243, 223, 166, 0.2);
-  border-color: var(--brass-hi);
+  text-shadow: 0 0 6px rgba(255, 255, 255, 0.22);
+  border-color: rgba(255, 255, 255, 0.72);
+  background: var(--glass-fill-strong);
 }
 
 .pane button[type="submit"]:hover,
@@ -1353,15 +1379,15 @@ body {
   margin: 0 0 14px;
   padding: 12px 14px;
   border-radius: var(--radius);
-  background: rgba(245, 165, 36, 0.08);
-  border: 1px solid rgba(245, 165, 36, 0.4);
+  background: linear-gradient(180deg, rgba(255, 250, 235, 0.07), rgba(255, 250, 235, 0.025));
+  border: 1px solid var(--glass-line);
 }
 
 .pane [data-part="handoff"] p,
 .pane [data-part="held"] p {
   margin: 0;
   flex: 1 1 240px;
-  color: #fde7b0;
+  color: var(--glass-ink);
 }
 
 .msg [data-part="handoff"] {
