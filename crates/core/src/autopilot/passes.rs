@@ -8,7 +8,7 @@ use super::weekly::{roadmap_changed, weekly_due};
 use crate::abilities::FleetModels;
 use crate::clock::UnixSeconds;
 use crate::fleet::{clean_child_env, FleetBridge, FleetError, FleetErrorReason, FLEET_ROOT_ENV};
-use crate::github::merge::merge_passed;
+use crate::github::merge::{carried_over_by_patch_id, merge_passed};
 use crate::github::poll::Poller;
 use crate::github::snapshot::{RepoSnapshot, SnapshotStore};
 use crate::rules::{Caller, Face, Role};
@@ -511,7 +511,7 @@ pub fn merge_pass(
             pipeline_root,
             &snap.repo,
             &snap.pulls,
-            &|_| false,
+            &|pr| carried_over_by_patch_id(&clone, pr),
             poller,
         )?;
         if !merged.is_empty() {
