@@ -5,7 +5,7 @@
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use switchboard_core::autopilot::passes::{
-    pm_brief, pm_job, roadmap_pass, AutopilotState, JobStarter, PM_LANE, ROADMAP_TASK,
+    pm_brief, pm_job, roadmap_pass, AutopilotState, JobStarter, PM_LANES, ROADMAP_TASK,
 };
 use switchboard_core::autopilot::{after_poll, AfterPoll};
 use switchboard_core::github::snapshot::SnapshotStore;
@@ -19,6 +19,10 @@ fn strings(items: &[&str]) -> Vec<String> {
 /// Says yes while `open`, logs every question and every start.
 struct FakeStarter {
     open: bool,
+    /// The only lane that may spend; any lane when `None` and `open`.
+    only: Option<&'static str>,
+    /// What `finished` answers.
+    done: bool,
     asked: Vec<String>,
     jobs: Vec<(Value, String)>,
 }
@@ -27,6 +31,8 @@ impl FakeStarter {
     fn new(open: bool) -> Self {
         FakeStarter {
             open,
+            only: None,
+            done: true,
             asked: Vec::new(),
             jobs: Vec::new(),
         }
@@ -36,11 +42,14 @@ impl FakeStarter {
 impl JobStarter for FakeStarter {
     fn may_spend(&mut self, lane: &str) -> Result<bool, CoreError> {
         self.asked.push(lane.to_string());
-        Ok(self.open)
+        Ok(self.open && self.only.map_or(true, |only| only == lane))
     }
     fn start(&mut self, job: &Value, brief: &str) -> Result<(), CoreError> {
         self.jobs.push((job.clone(), brief.to_string()));
         Ok(())
+    }
+    fn finished(&mut self, _: &str) -> Result<bool, CoreError> {
+        Ok(self.done)
     }
 }
 
@@ -64,9 +73,12 @@ fn seen(repo: &str, text: Option<&str>) -> AutopilotState {
 
 #[test]
 fn the_pm_job_is_a_judgement_planning_job_on_the_pm_lane() {
-    assert_eq!(PM_LANE, "claudeapi");
     assert_eq!(
-        pm_job("iannitram/demo", "roadmap", 1_000),
+        PM_LANES,
+        ["qwen", "gemini", "chatgpt", "deepseek", "claudeapi"]
+    );
+    assert_eq!(
+        pm_job("iannitram/demo", "roadmap", 1_000, "qwen"),
         json!({
             "id": "pm-roadmap-demo-1000",
             "title": "Project Manager: roadmap for iannitram/demo",
@@ -78,7 +90,7 @@ fn the_pm_job_is_a_judgement_planning_job_on_the_pm_lane() {
             "no_issue": "Project Manager job (roadmap)",
             "verify": [],
             "files_allowed": [],
-            "lane": "claudeapi",
+            "lane": "qwen",
             "brief": "open"
         })
     );
@@ -123,12 +135,13 @@ fn a_changed_roadmap_starts_exactly_one_pm_job_for_that_repo() {
     let snaps = [snap("iannitram/demo", 1_000, Some("v2"))];
     let started = roadmap_pass(&snaps, &mut state, &mut starter).unwrap();
     assert_eq!(started, strings(&["pm-roadmap-demo-1000"]));
-    assert_eq!(starter.asked, strings(&["claudeapi"]));
+    assert_eq!(starter.asked, strings(&["qwen"]));
     assert_eq!(starter.jobs.len(), 1);
     assert_eq!(
         starter.jobs[0].0,
-        pm_job("iannitram/demo", "roadmap", 1_000)
+        pm_job("iannitram/demo", "roadmap", 1_000, "qwen")
     );
+    assert_eq!(state.pm_running.as_deref(), Some("pm-roadmap-demo-1000"));
     assert_eq!(starter.jobs[0].1, pm_brief("iannitram/demo", ROADMAP_TASK));
     assert_eq!(
         state.roadmaps,
@@ -166,13 +179,63 @@ fn a_braked_pool_starts_none_and_the_change_is_tried_at_the_next_poll() {
     let started = roadmap_pass(&snaps, &mut state, &mut braked).unwrap();
     assert!(started.is_empty());
     assert!(braked.jobs.is_empty());
-    assert_eq!(braked.asked, strings(&["claudeapi"]));
+    assert_eq!(
+        braked.asked,
+        strings(&["qwen", "gemini", "chatgpt", "deepseek", "claudeapi"])
+    );
     assert_eq!(state.roadmaps, seen("iannitram/demo", Some("v1")).roadmaps);
 
     let later = [snap("iannitram/demo", 1_600, Some("v2"))];
     let mut open = FakeStarter::new(true);
     let started = roadmap_pass(&later, &mut state, &mut open).unwrap();
     assert_eq!(started, strings(&["pm-roadmap-demo-1600"]));
+}
+
+#[test]
+fn a_closed_local_lane_falls_back_to_the_smallest_open_lane() {
+    let mut state = seen("iannitram/demo", Some("v1"));
+    let snaps = [snap("iannitram/demo", 1_000, Some("v2"))];
+    let mut starter = FakeStarter::new(true);
+    starter.only = Some("gemini");
+    let started = roadmap_pass(&snaps, &mut state, &mut starter).unwrap();
+    assert_eq!(started, strings(&["pm-roadmap-demo-1000"]));
+    assert_eq!(starter.asked, strings(&["qwen", "gemini"]));
+    assert_eq!(starter.jobs[0].0["lane"], "gemini");
+}
+
+#[test]
+fn a_running_pm_job_blocks_the_next_start_and_the_change_is_kept() {
+    let mut state = seen("iannitram/demo", Some("v1"));
+    state.pm_running = Some("pm-drift-x-1".into());
+    let snaps = [snap("iannitram/demo", 1_000, Some("v2"))];
+    let mut starter = FakeStarter::new(true);
+    starter.done = false;
+    let started = roadmap_pass(&snaps, &mut state, &mut starter).unwrap();
+    assert!(started.is_empty());
+    assert!(starter.asked.is_empty());
+    assert_eq!(state.roadmaps, seen("iannitram/demo", Some("v1")).roadmaps);
+
+    starter.done = true;
+    let started = roadmap_pass(&snaps, &mut state, &mut starter).unwrap();
+    assert_eq!(started, strings(&["pm-roadmap-demo-1000"]));
+}
+
+#[test]
+fn two_changed_repos_start_one_job_per_call() {
+    let mut state = seen("iannitram/alpha", Some("a1"));
+    state
+        .roadmaps
+        .push(("iannitram/beta".to_string(), Some("b1".to_string())));
+    let snaps = [
+        snap("iannitram/alpha", 1_000, Some("a2")),
+        snap("iannitram/beta", 1_000, Some("b2")),
+    ];
+    let mut starter = FakeStarter::new(true);
+    let started = roadmap_pass(&snaps, &mut state, &mut starter).unwrap();
+    assert_eq!(started, strings(&["pm-roadmap-alpha-1000"]));
+    assert_eq!(state.roadmaps[1].1.as_deref(), Some("b1"), "beta is kept");
+    let started = roadmap_pass(&snaps, &mut state, &mut starter).unwrap();
+    assert_eq!(started, strings(&["pm-roadmap-beta-1000"]));
 }
 
 #[test]
