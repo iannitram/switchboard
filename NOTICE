@@ -14,3 +14,6 @@ Files lifted from BroCrew, each with its notice and a line saying what was chang
 - app/src/brocrew/ReportEntry.tsx
 - app/src/brocrew/UserMessage.tsx
 - app/src/brocrew/WaitingItem.tsx
+
+This product bundles three.js (https://threejs.org), copyright 2010-2024 three.js authors,
+licensed under the MIT License.
