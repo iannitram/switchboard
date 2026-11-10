@@ -6,12 +6,13 @@ import * as THREE from "three";
 import type { Constellation, SkyModel } from "../sky/model";
 import { highlightChain } from "../sky/chain";
 import { blendPose, fitDistance, layoutInterior, poseEye, type InteriorLayout, type Pose, type Vec3 } from "./layout";
+import { Nebulae } from "./nebula";
 import { discParticles, dustParticles, GAL_R, HOLE, placeSystems, systemParticles, type System } from "./milkyway";
 import { dampPose, detailFade, flightMs, MIN_DIST, settling, zoneStep, zoomOutToward, zoomToward } from "./camera";
 import { easeInOutCubic } from "./motion";
 import { condensation, debrisCount, lensDebris, lensDisc, lensStar, lensSystem, starPhysics, systemFacts, type Lens } from "./physics";
 import { spanningTree } from "./wayfind";
-import { blackbody, exposureForZoom, populationTemp, powerLawBrightness } from "./optics";
+import { blackbody, exposureForZoom, nebulaStage, populationTemp, powerLawBrightness } from "./optics";
 import { makeOptics, type Optics } from "./post";
 import { gauss, seeded } from "./random";
 
@@ -311,6 +312,9 @@ void main() {
   gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
 }`;
 
+// The accretion disc as a calm, thin ring of hot gas: temperature falls outward (white-hot at the
+// inner edge to deep orange), and the side turning toward the camera is Doppler-beamed: brighter
+// and a little bluer, the receding side dimmer and redder. Slow spiral texture, nothing fiery.
 const DISCRING_FS = /* glsl */ `
 uniform float uTime;
 uniform float uInner;
@@ -318,17 +322,27 @@ uniform float uOuter;
 uniform float uAlpha;
 uniform vec2 uView;
 varying vec2 vP;
+vec3 heatColour(float k) {
+  // k: temperature, 0 deep red-orange .. 1 white .. 1.3 blue-white.
+  vec3 c = mix(vec3(0.9, 0.22, 0.05), vec3(1.0, 0.55, 0.2), smoothstep(0.0, 0.35, k));
+  c = mix(c, vec3(1.0, 0.86, 0.66), smoothstep(0.3, 0.7, k));
+  c = mix(c, vec3(1.0, 0.97, 0.94), smoothstep(0.65, 1.0, k));
+  return mix(c, vec3(0.8, 0.88, 1.0), smoothstep(1.0, 1.3, k));
+}
 void main() {
   float r = length(vP);
   float ang = atan(vP.y, vP.x);
   float t = clamp((r - uInner) / (uOuter - uInner), 0.0, 1.0);
-  float heat = pow(1.0 - t, 1.7);
-  float sw = ang * 2.0 + uTime * 0.45 / (0.25 + t) - log(r) * 6.0;
-  float n = 0.6 + 0.25 * sin(sw * 3.0 + sin(sw * 1.7 + r * 3.0) * 1.4) + 0.15 * sin(r * 14.0 - uTime * 0.6);
-  float dop = 1.0 + 0.5 * dot(vec2(-sin(ang), cos(ang)), uView);
-  vec3 col = mix(vec3(1.0, 0.42, 0.14), vec3(1.0, 0.94, 0.82), heat);
-  float edge = smoothstep(0.0, 0.06, t) * smoothstep(1.0, 0.5, t);
-  gl_FragColor = vec4(col * (0.1 + heat * 0.8) * n * dop * edge * uAlpha, 1.0);
+  float temp = pow(r / uInner, -0.75);
+  float sw = ang * 2.0 + uTime * 0.35 / (0.25 + t) - log(r) * 6.0;
+  float n = 0.75 + 0.18 * sin(sw * 3.0 + sin(sw * 1.7 + r * 3.0) * 1.4) + 0.07 * sin(r * 14.0 - uTime * 0.5);
+  float beta = 0.32 * sqrt(uInner / r);
+  float cosT = dot(vec2(-sin(ang), cos(ang)), uView);
+  float D = 1.0 / (1.0 - beta * cosT);
+  vec3 col = heatColour(temp * D);
+  float lum = pow(temp, 2.2) * pow(D, 3.0);
+  float edge = smoothstep(0.0, 0.05, t) * smoothstep(1.0, 0.35, t);
+  gl_FragColor = vec4(col * min(lum, 2.4) * 1.05 * n * edge * uAlpha, 1.0);
 }`;
 
 const STAR_VS = /* glsl */ `
@@ -355,7 +369,8 @@ void main() {
   gl_Position = projectionMatrix * mv;
   float px = aSize * uScale * uPx / max(-mv.z, 0.001);
   float pulse = aKind > 1.5 ? uPulse * (0.5 + 0.5 * sin(uTime * 3.2 + aPhase * 6.283)) : 0.0;
-  gl_PointSize = clamp(px * (1.0 + 0.12 * pulse), 9.0 * uDpr, 380.0 * uDpr);
+  // Drawn a little smaller than the figure's spacing, so neighbours never melt together.
+  gl_PointSize = clamp(px * 0.7 * (1.0 + 0.12 * pulse), 8.0 * uDpr, 200.0 * uDpr);
   vColor = aColor;
   vAlpha = aAlpha * (1.0 + 0.55 * pulse);
   vKind = aKind;
@@ -379,10 +394,11 @@ void main() {
   vec3 col;
   if (vKind < 0.5) {
     // Closed: a steady warm star with soft spikes.
-    float core = smoothstep(0.28, 0.15, d);
-    float glow = exp(-d * d * 9.0) * 0.7;
-    float spikes = (exp(-abs(p.x) * 80.0) + exp(-abs(p.y) * 80.0)) * smoothstep(0.95, 0.1, d) * 0.35;
-    col = vColor * (core * 1.25 + (glow + spikes) * vGlow);
+    // A small sharp core and a tight halo, so a crowded figure stays separate points under bloom.
+    float core = smoothstep(0.2, 0.08, d);
+    float glow = exp(-d * d * 16.0) * 0.32;
+    float spikes = (exp(-abs(p.x) * 90.0) + exp(-abs(p.y) * 90.0)) * smoothstep(0.9, 0.1, d) * 0.18;
+    col = vColor * (core * 0.95 + (glow + spikes) * vGlow);
   } else if (vKind < 1.5) {
     // Open: a dim protostar inside a faint dust halo.
     float core = smoothstep(0.2, 0.1, d) * 0.85;
@@ -498,6 +514,9 @@ function pointsOf(geo: THREE.BufferGeometry, mat: THREE.Material, order: number)
 
 // ---- the scene ----------------------------------------------------------------------------
 
+/** How bright a system's unresolved cluster glow is, from its progress: none while it is gas. */
+const coreGlow = (progress: number) => 0.02 + 0.33 * nebulaStage(progress).cluster;
+
 export class SkyScene {
   readonly renderer: THREE.WebGLRenderer;
   private scene = new THREE.Scene();
@@ -511,6 +530,7 @@ export class SkyScene {
   private bulge: THREE.Sprite;
   private hole: { group: THREE.Group; disc: THREE.ShaderMaterial } | null = null;
   private optics: Optics;
+  private nebulae: Nebulae;
   private debris: { geo: THREE.BufferGeometry; mat: THREE.ShaderMaterial } | null = null;
   private bridges: THREE.ShaderMaterial | null = null;
   private glow: THREE.Texture;
@@ -550,6 +570,8 @@ export class SkyScene {
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true, powerPreference: "default" });
     this.renderer.setClearColor(0x000000, 0);
     this.optics = makeOptics(this.renderer, this.scene, this.camera, 1, 1, 1);
+    this.nebulae = new Nebulae(this.renderer);
+    this.scene.add(this.nebulae.group);
     this.glow = glowTexture();
     this.disposables.push(this.glow);
     this.field = this.buildField();
@@ -649,9 +671,9 @@ export class SkyScene {
     discMesh.rotation.x = -Math.PI / 2;
     discMesh.rotation.z = 0.0;
     discMesh.renderOrder = 4;
-    const coreMat = new THREE.SpriteMaterial({ map: this.glow, color: new THREE.Color(1, 0.72, 0.42), opacity: 0.3, ...GLOW });
+    const coreMat = new THREE.SpriteMaterial({ map: this.glow, color: new THREE.Color(1, 0.72, 0.42), opacity: 0.12, ...GLOW });
     const core = new THREE.Sprite(coreMat);
-    core.scale.setScalar(HOLE.discOuter * 5);
+    core.scale.setScalar(HOLE.discOuter * 3.2);
     core.renderOrder = 3;
     group.add(core, horizon, discMesh);
     own.push(horizonGeo, horizonMat, ringGeo, disc, coreMat);
@@ -671,13 +693,19 @@ export class SkyScene {
     this.bridges = null;
 
     const places = placeSystems(sky.constellations);
+    if (this.devStages) {
+      const list = sky.constellations.filter((c) => !places.get(c.repo)!.centre);
+      // Five stages in turn down the rank order, so any neighbourhood shows them all.
+      this.devStages = new Map(list.map((c, i) => [c.repo, (i % 5) / 4]));
+    }
+    this.nebulae.set(sky.constellations.filter((c) => !places.get(c.repo)!.centre).map((c) => ({ repo: c.repo, place: places.get(c.repo)!, progress: this.progressOf(c) })));
     for (const c of sky.constellations) {
       const place = places.get(c.repo)!;
       const sys: Sys = { c, place, points: null, mat: null, core: null, debris: [0, 0], lens: 1 };
       if (place.centre) {
         this.buildHole();
       } else {
-        const cond = condensation(c);
+        const cond = this.progressOf(c);
         const p = systemParticles(c.repo, cond, 140 + Math.round(360 * c.size));
         const geo = new THREE.BufferGeometry();
         geo.setAttribute("position", new THREE.BufferAttribute(p.local, 3));
@@ -696,11 +724,11 @@ export class SkyScene {
         const points = pointsOf(geo, mat, 3);
         points.position.set(place.x, place.y, place.z);
         points.scale.setScalar(place.scale);
-        // A condensed system gets a bright heart; a nebula only a faint one.
-        const coreMat = new THREE.SpriteMaterial({ map: this.glow, color: new THREE.Color(1, 0.9, 0.75), opacity: 0.05 + 0.6 * cond, ...GLOW });
+        // The unresolved light of the young cluster: only as bright as the cluster has grown.
+        const coreMat = new THREE.SpriteMaterial({ map: this.glow, color: new THREE.Color(0.82, 0.88, 1), opacity: coreGlow(cond), ...GLOW });
         const core = new THREE.Sprite(coreMat);
         core.position.copy(points.position);
-        core.scale.setScalar(place.scale * (0.9 + 0.6 * cond));
+        core.scale.setScalar(place.scale * (0.5 + 0.5 * cond));
         core.renderOrder = 3;
         this.skyGroup.add(points, core);
         this.skyDisposables.push(geo, mat, coreMat);
@@ -1292,6 +1320,15 @@ export class SkyScene {
   }
 
   /** DEV only: put the camera somewhere at once (for screenshots without a mouse). */
+  /** DEV only (screenshots): the nebulae spread over the progress stages 0, .25, .5, .75 and 1. */
+  private devStages: Map<string, number> | null = null;
+  devSpreadProgress() {
+    this.devStages = new Map();
+  }
+  private progressOf(c: Constellation): number {
+    return this.devStages?.get(c.repo) ?? condensation(c);
+  }
+
   devPlace(repo: string, k: number) {
     if (!this.systems.has(repo)) return;
     this.moved = true;
@@ -1311,6 +1348,11 @@ export class SkyScene {
     const rx = ((this.right.x + 1) / 2) * this.width;
     const ry = ((1 - this.right.y) / 2) * this.height;
     return { x, y, r: Math.hypot(rx - x, ry - y), visible };
+  }
+
+  /** The galaxy's bright core on screen, where no overview label should sit. */
+  coreScreen(): Screen {
+    return this.toScreen({ x: 0, y: 0, z: 0 }, GAL_R * 0.13);
   }
 
   galaxyScreen(repo: string): Screen | null {
@@ -1476,8 +1518,8 @@ export class SkyScene {
       s.mat.uniforms.uPx.value = pxScale;
       s.mat.uniforms.uDpr.value = this.dpr;
       s.mat.uniforms.uAlpha.value = s.lens * hover * inside;
-      const cond = condensation(s.c);
-      (s.core.material as THREE.SpriteMaterial).opacity = (0.05 + 0.6 * cond) * s.lens * hover * inside;
+      (s.core.material as THREE.SpriteMaterial).opacity = coreGlow(this.progressOf(s.c)) * s.lens * hover * inside;
+      this.nebulae.setAlpha(s.c.repo, s.lens * hover * inside);
     }
     if (this.hole) {
       const d = Math.hypot(eye.x, eye.z);
@@ -1485,7 +1527,9 @@ export class SkyScene {
       this.hole.disc.uniforms.uView.value.set(eye.x / Math.max(d, 1e-6), -eye.z / Math.max(d, 1e-6));
       const sw = this.systems.get([...this.systems.values()].find((s) => s.place.centre)!.c.repo)!;
       const hover = sw.c.repo === this.hovered ? 1.3 : 1;
-      this.hole.disc.uniforms.uAlpha.value = Math.max(0.35, sw.lens) * hover * Math.min(1, 0.45 + share);
+      // Calm from afar: at the overview the disc is a few pixels, and a full-strength one blooms
+      // into a white donut; it comes up to full heat as the camera closes in.
+      this.hole.disc.uniforms.uAlpha.value = Math.max(0.35, sw.lens) * hover * (1 - 0.7 * Math.min(1, share * 1.4));
       // The lens: where the horizon falls on screen, and how big. Off when it is out of view
       // or too small to bend anything visibly.
       const sc = this.toScreen({ x: 0, y: 0, z: 0 }, HOLE.horizon);
@@ -1549,6 +1593,7 @@ export class SkyScene {
     this.disposables = [];
     this.systems.clear();
     this.optics.dispose();
+    this.nebulae.dispose();
     this.renderer.dispose();
     this.renderer.forceContextLoss();
   }
