@@ -104,6 +104,8 @@ export type ChatRoute = {
   step: string;
   kind: string | null;
   pick: RoutePick | null;
+  /** The thread the answer was stored in (serde snake case, as the core names it). Send it back to continue the thread. */
+  handoff_id?: string;
   text?: string;
   service?: string;
   model?: string;
@@ -111,17 +113,29 @@ export type ChatRoute = {
 };
 
 /** One turn in the thread: the person's message, or the answer to it. */
-export type ChatTurn = { role: "user" | "assistant"; text: string; service?: string; model?: string; step?: string; handoff?: string | null };
+export type ChatTurn = { role: "user" | "assistant"; text: string; service?: string; model?: string; step?: string; handoff?: string | null; handoff_id?: string; kind?: string | null };
 
 /** Sends one message to the core's router. Default: the `chat_route` command. */
-export type ChatSend = (message: string) => Promise<CoreResult<ChatRoute>>;
+export type ChatSend = (message: string, handoffId?: string) => Promise<CoreResult<ChatRoute>>;
 
-const defaultSend: ChatSend = (message) => call<ChatRoute>("chat_route", { message });
+// `handoffId` names the open thread, so a follow-up continues it; none starts a new thread.
+const defaultSend: ChatSend = (message, handoffId) =>
+  call<ChatRoute>("chat_route", handoffId === undefined ? { message } : { message, handoffId });
 
-/** Logs a thumbs press on the answer at `turnIndex` (FD-9). Default: the `chat_rate` command. */
-export type ChatRate = (turnIndex: number, rating: "up" | "down") => Promise<CoreResult<null>>;
+/** What a thumbs press sends: the turn, its rating, and the answer's thread, service, model and kind. */
+export type ChatRating = {
+  turnIndex: number;
+  rating: "up" | "down";
+  handoffId: string;
+  service: string;
+  model: string;
+  kind?: string;
+};
 
-const defaultRate: ChatRate = (turnIndex, rating) => call<null>("chat_rate", { turnIndex, rating });
+/** Logs a thumbs press on an answer (FD-9). Default: the `chat_rate` command. */
+export type ChatRate = (args: ChatRating) => Promise<CoreResult<null>>;
+
+const defaultRate: ChatRate = (args) => call<null>("chat_rate", args);
 
 export function Chat({
   handoff,
@@ -140,11 +154,17 @@ export function Chat({
   // One rating per turn: the last press. Keyed by the turn's index in the thread.
   const [ratings, setRatings] = useState<Record<number, "up" | "down">>({});
   const inFlight = useRef(false);
+  // The thread the answers were stored in; sent back so the next message continues it.
+  const [threadId, setThreadId] = useState<string | undefined>(undefined);
 
   const onRate = async (turnIndex: number, rating: "up" | "down") => {
     if (ratings[turnIndex] === rating) return;
     setRatings((current) => ({ ...current, [turnIndex]: rating }));
-    const result = await rate(turnIndex, rating);
+    const turn = turns[turnIndex];
+    if (!turn || !turn.handoff_id || !turn.service || !turn.model) return;
+    const args: ChatRating = { turnIndex, rating, handoffId: turn.handoff_id, service: turn.service, model: turn.model };
+    if (turn.kind) args.kind = turn.kind;
+    const result = await rate(args);
     if ("error" in result) {
       // The mark goes, unless a later press has already moved it.
       setRatings((current) => {
@@ -164,7 +184,7 @@ export function Chat({
     // The sent message shows at once, before the answer arrives.
     const sent: ChatTurn = { role: "user", text: message };
     setTurns((current) => [...current, sent]);
-    const result = await send(message);
+    const result = await send(message, threadId);
     inFlight.current = false;
     setBusy(false);
     if ("error" in result) {
@@ -179,8 +199,12 @@ export function Chat({
     setRouted(pick && pick.to === "claude-handoff" ? { reason: pick.reason, prompt: message } : null);
     const answer = result.ok;
     if (answer.text !== undefined) {
-      const { text, service, model, step, handoff: moved } = answer;
-      setTurns((current) => [...current, { role: "assistant", text, service, model, step, handoff: moved ?? null }]);
+      const { text, service, model, step, handoff: moved, handoff_id, kind } = answer;
+      if (handoff_id) setThreadId(handoff_id);
+      setTurns((current) => [
+        ...current,
+        { role: "assistant", text, service, model, step, handoff: moved ?? null, handoff_id, kind },
+      ]);
     }
     // Clear only the text that was sent; anything typed while it was in flight stays.
     setDraft((current) => (current === message ? "" : current));
@@ -216,7 +240,9 @@ export function Chat({
                 handoff={turn.handoff}
                 resolveLink={resolveLink}
                 rating={ratings[i]}
-                onRate={(rating) => void onRate(i, rating)}
+                onRate={
+                  turn.handoff_id && turn.service && turn.model ? (rating) => void onRate(i, rating) : undefined
+                }
               />
             ),
           )}
