@@ -5,7 +5,7 @@
 
 use crate::platform::{current_os, python_launcher};
 use serde_json::Value;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -13,6 +13,39 @@ use std::process::{Command, Stdio};
 /// The environment variable that points the bridge at another root (tests: a stub `fleet.py`
 /// under `tests/fixtures/fleet-stub/`).
 pub const FLEET_ROOT_ENV: &str = "FLEET_ROOT";
+
+/// The `LD_LIBRARY_PATH` a fleet child should get: `ld_library_path` without every entry that
+/// starts with `appdir`. `None` means remove the variable (nothing is left); an empty `appdir`
+/// leaves the value as it is.
+pub fn clean_ld_library_path(ld_library_path: &OsStr, appdir: &OsStr) -> Option<OsString> {
+    if appdir.is_empty() {
+        return Some(ld_library_path.to_os_string());
+    }
+    let appdir = Path::new(appdir);
+    let kept: Vec<PathBuf> = std::env::split_paths(ld_library_path)
+        .filter(|entry| !entry.starts_with(appdir))
+        .collect();
+    if kept.is_empty() {
+        return None;
+    }
+    std::env::join_paths(kept).ok()
+}
+
+/// Gives `cmd` a clean environment for a fleet child: the packaged app's `PYTHONHOME`,
+/// `PYTHONPATH` and `PYTHONDONTWRITEBYTECODE` removed, and, when `APPDIR` is set and not empty,
+/// the bundle's entries taken out of `LD_LIBRARY_PATH` (the variable goes when none is left).
+pub fn clean_child_env(cmd: &mut Command) {
+    for key in ["PYTHONHOME", "PYTHONPATH", "PYTHONDONTWRITEBYTECODE"] {
+        cmd.env_remove(key);
+    }
+    let appdir = std::env::var_os("APPDIR").filter(|v| !v.is_empty());
+    if let (Some(appdir), Some(ld)) = (appdir, std::env::var_os("LD_LIBRARY_PATH")) {
+        match clean_ld_library_path(&ld, &appdir) {
+            Some(value) => cmd.env("LD_LIBRARY_PATH", value),
+            None => cmd.env_remove("LD_LIBRARY_PATH"),
+        };
+    }
+}
 
 /// CORE-2: a fleet command that failed or printed JSON the core can't parse.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -129,6 +162,7 @@ impl FleetBridge {
     ) -> std::io::Result<std::process::Output> {
         let mut child = Command::new(&command[0]);
         child.args(&command[1..]);
+        clean_child_env(&mut child);
         child.env(FLEET_ROOT_ENV, self.root.as_os_str());
         for (key, value) in &self.env {
             child.env(key, value);
