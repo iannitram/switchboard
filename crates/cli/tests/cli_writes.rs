@@ -118,6 +118,16 @@ fn save(s: &Setup, pulls: Vec<PullRequest>) {
     SnapshotStore::new(&s.data).save(&snap).unwrap();
 }
 
+/// Store an empty snapshot of `o/switchboard`, so `delete switchboard` names a known repo.
+fn save_switchboard(s: &Setup) {
+    let snap = RepoSnapshot {
+        repo: "o/switchboard".to_string(),
+        read_at: 2000,
+        ..Default::default()
+    };
+    SnapshotStore::new(&s.data).save(&snap).unwrap();
+}
+
 fn writes(s: &Setup) -> CliWrites {
     CliWrites {
         data: Some(s.data.clone()),
@@ -285,6 +295,7 @@ fn a_dry_run_refusal_stops_before_the_push() {
 #[test]
 fn delete_adds_one_item_to_the_local_items() {
     let s = setup("delete");
+    save_switchboard(&s);
     let w = writes(&s);
     let (code, err) = run(&["delete", "switchboard"], &s, &w);
     assert_eq!(err, "delete switchboard: needs a confirm in the app\n");
@@ -304,7 +315,7 @@ fn delete_adds_one_item_to_the_local_items() {
 }
 
 #[test]
-fn a_waiting_write_with_no_data_folder_says_so_and_still_refuses() {
+fn delete_with_no_data_folder_cannot_tell_and_writes_nothing() {
     let s = setup("delete-no-data");
     let w = CliWrites {
         data: None,
@@ -313,10 +324,22 @@ fn a_waiting_write_with_no_data_folder_says_so_and_still_refuses() {
     let (code, err) = run(&["delete", "switchboard"], &s, &w);
     assert_eq!(
         err,
-        "waiting: set SWITCHBOARD_DATA to the app data folder\n\
-         delete switchboard: needs a confirm in the app\n"
+        "switchboard: delete: set SWITCHBOARD_DATA to the app data folder\n"
     );
     assert_eq!(code, ExitCode::from(1));
+}
+
+#[test]
+fn delete_and_restore_of_an_unknown_repo_write_no_item() {
+    let s = setup("unknown");
+    save(&s, vec![]);
+    let w = writes(&s);
+    for command in ["delete", "restore"] {
+        let (code, err) = run(&[command, "nope"], &s, &w);
+        assert_eq!(err, "switchboard: no such repo: nope\n");
+        assert_eq!(code, ExitCode::from(1));
+    }
+    assert!(LocalItems::new(&s.data).load().unwrap().is_empty());
 }
 
 /// The built binary in `s.cwd` with `SWITCHBOARD_DATA` set and no pipeline or dev root.
@@ -339,6 +362,7 @@ fn text(bytes: &[u8]) -> String {
 fn the_binary_delete_writes_the_item_and_waiting_lists_it_first() {
     let s = setup("bin-waiting");
     save(&s, vec![]);
+    save_switchboard(&s);
     let out = switchboard(&["delete", "switchboard"], &s);
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(
@@ -356,6 +380,7 @@ fn the_binary_delete_writes_the_item_and_waiting_lists_it_first() {
 #[test]
 fn waiting_with_only_local_items_and_no_snapshot_lists_them() {
     let s = setup("bin-local-only");
+    save_switchboard(&s);
     run(&["delete", "switchboard"], &s, &writes(&s));
     let out = switchboard(&["waiting"], &s);
     assert_eq!(out.status.code(), Some(0), "stderr: {}", text(&out.stderr));

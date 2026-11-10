@@ -68,6 +68,17 @@ pub trait Writes {
     fn merge(&self, repo: &str, pr: u64) -> Result<(), String>;
     /// WAIT-1: add one Waiting on you item.
     fn waiting(&self, item: &Item) -> Result<(), String>;
+    /// Whether Switchboard knows `repo` (a stored snapshot of `owner/name`, or a bare name).
+    /// An error is the reason it cannot tell.
+    fn knows_repo(&self, repo: &str) -> Result<bool, String>;
+}
+
+/// Whether `repo` names one of `known` (each `owner/name`): the whole `owner/name`, or, when
+/// `repo` has no `/`, the name part.
+pub fn repo_known(repo: &str, known: &[String]) -> bool {
+    known
+        .iter()
+        .any(|full| full == repo || (!repo.contains('/') && full.rsplit('/').next() == Some(repo)))
 }
 
 /// The real writes (CLI-3): a merge through GH-5 from the stored snapshot, and the Waiting on
@@ -187,6 +198,19 @@ impl Writes for CliWrites {
         LocalItems::new(data)
             .add(item.clone())
             .map_err(|e| format!("waiting: {e}"))
+    }
+
+    /// The repos of the stored snapshots, from the app data folder.
+    fn knows_repo(&self, repo: &str) -> Result<bool, String> {
+        let data = self
+            .data
+            .as_deref()
+            .ok_or("set SWITCHBOARD_DATA to the app data folder")?;
+        let snaps = SnapshotStore::new(data)
+            .load_all()
+            .map_err(|e| e.to_string())?;
+        let known: Vec<String> = snaps.into_iter().map(|snap| snap.repo).collect();
+        Ok(repo_known(repo, &known))
     }
 }
 
@@ -566,6 +590,21 @@ fn write_command(
             return ExitCode::from(2);
         }
     };
+    // `delete` and `restore` of a repo Switchboard does not know write nothing (fail closed
+    // when it cannot tell).
+    if let GuardedAction::DeleteRepo { repo } | GuardedAction::RestoreOverLive { repo } = &action {
+        match writes.knows_repo(repo) {
+            Ok(true) => {}
+            Ok(false) => {
+                let _ = writeln!(err, "switchboard: no such repo: {repo}");
+                return ExitCode::from(1);
+            }
+            Err(e) => {
+                let _ = writeln!(err, "switchboard: {command}: {e}");
+                return ExitCode::from(1);
+            }
+        }
+    }
     match rules::guard(&guard_for(args, cwd), &action) {
         Verdict::Allow => match &action {
             GuardedAction::Merge { repo, pr } => match writes.merge(repo, *pr) {
