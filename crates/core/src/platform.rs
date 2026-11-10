@@ -55,9 +55,10 @@ pub struct Probe {
     pub args: &'static [&'static str],
 }
 
-/// The Linux probe list (IT-1): the four CLIs (signed in when the auth probe exits 0),
-/// llama-swap's running models, the three toolchains (present when `--version` exits 0),
-/// `fleet status` (busy) and `fleet errors` (recent errors).
+/// The Linux probe list (IT-1): the three CLIs (signed in when the auth probe exits 0),
+/// llama-swap's running models, the four toolchains (present when `--version` exits 0; the
+/// gemini lane runs the Antigravity CLI `agy`, which has no auth-status command, so its row
+/// only says it is installed), `fleet status` (busy) and `fleet errors` (recent errors).
 const LINUX_PROBES: &[Probe] = &[
     Probe {
         name: "claude",
@@ -68,11 +69,6 @@ const LINUX_PROBES: &[Probe] = &[
         name: "codex",
         program: "codex",
         args: &["login", "status"],
-    },
-    Probe {
-        name: "gemini",
-        program: "gemini",
-        args: &["auth", "status"],
     },
     Probe {
         name: "gh",
@@ -97,6 +93,11 @@ const LINUX_PROBES: &[Probe] = &[
     Probe {
         name: "python3",
         program: "python3",
+        args: &["--version"],
+    },
+    Probe {
+        name: "gemini",
+        program: "agy",
         args: &["--version"],
     },
     Probe {

@@ -1298,7 +1298,7 @@ fn running_job(repo: &str, number: u64) -> Result<Option<Option<String>>, String
 }
 
 /// The toolchains the core probes, in the Loadout panel's order (`it.rs` `LOADOUT_TOOLCHAINS`).
-const TOOLCHAINS: [&str; 3] = ["cargo", "node", "python3"];
+const TOOLCHAINS: [&str; 4] = ["cargo", "node", "python3", "gemini"];
 /// The line `loadout` prints when this OS has no probes.
 const NO_PROBES: &str = "no loadout probes on this OS";
 

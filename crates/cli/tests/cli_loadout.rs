@@ -19,18 +19,21 @@ use std::process::{Command, ExitCode};
 use serde_json::Value;
 use switchboard_core::it::Loadout;
 
-/// Every probe answered: two CLIs signed in, two toolchains found, two models, busy, two errors.
+/// Every probe answered: two CLIs signed in, three toolchains found, two models, busy, two errors.
 fn full() -> Loadout {
     Loadout {
         read_at: 1_700_000_000,
         clis: vec![
             ("claude".to_string(), true),
             ("codex".to_string(), false),
-            ("gemini".to_string(), false),
             ("gh".to_string(), true),
         ],
         models_loaded: vec!["qwen3-coder-30b".to_string(), "gpt-oss-20b".to_string()],
-        toolchains: vec!["cargo".to_string(), "python3".to_string()],
+        toolchains: vec![
+            "cargo".to_string(),
+            "python3".to_string(),
+            "gemini".to_string(),
+        ],
         busy: true,
         recent_errors: vec![
             "fleet ghq: rate limited".to_string(),
@@ -43,7 +46,7 @@ fn full() -> Loadout {
 fn all_failed() -> Loadout {
     Loadout {
         read_at: 1_700_000_000,
-        clis: ["claude", "codex", "gemini", "gh"]
+        clis: ["claude", "codex", "gh"]
             .iter()
             .map(|name| (name.to_string(), false))
             .collect(),
@@ -54,11 +57,11 @@ fn all_failed() -> Loadout {
 const FULL_TEXT: &str = "\
 claude  signed in
 codex  not signed in
-gemini  not signed in
 gh  signed in
 cargo  found
 node  not found
 python3  found
+gemini  found
 llama-swap  2 loaded  qwen3-coder-30b, gpt-oss-20b
 fleet status  busy
 fleet errors  2 recent  fleet ghq: rate limited; merge_pr.py: behind main
@@ -67,11 +70,11 @@ fleet errors  2 recent  fleet ghq: rate limited; merge_pr.py: behind main
 const FAILED_TEXT: &str = "\
 claude  not signed in
 codex  not signed in
-gemini  not signed in
 gh  not signed in
 cargo  not found
 node  not found
 python3  not found
+gemini  not found
 llama-swap  no models loaded
 fleet status  idle
 fleet errors  none
@@ -90,7 +93,7 @@ fn text_for_failed_probes_names_each_state_and_has_no_detail() {
 }
 
 #[test]
-fn a_toolchain_outside_the_three_comes_after_them() {
+fn a_toolchain_outside_the_four_comes_after_them() {
     let loadout = Loadout {
         toolchains: vec!["go".to_string(), "cargo".to_string()],
         ..all_failed()
@@ -98,11 +101,12 @@ fn a_toolchain_outside_the_three_comes_after_them() {
     let text = cli::loadout_text(&loadout);
     let lines: Vec<&str> = text.lines().collect();
     assert_eq!(
-        lines[4..8],
+        lines[3..8],
         [
             "cargo  found",
             "node  not found",
             "python3  not found",
+            "gemini  not found",
             "go  found"
         ]
     );

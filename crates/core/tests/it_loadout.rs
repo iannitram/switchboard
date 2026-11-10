@@ -10,7 +10,7 @@ use switchboard_core::platform::{loadout_probes, Os, Probe};
 
 const NOW: UnixSeconds = 1_800_000_000;
 
-const CLIS: [&str; 4] = ["claude", "codex", "gemini", "gh"];
+const CLIS: [&str; 3] = ["claude", "codex", "gh"];
 
 /// Answers each probe by name from `answers`; a probe it has no answer for gets no exit code
 /// (the program is missing). It logs every probe name it is asked.
@@ -80,17 +80,24 @@ fn the_linux_probe_list_names_the_ten_probes_in_order() {
         [
             "claude",
             "codex",
-            "gemini",
             "gh",
             "llama-swap",
             "cargo",
             "node",
             "python3",
+            "gemini",
             "fleet status",
             "fleet errors",
         ]
     );
     assert!(linux().iter().all(|p| !p.program.is_empty()));
+}
+
+#[test]
+fn the_gemini_row_runs_the_agy_cli_for_presence_only() {
+    let gemini = linux().iter().find(|p| p.name == "gemini").unwrap();
+    assert_eq!(gemini.program, "agy");
+    assert_eq!(gemini.args, ["--version"]);
 }
 
 #[test]
@@ -126,18 +133,27 @@ fn a_cli_with_no_exit_code_is_listed_as_not_signed_in() {
     }
     assert_eq!(signed_in(&loadout, "claude"), Some(true));
     assert_eq!(signed_in(&loadout, "codex"), Some(false));
-    assert_eq!(signed_in(&loadout, "gemini"), Some(false));
     assert_eq!(signed_in(&loadout, "gh"), Some(true));
 }
 
 #[test]
-fn only_the_four_clis_are_listed_as_clis() {
+fn only_the_three_clis_are_listed_as_clis() {
     let all_ok: Vec<(&'static str, Option<i32>, &str)> =
         linux().iter().map(|p| (p.name, Some(0), "")).collect();
     let loadout = read(&all_ok);
     let mut names: Vec<&str> = loadout.clis.iter().map(|(n, _)| n.as_str()).collect();
     names.sort();
-    assert_eq!(names, ["claude", "codex", "gemini", "gh"]);
+    assert_eq!(names, ["claude", "codex", "gh"]);
+}
+
+#[test]
+fn agy_present_is_listed_as_a_toolchain_and_missing_is_left_out() {
+    let present = read(&[("gemini", Some(0), "1.5.5\n")]);
+    assert_eq!(present.toolchains, ["gemini"]);
+    assert!(present.clis.iter().all(|(name, _)| name != "gemini"));
+    let missing = read(&[("gemini", None, "")]);
+    assert!(missing.toolchains.is_empty());
+    assert!(missing.clis.iter().all(|(name, _)| name != "gemini"));
 }
 
 #[test]
@@ -180,10 +196,11 @@ fn every_present_toolchain_is_listed() {
         ("cargo", Some(0), "cargo 1.91.0\n"),
         ("node", Some(0), "v22.11.0\n"),
         ("python3", Some(0), "Python 3.13.1\n"),
+        ("gemini", Some(0), "1.5.5\n"),
     ]);
     let mut toolchains = loadout.toolchains.clone();
     toolchains.sort();
-    assert_eq!(toolchains, ["cargo", "node", "python3"]);
+    assert_eq!(toolchains, ["cargo", "gemini", "node", "python3"]);
 }
 
 #[test]

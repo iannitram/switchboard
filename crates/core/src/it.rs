@@ -59,10 +59,11 @@ pub fn read_loadout(probes: &[Probe], runner: &dyn ProbeRunner, now: UnixSeconds
 }
 
 /// IT-1: the CLI probes (signed in when the probe exits 0).
-const LOADOUT_CLIS: [&str; 4] = ["claude", "codex", "gemini", "gh"];
+const LOADOUT_CLIS: [&str; 3] = ["claude", "codex", "gh"];
 
-/// IT-1: the toolchain probes (present when `--version` exits 0).
-const LOADOUT_TOOLCHAINS: [&str; 3] = ["cargo", "node", "python3"];
+/// IT-1: the toolchain probes (present when `--version` exits 0). `gemini` is the Antigravity
+/// CLI (`agy`), which has no auth-status command, so presence is all it reports.
+const LOADOUT_TOOLCHAINS: [&str; 4] = ["cargo", "node", "python3", "gemini"];
 
 /// IT-1: how many recent errors the loadout keeps.
 const RECENT_ERRORS: usize = 5;
