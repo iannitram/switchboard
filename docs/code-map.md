@@ -51,8 +51,8 @@ The views read only the snapshot and the fleet bridge. No face writes to GitHub 
 | Seam | Linux (1.0) | Mac (`platforms`, After 1.0) | Windows (`platforms`, After 1.0) |
 |---|---|---|---|
 | Python launcher | `python3 -I` | `python3 -I` | `py -3 -I` |
-| Dev root | `~/dev` | `~/dev` | the code drive, `D:\dev` |
-| NextCloud folder | `~/Nextcloud` until U7 | `~/Nextcloud` | `%USERPROFILE%\Nextcloud` |
+| Dev root | <dev root> in the home folder | <dev root> in the home folder | <dev root> on the code drive |
+| NextCloud folder | <nextcloud root> in the home folder until U7 | <nextcloud root> in the home folder | <nextcloud root> in the user profile |
 | Tokens | `gh auth token`; keychain later | Keychain | Credential Manager |
 | Loadout probes | the fixed Linux list (IT-1) | empty until `platforms` | empty until `platforms` |
 | Bundle | AppImage (WebKit bundled) | dmg | nsis |

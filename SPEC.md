@@ -259,7 +259,7 @@ The pipeline batch lands in the pipeline repo before any of this, through Harmon
 
 ### Platform plan (R04)
 
-1.0 ships one AppImage for Linux (SteamOS on the Z13). The code keeps the Mac and Windows seams in one place each: the Python launcher (`python3` or `py`), the dev root (`~/dev` or the Windows code drive), the NextCloud folder, the OS keychain for tokens, and the loadout probe list per OS. The `platforms` region fills them in.
+1.0 ships one AppImage for Linux (SteamOS on the Z13). The code keeps the Mac and Windows seams in one place each: the Python launcher (`python3` or `py`), the dev root (<dev root>, in the home folder on Mac and Linux, the code drive on Windows), the NextCloud folder (<nextcloud root>), the OS keychain for tokens, and the loadout probe list per OS. The `platforms` region fills them in.
 
 ## Waypoints
 
