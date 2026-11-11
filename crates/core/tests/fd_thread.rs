@@ -95,3 +95,38 @@ fn a_path_escaping_id_is_refused_and_writes_nothing() {
     assert!(!dir.join("x.jsonl").exists());
     assert!(!dir.join("threads").exists());
 }
+
+/// #433: an id must be a file name on every platform: a drive-relative id (`C:x`) or any other
+/// character Windows refuses in a file name is refused everywhere, and ordinary ids still work.
+#[test]
+fn an_id_that_is_not_a_file_name_on_windows_is_refused_everywhere() {
+    let dir = data_dir("bad-ids");
+    let store = ThreadStore::new(&dir);
+    for bad in [
+        "C:x", "a:b", "x*", "a?b", "a\"b", "a<b", "a>b", "a|b", "a\tb", "a\nb",
+    ] {
+        let read = store.read(bad);
+        assert!(
+            matches!(read, Err(CoreError::Refused(_))),
+            "{bad:?}: {read:?}"
+        );
+        let append = store.append(bad, &row(1));
+        assert!(
+            matches!(append, Err(CoreError::Refused(_))),
+            "{bad:?}: {append:?}"
+        );
+    }
+    for good in [
+        "chat-1",
+        "h-42",
+        "thread_9",
+        "t.1",
+        "2026-11-10T090000Z",
+        "a b",
+        "chat#1",
+    ] {
+        store.append(good, &row(1)).unwrap();
+        assert_eq!(store.read(good).unwrap().len(), 1, "{good}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

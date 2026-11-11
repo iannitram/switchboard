@@ -59,10 +59,12 @@ pub fn take_flags(argv: &[String]) -> Result<(Flags, Vec<String>), String> {
 
 /// The usage error for a front door flag given to a command it is not for.
 pub fn misplaced(flags: &Flags, command: Option<&str>) -> Option<&'static str> {
+    if flags.dry_run && command != Some("ask") {
+        return Some("--dry-run is for ask");
+    }
     // `--thread` also names the chat `ask_as_job` sends (FD-6).
-    let for_ask = flags.dry_run && command != Some("ask");
-    if for_ask || (flags.thread.is_some() && !matches!(command, Some("ask" | "ask_as_job"))) {
-        return Some("--dry-run and --thread are for ask");
+    if flags.thread.is_some() && !matches!(command, Some("ask" | "ask_as_job")) {
+        return Some("--thread is for ask and ask_as_job");
     }
     if flags.unmet.is_some() && command != Some("ask_as_job") {
         return Some("--unmet is for ask_as_job");
