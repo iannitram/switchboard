@@ -27,25 +27,34 @@ const SATELLITE_EVERY: Duration = Duration::from_secs(60);
 /// (`run::SatelliteSession::tick`, the tick `switchboard autopilot satellite` runs): it reads
 /// `satellite.json` (off when missing), records a fleet error for each loop that ended with an
 /// error (CORE-2), classes the failed cards of loops that ended (AUTO-9), and starts the lanes
-/// `driver::tick` allows. #385: the session holds the satellite lock while its loops run, so a
-/// headless tick on this machine starts no lane beside them, and this thread starts none
-/// beside a headless run's.
+/// `driver::tick` allows. #432: the fleet settings are read again at each tick, so a changed
+/// pipeline is used at once; the tick holds the satellite lock only while it runs, and the
+/// loops and holds every satellite on this machine counts are on disk (`loops.json`). Being
+/// held out by another run is said when it starts and when it ends (`run::SatelliteLog`).
 fn satellite_loop(handle: tauri::AppHandle, config_dir: std::path::PathBuf) {
     let data = handle
         .path()
         .app_data_dir()
         .unwrap_or_else(|_| config_dir.clone());
     let mut session: Option<run::SatelliteSession> = None;
+    let mut log = run::SatelliteLog::default();
     loop {
         let state = handle.state::<commands::AppState>();
-        if session.is_none() {
-            if let Ok(fleet) = commands::bridge(&state.settings_path) {
-                session = Some(run::SatelliteSession::new(fleet, &data));
+        // Settings not set yet start nothing, as before; the session keeps its last bridge.
+        if let Ok(fleet) = commands::bridge(&state.settings_path) {
+            match session.as_mut() {
+                Some(session) => session.set_fleet(fleet),
+                None => session = Some(run::SatelliteSession::new(fleet, &data)),
             }
         }
         if let Some(session) = session.as_mut() {
             let report = session.tick(&config_dir, Duration::ZERO);
-            print_report(&state, &report);
+            for e in &report.raised {
+                commands::record_fleet_error(&state, e);
+            }
+            for line in log.lines(&report) {
+                eprintln!("{line}");
+            }
         }
         std::thread::sleep(SATELLITE_EVERY);
     }

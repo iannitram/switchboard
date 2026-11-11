@@ -352,10 +352,10 @@ fn a_satellite_tick_starts_its_lane_and_the_server_waits_for_the_loop() {
         let (is_error, tick) = tool(Role::Satellite, h, "satellite_tick", json!({}));
         assert!(!is_error, "{tick}");
         assert_eq!(tick["lanes_started"], json!(["gemini"]));
-        // The tick answers at once; the loop runs on, and the satellite is held for it.
-        assert!(lock::held(&satellite_lock_target(&w.data)));
+        // The tick answers at once and the loop runs on. #432 (ruling 1): the server held the
+        // satellite lock for the tick only and gave it back when the tick returned.
+        assert!(!lock::held(&satellite_lock_target(&w.data)));
         let (_, status) = tool(Role::Satellite, h, "autopilot_status", json!({}));
-        assert_eq!(status["satellite"]["live"], true);
         assert_eq!(status["satellite"]["on"], true);
 
         // What the server does when its client goes away: wait for the loop, report it.

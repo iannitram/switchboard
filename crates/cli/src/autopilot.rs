@@ -164,10 +164,11 @@ impl<'a> Headless<'a> {
             if dry_run {
                 run::satellite_dry(&fleet, data, config)
             } else {
-                self.satellite
-                    .borrow_mut()
-                    .get_or_insert_with(|| SatelliteSession::new(fleet.clone(), data))
-                    .tick(config, self.lock_wait)
+                let mut satellite = self.satellite.borrow_mut();
+                let session =
+                    satellite.get_or_insert_with(|| SatelliteSession::new(fleet.clone(), data));
+                session.set_fleet(fleet.clone());
+                session.tick(config, self.lock_wait)
             }
         } else {
             self.poll_pass(pass, dry_run, &fleet)?

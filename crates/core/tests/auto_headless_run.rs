@@ -1,7 +1,6 @@
 //! #385: the passes behind the window's threads, the CLI and the MCP (`autopilot::run`). Each
 //! poll pass runs alone through `run_poll_passes`; a dry run reports the same work and changes
-//! no file; the lock keeps a second run out; the satellite session holds its lock while its
-//! loops run. A fake starter and a stub `fleet.py` and `merge_pr.py` stand in for the fleet.
+//! no file; the lock keeps a second run out; a satellite tick holds its lock while it runs. A fake starter and a stub `fleet.py` and `merge_pr.py` stand in for the fleet.
 
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -492,17 +491,17 @@ fn a_satellite_tick_starts_its_lanes_and_keeps_a_second_satellite_out() {
     assert!(calls(&w, "fleet").iter().all(|args| args[0] != "run"));
     assert!(!lock::held(&satellite_lock_target(&w.data)));
 
-    // A real tick starts it and holds the satellite.
+    // A real tick starts it. #432 (ruling 1): the tick holds the satellite lock only while it
+    // runs; the loop is on disk (`loops.json`), where every satellite on this machine counts it.
     let tick = session.tick(&w.config, Duration::ZERO);
     assert_eq!(tick.lanes_started, ["gemini"], "{tick:?}");
     assert_eq!(tick.lines(), ["satellite: started gemini"]);
-    assert!(lock::held(&satellite_lock_target(&w.data)));
+    assert!(!lock::held(&satellite_lock_target(&w.data)));
     let status = run::status(&w.data, Some(&w.config), 0, None).unwrap();
-    assert_eq!(status["satellite"]["live"], true);
     assert_eq!(status["satellite"]["on"], true);
 
-    // A second satellite on this machine (the window's, or another headless run's) starts
-    // nothing beside it.
+    // While a tick runs (another run holds the lock), a second satellite starts nothing.
+    let held = FileLock::take(&satellite_lock_target(&w.data), Duration::ZERO).unwrap();
     let mut second = SatelliteSession::new(fleet.clone(), &w.data);
     let refused = second.tick(&w.config, Duration::ZERO);
     assert!(refused.lanes_started.is_empty());
@@ -511,6 +510,7 @@ fn a_satellite_tick_starts_its_lanes_and_keeps_a_second_satellite_out() {
         refused.errors[0].contains("another run holds the satellite"),
         "{refused:?}"
     );
+    drop(held);
 
     // The session waits for its loop, reports it and gives the satellite back.
     let end = session.finish(Duration::from_millis(50));
