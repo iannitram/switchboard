@@ -9,6 +9,13 @@ export const NOTHING_WAITING = "Nothing is waiting on you.";
 
 // WAIT-1 (#60): the core's merged items in the order given (the core sorts, newest first), each a
 // BroCrew-ported item. An empty list says so, never a blank pane (SHELL-1).
+// #426: a guarded request filed before the wording change says "to delete"; it is an archive
+// (Switchboard never deletes a repo), so it shows as "to archive". Display only: the request's
+// own text is what the core is asked about.
+export function shownItem(item: WaitingItemData): WaitingItemData {
+  return guardedText(item) === null ? item : { ...item, what: item.what.replace(/ to delete ([A-Za-z0-9._-]+\/[A-Za-z0-9._-]+)$/, " to archive $1") };
+}
+
 export function WaitingList({ items, onAction }: { items: WaitingItemData[]; onAction?: (item: WaitingItemData) => void }) {
   return (
     <section aria-label="Waiting on you">
@@ -18,7 +25,7 @@ export function WaitingList({ items, onAction }: { items: WaitingItemData[]; onA
         <ol>
           {items.map((item, i) => (
             <li key={`${i}-${item.link}`}>
-              <WaitingItem item={item} onAction={onAction} />
+              <WaitingItem item={shownItem(item)} onAction={onAction && (() => onAction(item))} />
             </li>
           ))}
         </ol>
@@ -87,8 +94,8 @@ export function confirmLine(request: GuardedRequest, into?: string): string {
 // `confirmed: true`, with the name typed, and the core checks the name again. Cancel sends
 // nothing. "Drop the request" turns the request down: it only takes the item out of the list,
 // needs no name typed and archives, pushes and queues nothing (CORE-3, #347). A restore request
-// can go to a new private repo instead (off unless I tick it): Confirm then also sends `into`,
-// the new repo's name, and needs the same name typed.
+// goes to a new private repo by default (BAK-3, #426: the box is ticked; unticking it restores over
+// the live repo): Confirm then also sends `into`, the new repo's name, and needs the same name typed.
 export function Waiting() {
   const [items, setItems] = useState<WaitingItemData[]>([]);
   const [error, setError] = useState<CoreError | null>(null);
@@ -130,7 +137,7 @@ export function Waiting() {
     setDropped(null);
     setRefused(null);
     setTyped("");
-    setToNew(false);
+    setToNew(true);
     setNewName(`${guardedRequest(item)?.repo}-restored`);
     setAsking(item);
   };
@@ -187,7 +194,7 @@ export function Waiting() {
     <>
       {asking && request && (
         <section role="group" aria-label="Confirm">
-          <p data-part="request">{asking.what}</p>
+          <p data-part="request">{shownItem(asking).what}</p>
           <p data-part="does">{confirmLine(request, into)}</p>
           {request.kind === "restore" && (
             <label>

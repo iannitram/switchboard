@@ -327,7 +327,7 @@ fn delete_with_no_data_folder_cannot_tell_and_writes_nothing() {
     let (code, err) = run(&["delete", "switchboard"], &s, &w);
     assert_eq!(
         err,
-        "switchboard: delete: set SWITCHBOARD_DATA to the app data folder\n"
+        "switchboard: archive: set SWITCHBOARD_DATA to the app data folder\n"
     );
     assert_eq!(code, ExitCode::from(1));
 }
