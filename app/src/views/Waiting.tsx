@@ -37,14 +37,47 @@ export function guardedText(item: WaitingItemData): string | null {
   return typeof text === "string" ? text : null;
 }
 
+// The action the core gives a restore request whose first confirm held something back
+// (confirm.rs `HELD_ACTION`): its confirm only does what was held back.
+export const HELD_ACTION = "Queue what the restore held back";
+
+export type GuardedRequest = { kind: "archive" | "restore" | "held"; repo: string };
+
+// What a guarded request asks for and on which repo, as the core reads it back (confirm.rs
+// `guarded_request`): the text ends in ` to delete <owner/name>` or ` to restore over
+// <owner/name>` and the link is that repo's GitHub address. Null for anything else. A delete
+// request archives the repo; Switchboard never deletes one (#347).
+export function guardedRequest(item: WaitingItemData): GuardedRequest | null {
+  const text = guardedText(item);
+  const found = text === null ? null : /^.* to (delete|restore over) ([A-Za-z0-9._-]+\/[A-Za-z0-9._-]+)$/.exec(text);
+  if (!found || item.link !== `https://github.com/${found[2]}`) return null;
+  const kind = found[1] === "delete" ? "archive" : item.action === HELD_ACTION ? "held" : "restore";
+  return { kind, repo: found[2] };
+}
+
+// What Confirm does, in the confirm step.
+export function confirmLine(request: GuardedRequest): string {
+  switch (request.kind) {
+    case "archive":
+      return `Confirm archives ${request.repo} on GitHub: it becomes read-only. Nothing is deleted.`;
+    case "restore":
+      return `Confirm restores the backup over ${request.repo} on GitHub now: the backup's branches and tags are pushed over the live ones, and the labels, milestones, issues and comments it lacks are created.`;
+    case "held":
+      return `Confirm only queues what the restore over ${request.repo} held back (comments, closes). Nothing is pushed again.`;
+  }
+}
+
 // The Waiting on you view (feature:waiting, SPEC.md). Asks the core once; a core error shows in
 // place of the list (SHELL-3). The action of a guarded request (a repo delete or a restore over
-// a live repo asked for from the CLI or MCP) opens the confirm step; only its Confirm button
-// sends `confirmed: true` to the core, and Cancel sends nothing (CORE-3, #347).
+// a live repo asked for from the CLI or MCP) opens the confirm step. Its Confirm button is
+// enabled only while the box holds the repo's `owner/name`, letter for letter; only it sends
+// `confirmed: true`, with the name typed, and the core checks the name again. Cancel sends
+// nothing (CORE-3, #347).
 export function Waiting() {
   const [items, setItems] = useState<WaitingItemData[]>([]);
   const [error, setError] = useState<CoreError | null>(null);
   const [asking, setAsking] = useState<WaitingItemData | null>(null);
+  const [typed, setTyped] = useState("");
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState<ConfirmDone | null>(null);
   const [refused, setRefused] = useState<CoreError | null>(null);
@@ -73,20 +106,25 @@ export function Waiting() {
   }, [read]);
 
   const ask = (item: WaitingItemData) => {
-    if (busy || guardedText(item) === null) return;
+    if (busy || guardedRequest(item) === null) return;
     setDone(null);
     setRefused(null);
+    setTyped("");
     setAsking(item);
   };
 
+  const request = asking && guardedRequest(asking);
+  const matches = !!request && typed === request.repo;
+
   const confirm = async () => {
     const text = asking && guardedText(asking);
-    if (!text || busy) return;
+    if (!text || busy || !matches) return;
     setBusy(true);
-    const res = await call<ConfirmDone>("confirm_guarded", { text, confirmed: true });
+    const res = await call<ConfirmDone>("confirm_guarded", { text, confirmed: true, typed });
     if (!live.current) return;
     setBusy(false);
     setAsking(null);
+    setTyped("");
     if ("error" in res) {
       setRefused(res.error);
     } else {
@@ -107,14 +145,26 @@ export function Waiting() {
   }
   return (
     <>
-      {asking && (
+      {asking && request && (
         <section role="group" aria-label="Confirm">
           <p data-part="request">{asking.what}</p>
-          <p>Confirm does it now, on the live repo on GitHub. Cancel leaves the request waiting.</p>
+          <p data-part="does">{confirmLine(request)}</p>
+          <p>Cancel leaves the request waiting.</p>
+          <label>
+            Type {request.repo} to confirm
+            <input
+              type="text"
+              value={typed}
+              disabled={busy}
+              autoComplete="off"
+              spellCheck={false}
+              onChange={(e) => setTyped(e.target.value)}
+            />
+          </label>
           <button type="button" disabled={busy} onClick={() => setAsking(null)}>
             Cancel
           </button>
-          <button type="button" disabled={busy} onClick={() => void confirm()}>
+          <button type="button" disabled={busy || !matches} onClick={() => void confirm()}>
             Confirm
           </button>
         </section>

@@ -24,6 +24,7 @@ pub mod it;
 pub mod joblog;
 pub mod lock;
 pub mod platform;
+pub mod renumber;
 pub mod reports;
 pub mod rules;
 pub mod settings;

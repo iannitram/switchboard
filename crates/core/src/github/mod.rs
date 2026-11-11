@@ -1,8 +1,10 @@
 //! `github`: GitHub reads and writes. 1.0 reads GitHub in code (GH-1); no agent scans.
 //! Reads are GraphQL, with a REST conditional request and the stored ETag to skip an
 //! unchanged repo (GH-2). Creates go through the pipeline's create queue (GH-4); merges only
-//! through `merge_pr.py` (GH-5).
+//! through `merge_pr.py` (GH-5). A repo is archived, never deleted, after my confirm in the app
+//! (`archive`, #347).
 
+pub mod archive;
 pub mod live;
 pub mod merge;
 pub mod poll;
