@@ -24,21 +24,40 @@ exit 0
 """
 
 
-def run(*args, target=None, fake_target=None):
+# A stand-in for cargo: `cargo metadata` names $FAKE_METADATA_TARGET, or fails when it is unset.
+FAKE_CARGO = """#!/usr/bin/env bash
+if [ "$1" = "metadata" ] && [ -n "${FAKE_METADATA_TARGET:-}" ]; then
+  printf '{"packages":[],"target_directory":"%s","version":1}\\n' "$FAKE_METADATA_TARGET"
+  exit 0
+fi
+exit 101
+"""
+
+
+def run(*args, target=None, fake_target=None, metadata_target=None, cwd=None):
     with tempfile.TemporaryDirectory() as tmp:
         bin_dir = Path(tmp) / "bin"
         bin_dir.mkdir()
-        npm = bin_dir / "npm"
-        npm.write_text(FAKE_NPM, encoding="utf-8")
-        npm.chmod(npm.stat().st_mode | stat.S_IXUSR)
+        for name, text in (("npm", FAKE_NPM), ("cargo", FAKE_CARGO)):
+            tool = bin_dir / name
+            tool.write_text(text, encoding="utf-8")
+            tool.chmod(tool.stat().st_mode | stat.S_IXUSR)
         env = {k: v for k, v in os.environ.items() if k not in ("CARGO_TARGET_DIR", "CONTAINER_ID")}
         env["CONTAINER_ID"] = "craft-build"
         env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
         if target is not None:
             env["CARGO_TARGET_DIR"] = target
         env["FAKE_DEFAULT_TARGET"] = fake_target or str(Path(tmp) / "unused")
+        env.pop("FAKE_METADATA_TARGET", None)
+        if metadata_target is not None:
+            env["FAKE_METADATA_TARGET"] = metadata_target
         return subprocess.run(
-            ["bash", str(SCRIPT), *args], capture_output=True, text=True, timeout=60, env=env
+            ["bash", str(SCRIPT), *args],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env=env,
+            cwd=cwd,
         )
 
 
@@ -67,6 +86,30 @@ class TargetDir(unittest.TestCase):
             "no AppImage under /nonexistent-target-dir-for-test/x/release/bundle/appimage",
             out.stderr,
         )
+
+    def test_a_relative_target_dir_is_taken_from_where_the_script_started(self):
+        with tempfile.TemporaryDirectory() as start:
+            out = run(target="rel-target", cwd=start)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertIn(
+                f"AppImage: {start}/rel-target/release/bundle/appimage/Switchboard_0.0.1_amd64.AppImage",
+                out.stdout,
+            )
+
+    def test_without_cargo_target_dir_it_uses_the_folder_cargo_reports(self):
+        with tempfile.TemporaryDirectory() as target:
+            out = run(fake_target=target, metadata_target=target)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertIn(
+                f"AppImage: {target}/release/bundle/appimage/Switchboard_0.0.1_amd64.AppImage",
+                out.stdout,
+            )
+
+    def test_without_cargo_target_dir_or_metadata_it_looks_under_the_root_target(self):
+        # cargo metadata fails, so the script looks in <root>/target, where the fake npm built nothing.
+        out = run()
+        self.assertEqual(out.returncode, 1)
+        self.assertIn(f"no AppImage under {HERE.parent}/target/release/bundle/appimage", out.stderr)
 
 
 if __name__ == "__main__":

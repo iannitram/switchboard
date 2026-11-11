@@ -890,3 +890,49 @@ fn http_files_streams_to_disk_and_leaves_nothing_on_failure() {
     assert_eq!(names(&dir), ["app.zip"]);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A file source that writes part of a file to the path it is given, then fails or panics.
+struct HalfThenStop {
+    panic: bool,
+    wrote: Mutex<Vec<PathBuf>>,
+}
+
+impl FileSource for HalfThenStop {
+    fn fetch(&self, _url: &str) -> Result<Vec<u8>, CoreError> {
+        unreachable!("fetch_into streams through fetch_to")
+    }
+
+    fn fetch_to(&self, _url: &str, dest: &Path) -> Result<u64, CoreError> {
+        std::fs::write(dest, b"half").unwrap();
+        self.wrote.lock().unwrap().push(dest.to_path_buf());
+        if self.panic {
+            panic!("the download thread died");
+        }
+        Err(CoreError::GitHub("connection reset".to_string()))
+    }
+}
+
+/// #433: the temporary file a release file streams into is removed when the fetch fails and
+/// when it panics, so nothing half-written is left beside the backup.
+#[test]
+fn a_release_file_that_fails_or_panics_leaves_no_temp_file() {
+    use switchboard_core::backup::fetch_release_files;
+    let releases = [json!({"tag_name": "v1", "assets": [
+        {"name": "app.zip", "size": 9, "browser_download_url": "https://example.invalid/app.zip"}
+    ]})];
+    for panic in [false, true] {
+        let dir = scratch(if panic { "temp-panic" } else { "temp-error" });
+        let files = HalfThenStop {
+            panic,
+            wrote: Mutex::new(Vec::new()),
+        };
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            fetch_release_files(&releases, &files, &dir)
+        }));
+        assert_eq!(outcome.is_err(), panic);
+        let wrote = files.wrote.lock().unwrap().clone();
+        assert_eq!(wrote.len(), 1);
+        assert!(!wrote[0].exists(), "{} was left", wrote[0].display());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

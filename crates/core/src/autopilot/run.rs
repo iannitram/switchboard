@@ -394,7 +394,7 @@ fn merge_report(env: &RunEnv<'_>) -> PassReport {
         report.fail("waiting", e);
     }
     // #433: a refused PR that dropped off the poll's 50 is looked up on its own.
-    if let Err(e) = clear_vanished_merges(env.data_dir, &snaps, env.transport) {
+    if let Err(e) = clear_vanished_merges(env.data_dir, &snaps, env.transport, env.clock.now()) {
         report.fail("waiting", e);
     }
     report.merged = merged_rows(pass.merged);

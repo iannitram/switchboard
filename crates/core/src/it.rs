@@ -109,7 +109,8 @@ fn last_errors(out: &str) -> Vec<String> {
 }
 
 /// IT-W: how long one probe may run before it is killed (#339). A probe that runs out of time
-/// has no exit code, so the loadout shows it as not signed in, left out, or not busy.
+/// has no exit code, so the loadout leaves it out or shows it not busy; a sign-in probe that
+/// ran out of time is listed in `timed_out` ("could not check", #433), never as signed in.
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// IT-W: the real probe runner. It runs the probe's program with its args, stdin and stderr

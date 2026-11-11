@@ -274,6 +274,28 @@ fn temp_beside(path: &Path) -> std::path::PathBuf {
     path.with_file_name(format!(".{name}.{}.{n}.{nanos}.part", std::process::id()))
 }
 
+/// A temporary file removed when the guard drops (an error return or a panic) unless `keep`
+/// was called once it was renamed into place.
+struct TempFile(Option<std::path::PathBuf>);
+
+impl TempFile {
+    fn path(&self) -> &Path {
+        self.0.as_deref().unwrap_or(Path::new(""))
+    }
+
+    fn keep(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
 /// A tag or file name as one safe path part: `/` and `\` become `_`, and a result that is
 /// empty, `.` or `..` becomes `_`.
 fn safe_part(text: &str) -> String {
@@ -320,20 +342,18 @@ fn fetch_into(
             std::fs::create_dir_all(&dir).map_err(|e| io_error(&dir, e))?;
             let path = dir.join(safe_part(name));
             // The file streams to a temporary file, which is removed whatever happens.
-            let tmp = temp_beside(&path);
-            let landed = files.fetch_to(url, &tmp).and_then(|len| {
-                // A download cut short must not be kept as if it were the whole file.
-                match asset["size"].as_u64() {
-                    Some(size) if len != size => Err(CoreError::GitHub(format!(
+            let tmp = TempFile(Some(temp_beside(&path)));
+            let len = files.fetch_to(url, tmp.path())?;
+            // A download cut short must not be kept as if it were the whole file.
+            if let Some(size) = asset["size"].as_u64() {
+                if len != size {
+                    return Err(CoreError::GitHub(format!(
                         "release {tag}: {name} came as {len} bytes, the release says {size}"
-                    ))),
-                    _ => std::fs::rename(&tmp, &path).map_err(|e| io_error(&path, e)),
+                    )));
                 }
-            });
-            if landed.is_err() {
-                let _ = std::fs::remove_file(&tmp);
             }
-            landed?;
+            std::fs::rename(tmp.path(), &path).map_err(|e| io_error(&path, e))?;
+            tmp.keep();
             count += 1;
         }
     }
@@ -610,12 +630,11 @@ impl HttpFiles {
 
 impl FileSource for HttpFiles {
     fn fetch(&self, url: &str) -> Result<Vec<u8>, CoreError> {
-        let tmp = temp_beside(&std::env::temp_dir().join("switchboard-release-file"));
-        let result = self
-            .fetch_to(url, &tmp)
-            .and_then(|_| std::fs::read(&tmp).map_err(|e| io_error(&tmp, e)));
-        let _ = std::fs::remove_file(&tmp);
-        result
+        let tmp = TempFile(Some(temp_beside(
+            &std::env::temp_dir().join("switchboard-release-file"),
+        )));
+        self.fetch_to(url, tmp.path())?;
+        std::fs::read(tmp.path()).map_err(|e| io_error(tmp.path(), e))
     }
 
     fn fetch_to(&self, url: &str, dest: &Path) -> Result<u64, CoreError> {
@@ -630,16 +649,13 @@ impl FileSource for HttpFiles {
         }
         let answer = request.call().map_err(|e| failed(e.to_string()))?;
         let mut reader = std::io::Read::take(answer.into_reader(), RELEASE_FILE_LIMIT);
+        // A file cut short by an error or a panic is removed; a whole one is kept.
         let mut file = std::fs::File::create(dest).map_err(|e| io_error(dest, e))?;
-        let copied = std::io::copy(&mut reader, &mut file).map_err(|e| failed(e.to_string()));
-        match copied {
-            Ok(n) => Ok(n),
-            Err(e) => {
-                drop(file);
-                let _ = std::fs::remove_file(dest);
-                Err(e)
-            }
-        }
+        let partial = TempFile(Some(dest.to_path_buf()));
+        let n = std::io::copy(&mut reader, &mut file).map_err(|e| failed(e.to_string()))?;
+        drop(file);
+        partial.keep();
+        Ok(n)
     }
 }
 

@@ -619,11 +619,62 @@ fn a_refused_item_whose_pr_left_the_poll_is_looked_up_and_cleared_when_settled()
         ],
         log: Mutex::new(Vec::new()),
     };
-    let cleared = clear_vanished_merges(&data, &snaps, &t).unwrap();
+    let cleared = clear_vanished_merges(&data, &snaps, &t, 0).unwrap();
     assert_eq!(cleared, [("o/r".to_string(), 1), ("o/r".to_string(), 2)]);
     let left: Vec<String> = local.load().unwrap().into_iter().map(|i| i.what).collect();
     assert_eq!(left, ["Merge o/r#3", "Merge o/r#4", "Merge o/r#5"]);
     let log = t.log.lock().unwrap().clone();
     assert_eq!(log.len(), 4);
     assert!(!log.iter().any(|l| l.ends_with("/pulls/5")));
+}
+
+/// #433: no lookup storm: with more vanished items than `VANISHED_LOOKUPS_PER_PASS`, one pass
+/// looks up that many, and the next minute's pass looks up the next ones, round the list.
+#[test]
+fn vanished_lookups_are_bounded_per_pass_and_reach_every_item_in_turn() {
+    use switchboard_core::autopilot::passes::{clear_vanished_merges, VANISHED_LOOKUPS_PER_PASS};
+    assert_eq!(VANISHED_LOOKUPS_PER_PASS, 5);
+    let w = world("vanished-many");
+    let data = w.pipeline.join("data");
+    let all: Vec<RefusedMerge> = (1..=7).map(|n| refused("o/r", n)).collect();
+    record_refused_merges(&data, &all, 100).unwrap();
+    // Every PR is still open, so nothing clears and each pass asks again.
+    let t = Lookup {
+        pulls: (1..=7)
+            .map(|n| {
+                (
+                    format!("/repos/o/r/pulls/{n}"),
+                    Ok(json!({ "state": "open" })),
+                )
+            })
+            .collect(),
+        log: Mutex::new(Vec::new()),
+    };
+    let asked = |now: i64| {
+        t.log.lock().unwrap().clear();
+        assert!(clear_vanished_merges(&data, &[], &t, now)
+            .unwrap()
+            .is_empty());
+        let mut prs: Vec<u64> = t
+            .log
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|l| l.rsplit('/').next().unwrap().parse().unwrap())
+            .collect();
+        prs.sort_unstable();
+        prs
+    };
+    assert_eq!(asked(0), [1, 2, 3, 4, 5]);
+    assert_eq!(
+        asked(59),
+        [1, 2, 3, 4, 5],
+        "the same minute asks the same ones"
+    );
+    assert_eq!(
+        asked(60),
+        [1, 2, 3, 6, 7],
+        "the next minute moves on, round the list"
+    );
+    assert_eq!(asked(120), [1, 4, 5, 6, 7]);
 }

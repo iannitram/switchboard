@@ -791,15 +791,18 @@ pub fn clear_settled_merges(
 /// #433: the poll reads only the 50 most recently updated PRs, so a refused PR that drops off
 /// that list never shows as merged or closed in a snapshot. Look up, one by one through
 /// `transport`, each Waiting merge item whose PR is in no snapshot, and take out the ones that
-/// merged or closed. A lookup that fails or answers anything else leaves the item. Answers the
-/// PRs cleared, as `(repo, pr)`; with none, nothing is written.
+/// merged or closed. A lookup that fails or answers anything else leaves the item. At most
+/// `VANISHED_LOOKUPS_PER_PASS` are looked up per pass; with more, the window of items looked up
+/// moves on each minute of `now`, so every one is reached in turn. Answers the PRs cleared, as
+/// `(repo, pr)`; with none, nothing is written.
 pub fn clear_vanished_merges(
     data_dir: &Path,
     snaps: &[RepoSnapshot],
     transport: &dyn GitHubTransport,
+    now: UnixSeconds,
 ) -> Result<Vec<(String, u64)>, CoreError> {
     let local = LocalItems::new(data_dir);
-    let mut cleared = Vec::new();
+    let mut vanished: Vec<(Source, String, u64)> = Vec::new();
     for item in local.load()? {
         let Source::GuardedAction { text } = &item.source else {
             continue;
@@ -807,27 +810,45 @@ pub fn clear_vanished_merges(
         let Some((repo, pr)) = text
             .strip_prefix("Merge ")
             .and_then(|rest| rest.rsplit_once('#'))
-            .and_then(|(repo, n)| Some((repo, n.parse::<u64>().ok()?)))
+            .and_then(|(repo, n)| Some((repo.to_string(), n.parse::<u64>().ok()?)))
         else {
             continue;
         };
         let polled = snaps
             .iter()
             .any(|s| s.repo == repo && s.pulls.iter().any(|p| p.number == pr));
-        if polled {
-            continue;
+        if !polled {
+            vanished.push((item.source.clone(), repo, pr));
         }
+    }
+    let count = vanished.len();
+    let start = if count > VANISHED_LOOKUPS_PER_PASS {
+        let minute = usize::try_from(now.max(0) / 60).unwrap_or(0);
+        minute.wrapping_mul(VANISHED_LOOKUPS_PER_PASS) % count
+    } else {
+        0
+    };
+    let mut cleared = Vec::new();
+    for (source, repo, pr) in vanished
+        .into_iter()
+        .cycle()
+        .skip(start)
+        .take(count.min(VANISHED_LOOKUPS_PER_PASS))
+    {
         let path = format!("/repos/{repo}/pulls/{pr}");
         let settled = matches!(
             transport.rest_get(&path, None),
             Ok(a) if a.status == 200 && a.body["state"].as_str() == Some("closed")
         );
-        if settled && local.remove(&item.source)? {
-            cleared.push((repo.to_string(), pr));
+        if settled && local.remove(&source)? {
+            cleared.push((repo, pr));
         }
     }
     Ok(cleared)
 }
+
+/// #433: how many PRs `clear_vanished_merges` looks up in one pass at most.
+pub const VANISHED_LOOKUPS_PER_PASS: usize = 5;
 
 /// Write `job` and its brief for `fleet run`: the brief to `<jobs_dir>/<id>.md`, the job to
 /// `<jobs_dir>/<id>.json` with `prompt_file` and `clone` (`<dev_root>/<name>`) set. Answers
