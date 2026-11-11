@@ -107,6 +107,7 @@ fn autopilot_after_poll(
         dev_root: dev_root.clone(),
         machine: machine.clone(),
         qwen_probe: Box::new(passes::http_qwen_probe),
+        retry_wait: passes::PM_RETRY_WAIT,
     };
     let env = run::RunEnv {
         data_dir: data,

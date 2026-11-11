@@ -159,7 +159,7 @@ pub fn now_ms() -> i64 {
 /// Is process `pid` running, and (with a token) the same process that had `token`?
 pub fn alive(pid: u32, token: Option<&str>) -> bool {
     match process_token(pid) {
-        Some(now) => token.is_none_or(|want| want == now),
+        Some(now) => token.map_or(true, |want| want == now),
         None => false,
     }
 }

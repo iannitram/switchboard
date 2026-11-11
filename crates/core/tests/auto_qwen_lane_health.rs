@@ -58,6 +58,7 @@ fn starter(fleet: FleetBridge, up: bool, asked: Arc<AtomicUsize>) -> FleetStarte
         dev_root: std::env::temp_dir(),
         machine: Some("box".to_string()),
         qwen_probe: probe,
+        retry_wait: std::time::Duration::ZERO,
     }
 }
 

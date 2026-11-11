@@ -194,6 +194,7 @@ impl<'a> Headless<'a> {
             dev_root: dev_root.clone(),
             machine: self.machine.clone(),
             qwen_probe: Box::new(passes::http_qwen_probe),
+            retry_wait: passes::PM_RETRY_WAIT,
         };
         let transport = (self.transport)();
         let env = RunEnv {

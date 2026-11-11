@@ -357,7 +357,7 @@ fn a_refusal_in_one_repo_does_not_stop_the_repos_after_it() {
         ]
     );
     assert_eq!(reads, vec!["owner/second", "owner/third"]);
-    let mut tried: Vec<String> = calls(&w.stub_dir)
+    let tried: Vec<String> = calls(&w.stub_dir)
         .iter()
         .map(|args| args[args.iter().position(|a| a == "--pr").unwrap() + 1].clone())
         .collect();
