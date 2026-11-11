@@ -2,7 +2,8 @@
 //! `ask "<text>" [--dry-run] [--thread <id>]` routes one message and answers it
 //! (`frontdoor::ask::ask_headless`); `--dry-run` prints the route and its reason and sends,
 //! stores and spends nothing, so it needs no role. `ask_as_job <kind> "<text>" --unmet
-//! <need>[,<need>]` is the Chat view's "Send as a fleet job" (`ask::send_as_job`); `rate
+//! <need>[,<need>] [--thread <id>]` is the Chat view's "Send as a fleet job"
+//! (`ask::send_as_job`; with `--thread` the job carries that chat's packet, FD-6); `rate
 //! <thread> <turn> <up|down>` is its thumbs (`rating_log::rate_turn`). The three writes go
 //! through `rules::guard_front_door`: the project-manager role, never in a job worktree.
 //! A bad line is exit 2 with the usage; a refusal or a core error is its text on stderr, exit 1.
@@ -20,8 +21,8 @@ use switchboard_core::rules::{self, Caller, Verdict};
 
 use super::{data_or_fail, emit_to, pipeline_or_fail, refuse, terminal_safe, Fail, USAGE};
 
-/// The front door's flags taken out of `argv`: `ask`'s `--dry-run` and `--thread <id>`,
-/// `ask_as_job`'s `--unmet <need>[,<need>]`.
+/// The front door's flags taken out of `argv`: `ask`'s `--dry-run`, `ask` and `ask_as_job`'s
+/// `--thread <id>`, `ask_as_job`'s `--unmet <need>[,<need>]`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Flags {
     pub dry_run: bool,
@@ -58,7 +59,9 @@ pub fn take_flags(argv: &[String]) -> Result<(Flags, Vec<String>), String> {
 
 /// The usage error for a front door flag given to a command it is not for.
 pub fn misplaced(flags: &Flags, command: Option<&str>) -> Option<&'static str> {
-    if (flags.dry_run || flags.thread.is_some()) && command != Some("ask") {
+    // `--thread` also names the chat `ask_as_job` sends (FD-6).
+    let for_ask = flags.dry_run && command != Some("ask");
+    if for_ask || (flags.thread.is_some() && !matches!(command, Some("ask" | "ask_as_job"))) {
         return Some("--dry-run and --thread are for ask");
     }
     if flags.unmet.is_some() && command != Some("ask_as_job") {
@@ -79,6 +82,7 @@ enum Call {
         kind: String,
         request: String,
         unmet: Vec<String>,
+        thread: Option<String>,
     },
     Rate {
         thread: String,
@@ -114,6 +118,7 @@ fn call_from(words: &[String], flags: &Flags) -> Result<Call, String> {
                 kind: kind.clone(),
                 request: request.clone(),
                 unmet,
+                thread: flags.thread.clone(),
             })
         }
         ("ask_as_job", _) => Err("ask_as_job needs <kind> \"<text>\"".to_string()),
@@ -176,8 +181,10 @@ fn ask_text(asked: &Asked) -> String {
             lines.push(format!("{name}: {}", terminal_safe(value)));
         }
     };
+    line("fallback", &reply.fallback);
     line("thread", &reply.handoff_id);
     line("moved from", &reply.moved_from);
+    line("moved because", &reply.moved_why);
     line("queued", &reply.queued);
     line("handoff", &reply.handoff);
     for (name, body) in [("packet", &reply.packet), ("answer", &reply.text)] {
@@ -210,9 +217,15 @@ fn run_call(call: &Call) -> Result<(String, Value), Fail> {
             kind,
             request,
             unmet,
+            thread,
         } => {
             let fleet = FleetBridge::new(&pipeline_or_fail()?);
-            let job = ask::send_as_job(&fleet, kind, request, unmet)
+            let data = match thread {
+                Some(_) => Some(data_or_fail()?),
+                None => None,
+            };
+            let chat = data.as_deref().zip(thread.as_deref());
+            let job = ask::send_as_job(&fleet, kind, request, unmet, chat)
                 .map_err(|e| core("ask_as_job", e))?;
             let text = terminal_safe(&format!(
                 "ask_as_job: queued {kind} for another machine (needs {})",

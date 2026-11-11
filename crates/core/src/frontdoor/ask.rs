@@ -4,7 +4,7 @@
 
 use super::adapters::{ChatTransport, HttpChatTransport};
 use super::answer::{self, AnswerContext, ChatReply};
-use super::chat::{self, ChatRoute};
+use super::chat;
 use super::labeller::SmallLabeller;
 use super::router;
 use super::thread::ThreadStore;
@@ -33,25 +33,15 @@ pub struct Seams<'a> {
     pub env: &'a dyn Fn(&str) -> Option<String>,
     /// Makes a transport for one call.
     pub transport: &'a dyn Fn() -> Box<dyn ChatTransport>,
+    /// FD-3 (#377): whether the local Qwen server answers now, asked with the fleet config's
+    /// `qwen_server_url` for this machine.
+    pub qwen_up: &'a dyn Fn(&str) -> bool,
 }
 
-/// A reply that is the route alone.
-fn route_alone(route: ChatRoute) -> ChatReply {
-    ChatReply {
-        route,
-        handoff_id: None,
-        text: None,
-        service: None,
-        model: None,
-        handoff: None,
-        queued: None,
-        moved_from: None,
-        packet: None,
-    }
-}
-
-/// `ask` over its seams. The route is `chat::route_in_thread_on` with the real router; unless
-/// `dry_run`, `answer::answer_route` then answers it and stores the turn.
+/// `ask` over its seams. The route is `chat::route_in_thread_on` with the real router; a wait
+/// for budget then falls back to the local Qwen lane when it is up (`chat::qwen_fallback_on`,
+/// FD-3). Unless `dry_run`, `answer` then answers it and stores the turn; a dry run's reply is
+/// the route (and the fallback's reason) alone.
 pub fn ask_on(
     fleet: &FleetBridge,
     data_dir: &Path,
@@ -71,11 +61,16 @@ pub fn ask_on(
             router::route(message, index, gate, complexity, seams.small)
         },
     )?;
+    let fallback = chat::qwen_fallback_on(fleet, seams.machine, &route, seams.qwen_up)?;
     if dry_run {
-        return Ok(Asked {
-            reply: route_alone(route),
-            dry_run,
-        });
+        let reply = match fallback {
+            Some(fallback) => ChatReply {
+                fallback: Some(fallback.reason),
+                ..answer::route_alone(fallback.route)
+            },
+            None => answer::route_alone(route),
+        };
+        return Ok(Asked { reply, dry_run });
     }
     let qwen = answer::qwen_base_url(fleet, seams.machine);
     let ctx = AnswerContext {
@@ -84,7 +79,12 @@ pub fn ask_on(
         env: seams.env,
         transport: seams.transport,
     };
-    let reply = answer::answer_route(route, message, handoff_id, &ctx)?;
+    let reply = match fallback {
+        Some(fallback) => {
+            answer::answer_fallback(fallback.route, &fallback.reason, message, handoff_id, &ctx)?
+        }
+        None => answer::answer_route(route, message, handoff_id, &ctx)?,
+    };
     Ok(Asked { reply, dry_run })
 }
 
@@ -109,6 +109,7 @@ pub fn ask(
         small: small.as_ref().map(|s| s as &dyn SmallLabeller),
         env: &env,
         transport: &transport,
+        qwen_up: &crate::autopilot::passes::http_qwen_probe,
     };
     ask_on(fleet, data_dir, message, handoff_id, dry_run, &seams)
 }
@@ -139,17 +140,42 @@ pub fn ask_headless(
 
 /// FD-12: send a held request as a fleet job another machine pulls (`it::send_held_job`), from
 /// this machine: its name is `FLEET_MACHINE`, else the machine file under the home folder
-/// (`it::this_machine`).
+/// (`it::this_machine`). With `thread` (the app data folder and the chat's handoff id) the job
+/// carries the chat's packet and the move is stored (`answer::send_thread_as_job`, FD-6);
+/// without one the request goes as it is.
 pub fn send_as_job(
     fleet: &FleetBridge,
     kind: &str,
     request: &str,
     unmet: &[String],
+    thread: Option<(&Path, &str)>,
 ) -> Result<serde_json::Value, CoreError> {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_default();
     let env_name = std::env::var("FLEET_MACHINE").ok();
     let machine = crate::it::this_machine(env_name.as_deref(), &home).unwrap_or_default();
-    crate::it::send_held_job(fleet, kind, request, unmet, &machine)
+    let mut send = |text: &str| crate::it::send_held_job(fleet, kind, text, unmet, &machine);
+    let Some((data_dir, handoff_id)) = thread else {
+        return send(request);
+    };
+    let qwen = answer::qwen_base_url(fleet, FleetModels::local_machine().as_deref());
+    let env = |name: &str| std::env::var(name).ok();
+    let transport = || -> Box<dyn ChatTransport> { Box::new(HttpChatTransport::new()) };
+    let ctx = AnswerContext {
+        data_dir,
+        qwen_base_url: qwen.as_deref(),
+        env: &env,
+        transport: &transport,
+    };
+    answer::send_thread_as_job(handoff_id, kind, request, &job_why(unmet), &ctx, &mut send)
+}
+
+/// Why a chat sent as a fleet job moved, for its work-tree line.
+pub fn job_why(unmet: &[String]) -> String {
+    if unmet.is_empty() {
+        "I sent it as a fleet job".to_string()
+    } else {
+        format!("I sent it as a fleet job (needs {})", unmet.join(", "))
+    }
 }

@@ -61,6 +61,7 @@ impl WriteCore for FakeWrite {
                 kind,
                 request,
                 unmet,
+                ..
             } => format!("ask_as_job {kind} {request:?} unmet={unmet:?}"),
             Call::Rate {
                 thread,

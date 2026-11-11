@@ -19,7 +19,8 @@ const ASK: &str = "what is a worktree";
 const ANSWER: &str = "A second checkout of one repo.";
 
 /// Logs each call (argv, and the stdin of `attach`) to `calls.log` beside `tools/`; `actions`
-/// prints the fixture's index, `budget` exits STUB_BUDGET_EXIT, `attach` STUB_ATTACH_EXIT.
+/// prints the fixture's index, `budget` exits STUB_BUDGET_EXIT (75 for a lane in STUB_BRAKED),
+/// `attach` STUB_ATTACH_EXIT.
 const FLEET: &str = r#"import json, os, pathlib, sys
 root = pathlib.Path(__file__).resolve().parent.parent.parent
 argv = sys.argv[1:]
@@ -30,6 +31,8 @@ if argv[:1] == ["actions"]:
     sys.stdout.write((root / "answers" / "actions.json").read_text(encoding="utf-8"))
     sys.exit(0)
 if argv[:1] == ["budget"]:
+    if argv[2:3] and argv[2] in os.environ.get("STUB_BRAKED", "").split(","):
+        sys.exit(75)
     sys.exit(int(os.environ.get("STUB_BUDGET_EXIT", "0")))
 if argv[:1] == ["attach"]:
     sys.exit(int(os.environ.get("STUB_ATTACH_EXIT", "0")))
@@ -148,6 +151,7 @@ impl World {
             .env_remove("FLEET_ROOT")
             .env_remove("FLEET_STATE_DIR")
             .env_remove("STUB_BUDGET_EXIT")
+            .env_remove("STUB_BRAKED")
             .env_remove("STUB_ATTACH_EXIT")
             .stderr(Stdio::piped());
         for key in [
@@ -181,11 +185,23 @@ impl World {
 
     /// `switchboard [--role <role>] mcp` in `cwd`, fed `lines`; each reply.
     fn mcp(&self, role: Option<&str>, cwd: &Path, lines: &[Value]) -> Vec<Value> {
+        self.mcp_with(role, cwd, &[], lines)
+    }
+
+    /// `mcp` with more environment.
+    fn mcp_with(
+        &self,
+        role: Option<&str>,
+        cwd: &Path,
+        env: &[(&str, &str)],
+        lines: &[Value],
+    ) -> Vec<Value> {
         let mut argv = vec!["mcp"];
         if let Some(role) = role {
             argv.extend(["--role", role]);
         }
         let mut cmd = self.command(&argv, cwd);
+        cmd.envs(env.iter().copied());
         let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -715,6 +731,141 @@ fn ask_as_job_hands_fleet_the_held_job_on_stdin() {
         stdout(&out),
         "ask_as_job: queued code-change for another machine (needs web)\n"
     );
+}
+
+#[test]
+fn ask_as_job_with_a_thread_sends_the_chats_packet_and_stores_the_move() {
+    // #378 (FD-6): the CLI and MCP send a chat as a job through the same core call.
+    let w = world("job-thread");
+    let thread = w.ask();
+    let out = w.run(&pm(&[
+        "--json",
+        "ask_as_job",
+        "web-research",
+        "find the paper",
+        "--unmet",
+        "web",
+        "--thread",
+        &thread,
+    ]));
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    // The outgoing model (the stub) wrote the summary; the job's request is the packet, then
+    // the ask.
+    let request = format!(
+        "Summary\n{ANSWER}\n\nLast turns\nuser: {ASK}\nassistant: {ANSWER}\n\nLinks\n\n\nAsk\nfind the paper"
+    );
+    assert_eq!(json_out(&out)["request"], request.as_str());
+    let attached = w
+        .fleet_calls()
+        .into_iter()
+        .find(|(argv, _)| argv.starts_with("attach"))
+        .expect("the job was attached");
+    let job: Value = serde_json::from_str(&attached.1).unwrap();
+    assert_eq!(job["request"], request.as_str());
+    assert_eq!(job["kind"], "web-research");
+    let rows = w.rows(&thread);
+    let moved: Vec<&Value> = rows.iter().filter(|r| r["role"] == "move").collect();
+    assert_eq!(moved.len(), 1, "{rows:?}");
+    assert_eq!(moved[0]["moved_from"], format!("qwen {MODEL}"));
+    assert_eq!(moved[0]["lane"], "fleet-job");
+    assert_eq!(moved[0]["model"], "web-research");
+    assert_eq!(
+        moved[0]["moved_why"],
+        "I sent it as a fleet job (needs web)"
+    );
+
+    // MCP's `ask_as_job` takes the same thread.
+    let replies = w.mcp(
+        Some("project-manager"),
+        &w.cwd,
+        &[
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+                "name": "ask_as_job",
+                "arguments": {
+                    "kind": "web-research", "request": "and its data", "unmet": ["web"],
+                    "thread": thread
+                }
+            }}),
+        ],
+    );
+    let text = replies[0]["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{replies:?}"));
+    assert!(
+        text.contains("Ask\\nand its data") && text.contains("Summary\\n"),
+        "{text}"
+    );
+    let moves = w
+        .rows(&thread)
+        .iter()
+        .filter(|r| r["role"] == "move")
+        .count();
+    assert_eq!(moves, 2);
+
+    // A thread that is not stored is refused before fleet is called.
+    let before = w.fleet_calls().len();
+    let out = w.run(&pm(&[
+        "ask_as_job",
+        "web-research",
+        "find it",
+        "--unmet",
+        "web",
+        "--thread",
+        "chat-nope",
+    ]));
+    assert_refused(&out, "ask_as_job: refused: no thread chat-nope");
+    assert_eq!(w.fleet_calls().len(), before);
+}
+
+// --- the Qwen fallback (#377) ---
+
+#[test]
+fn an_ask_whose_pool_is_braked_is_answered_by_qwen_and_says_so() {
+    // "proofread" is a writing-editing ask: gemini, then the Claude API; no Qwen row.
+    const EDIT: &str = "proofread this note";
+    let w = world("fallback");
+    let braked = [("STUB_BRAKED", "gemini,claudeapi")];
+    let out = w.run_with(&pm(&["ask", EDIT]), &braked);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let text = stdout(&out);
+    let reason = "nothing else is in budget (waiting for budget: writing-editing), \
+                  so the local Qwen lane answers";
+    assert!(
+        text.starts_with(&format!(
+            "route: qwen {MODEL}\nreason: labeller, kind writing-editing\nfallback: {reason}\n"
+        )),
+        "{text}"
+    );
+    assert!(text.ends_with(&format!("answer:\n{ANSWER}\n")), "{text}");
+
+    // The same reply through MCP, and a dry run says where it would go.
+    let replies = w.mcp_with(
+        Some("project-manager"),
+        &w.cwd,
+        &braked,
+        &[
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+                "name": "ask", "arguments": { "message": EDIT, "dry_run": true }
+            }}),
+        ],
+    );
+    let text = replies[0]["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{replies:?}"));
+    let reply: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(reply["fallback"], reason);
+    assert_eq!(reply["pick"]["service"], "qwen");
+    assert_eq!(reply["dry_run"], true);
+
+    // Qwen braked too: the ask is queued, as before.
+    let out = w.run_with(
+        &pm(&["--json", "ask", EDIT]),
+        &[("STUB_BRAKED", "gemini,claudeapi,qwen")],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let reply = json_out(&out);
+    assert_eq!(reply["queued"], "waiting for budget: writing-editing");
+    assert!(reply.get("fallback").is_none(), "{reply}");
 }
 
 #[test]

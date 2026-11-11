@@ -283,9 +283,35 @@ pub fn from_thread(thread_id: &str, rows: &[JobRow]) -> Report {
     }
 }
 
-/// REP-2: the moves of a thread, oldest first: one per change of service or model between
+/// The `role` of a front door thread's move row (`frontdoor::answer::MOVE_ROLE`).
+const MOVE_ROLE: &str = "move";
+
+/// REP-2: the moves of a thread, oldest first.
+///
+/// A front door thread (FD-13: its rows carry a `role`) has one line per move row (FD-5: "each
+/// move is a line in the work tree"): from the row's `moved_from`, to its `lane` and `model`,
+/// why its `moved_why`. Its questions, ratings and summary are not moves.
+///
+/// Any other rows (a job's attempts): one line per change of service or model between
 /// consecutive rows (implicit rows left out), with the earlier row's outcome as the `why`.
 pub fn moves(rows: &[JobRow]) -> Vec<Move> {
+    if rows.iter().any(|r| r.role.is_some()) {
+        let or_not = |v: Option<&str>| v.unwrap_or(NOT_RECORDED).to_string();
+        return rows
+            .iter()
+            .filter(|r| r.role.as_deref() == Some(MOVE_ROLE))
+            .map(|r| {
+                let from = r.moved_from.as_deref().and_then(|f| f.split_once(' '));
+                Move {
+                    from_service: or_not(from.map(|(service, _)| service)),
+                    from_model: or_not(from.map(|(_, model)| model)),
+                    to_service: or_not(r.lane.as_deref()),
+                    to_model: or_not(r.model.as_deref()),
+                    why: or_not(r.moved_why.as_deref()),
+                }
+            })
+            .collect();
+    }
     let kept: Vec<&JobRow> = rows.iter().filter(|r| !r.implicit).collect();
     let place = |r: &JobRow| (r.lane.clone(), r.model.clone());
     kept.windows(2)

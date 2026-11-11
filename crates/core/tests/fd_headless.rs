@@ -94,6 +94,7 @@ fn ask(
         small: None,
         env: &env,
         transport: &transport,
+        qwen_up: &|_| false,
     };
     let asked = ask_on(
         &fleet(dir),
