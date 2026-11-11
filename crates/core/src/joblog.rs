@@ -47,6 +47,19 @@ pub struct JobRow {
     pub role: Option<String>,
     /// FD-13: on a chat turn's row, the turn's text; None on every other row.
     pub text: Option<String>,
+    /// FD-5: on a chat's move row, the service and model the chat moved off, as
+    /// `<service> <model>` (the row's own `lane` and `model` are where it moved to); None on
+    /// every other row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moved_from: Option<String>,
+    /// FD-5: on a chat's move row, why the chat moved (the work tree's line, REP-2); None on
+    /// every other row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moved_why: Option<String>,
+    /// FD-3: on an answer the local Qwen lane gave because the picked pool was braked or over
+    /// budget, why; the chat is not moved by it. None on every other row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -137,6 +150,9 @@ pub fn row_from_ledger(event: &Value) -> JobRow {
         moved: None,
         role: None,
         text: None,
+        moved_from: None,
+        moved_why: None,
+        fallback: None,
     }
 }
 

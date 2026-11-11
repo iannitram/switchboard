@@ -379,3 +379,56 @@ mod tests {
         }
     }
 }
+
+/// FD-3 (#377): the local Qwen lane's answer to a wait.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fallback {
+    /// The waited route with the local Qwen model as its pick; its step and kind are kept.
+    pub route: ChatRoute,
+    /// Why Qwen answers, said plainly: what the route waited for.
+    pub reason: String,
+}
+
+/// FD-3 (#377): an ask whose picked pool is braked or over budget falls back to the local Qwen
+/// lane when that lane is up, and is queued only when Qwen is down too. `waited` is the route
+/// as the router left it; anything but a wait for budget is None (the route stands). A wait
+/// for Claude's budget stays a wait (FD-3: Claude is not swapped for another model without
+/// being asked), and so does an unknown kind. The Qwen lane is up when the fleet config names
+/// this machine's Qwen model and server, `fleet budget allow qwen` allows it, and the server
+/// answers `qwen_up` (asked with its `qwen_server_url`, as Autopilot's probe is). A fleet error from the budget check is the error.
+pub fn qwen_fallback_on(
+    fleet: &FleetBridge,
+    machine: Option<&str>,
+    waited: &ChatRoute,
+    qwen_up: &dyn Fn(&str) -> bool,
+) -> Result<Option<Fallback>, CoreError> {
+    let ChatPick::Wait { reason } = &waited.pick else {
+        return Ok(None);
+    };
+    if !reason.starts_with("waiting for budget") {
+        return Ok(None);
+    }
+    let Some((model, _)) = FleetModels::read_qwen_endpoint(fleet, machine) else {
+        return Ok(None);
+    };
+    let Some(url) = FleetModels::read_qwen_server_url(fleet, machine) else {
+        return Ok(None);
+    };
+    if !may_spend(fleet, QWEN)? || !qwen_up(&url) {
+        return Ok(None);
+    }
+    Ok(Some(Fallback {
+        route: ChatRoute {
+            step: waited.step.clone(),
+            kind: waited.kind.clone(),
+            pick: ChatPick::Service {
+                service: QWEN.to_string(),
+                model,
+            },
+        },
+        reason: format!("nothing else is in budget ({reason}), so the local Qwen lane answers"),
+    }))
+}
+
+/// The local lane's service name.
+const QWEN: &str = "qwen";

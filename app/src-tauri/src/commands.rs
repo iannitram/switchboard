@@ -589,16 +589,29 @@ pub fn backup_all(
 
 /// FD-12: send a held Chat request as a fleet job another machine pulls (the Chat view's
 /// "Send as a fleet job"). This machine's name comes from `FLEET_MACHINE` or the machine file.
+/// With `handoff_id` (the chat it is sent from) the job carries the chat's packet and the move
+/// is stored in the thread (FD-6).
 #[tauri::command]
 pub fn chat_send_as_job(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     kind: String,
     request: String,
     unmet: Vec<String>,
+    handoff_id: Option<String>,
 ) -> Result<serde_json::Value, FaceError> {
     bridge(&state.settings_path)
         .and_then(|fleet| {
-            switchboard_core::frontdoor::ask::send_as_job(&fleet, &kind, &request, &unmet)
+            let data = match &handoff_id {
+                Some(_) => Some(
+                    app.path()
+                        .app_data_dir()
+                        .map_err(|e| CoreError::Io(format!("app data dir: {e}")))?,
+                ),
+                None => None,
+            };
+            let chat = data.as_deref().zip(handoff_id.as_deref());
+            switchboard_core::frontdoor::ask::send_as_job(&fleet, &kind, &request, &unmet, chat)
         })
         .map_err(|e| {
             record_fleet_error(&state, &e);

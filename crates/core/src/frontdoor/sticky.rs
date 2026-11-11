@@ -171,7 +171,10 @@ pub fn handoff_step(reason: &str) -> String {
     format!("handoff: {reason}")
 }
 
-/// FD-5: the chat `handoff_id` is open on, or None when the thread has no answer yet.
+/// FD-5: the chat `handoff_id` is open on, or None when the thread has no answer yet. An
+/// answer the local Qwen lane gave as a fallback (FD-3: the picked pool was braked) is passed
+/// over: one fallback does not move the chat, and a chat that only has fallback answers is
+/// open on no model, so its next message is routed as a new chat's is.
 pub fn open_chat(store: &ThreadStore, handoff_id: &str) -> Result<Option<OpenChat>, CoreError> {
     let rows = store.read(handoff_id)?;
     let turns: Vec<&JobRow> = rows.iter().filter(|row| is_turn(row)).collect();
@@ -179,7 +182,7 @@ pub fn open_chat(store: &ThreadStore, handoff_id: &str) -> Result<Option<OpenCha
         .iter()
         .enumerate()
         .rev()
-        .find(|(_, row)| row.role.as_deref() == Some("assistant"))
+        .find(|(_, row)| row.role.as_deref() == Some("assistant") && row.fallback.is_none())
     else {
         return Ok(None);
     };

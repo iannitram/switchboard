@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Empty } from "./Empty";
 import { ErrorBanner } from "../ErrorBanner";
 import { PromptComposer } from "../brocrew/PromptComposer";
@@ -12,6 +12,12 @@ import { call, type CoreError, type CoreResult } from "../core";
 // route's pick is a Claude handoff; the press hands the packet's prompt to the shell's opener.
 // FD-9 (#179): each answer has a thumbs up and a thumbs down; a press calls `rate` (the core's
 // rating row) and marks the button; a failed call shows the banner and clears the mark.
+// FD-9 (#378): the view logs the implicit signals through `chat_implicit`: `opened-in-claude` on
+// the button's press, `re-asked` when a message is sent again word for word, `copied-answer` when
+// an answer's text is copied, and `abandoned` when the view closes on an answer that got no
+// rating. Each needs a stored thread; a failed log is not shown (it is not something I did).
+// FD-3 (#377): a reply the local Qwen lane gave because the picked pool was braked says so.
+// FD-5 (#378): a turn that moved the chat shows the move's line, as the work tree does.
 
 /** The router's pick, as the core names it (`Pick` in `router.rs`). */
 export type Pick =
@@ -60,9 +66,17 @@ export function ChatHandoff({ pick, prompt, openInClaude, logImplicit }: ChatHan
 /** FD-12: a request the route held because this machine's loadout misses some of its kind's needs. */
 export type Held = { kind: string; request: string; unmet: string[] };
 
-/** FD-12: queues the held request as a fleet job another machine pulls (`chat_send_as_job`). */
-export const sendAsJob = (held: Held): Promise<CoreResult<unknown>> =>
-  call<unknown>("chat_send_as_job", { kind: held.kind, request: held.request, unmet: held.unmet });
+/**
+ * FD-12: queues the held request as a fleet job another machine pulls (`chat_send_as_job`). With
+ * `handoffId` (the open chat's thread) the job carries the chat's packet (FD-6).
+ */
+export const sendAsJob = (held: Held, handoffId?: string): Promise<CoreResult<unknown>> =>
+  call<unknown>("chat_send_as_job", {
+    kind: held.kind,
+    request: held.request,
+    unmet: held.unmet,
+    ...(handoffId === undefined ? {} : { handoffId }),
+  });
 
 export type ChatHeldProps = { held: Held; send?: (held: Held) => Promise<CoreResult<unknown>> };
 
@@ -114,6 +128,10 @@ export type ChatRoute = {
   queued?: string;
   /** FD-6 (#378): this turn moved the chat off another model, named `<service> <model>`. */
   moved_from?: string;
+  /** FD-5 (#378): why the chat moved; with `moved_from` and the pick, the move's work-tree line. */
+  moved_why?: string;
+  /** FD-3 (#377): the picked pool was braked, so the local Qwen lane answered this turn; why. */
+  fallback?: string;
   /** FD-8 (#378): a Claude handoff that moved an open chat: the packet the Claude session starts from. */
   packet?: string;
 };
@@ -143,13 +161,40 @@ export type ChatRate = (args: ChatRating) => Promise<CoreResult<null>>;
 
 const defaultRate: ChatRate = (args) => call<null>("chat_rate", args);
 
+/** The implicit signals the core logs (FD-9; `Implicit::name` in `sticky.rs`). */
+export type ImplicitSignal = "opened-in-claude" | "re-asked" | "abandoned" | "copied-answer";
+
+/** What an implicit signal sends: the thread, the signal, and the answer it is about. */
+export type ChatImplicitArgs = { handoffId: string; signal: ImplicitSignal; service?: string; model?: string; kind?: string };
+
+/** Logs an implicit signal (FD-9). Default: the `chat_implicit` command. */
+export type ChatImplicit = (args: ChatImplicitArgs) => Promise<CoreResult<null>>;
+
+const defaultImplicit: ChatImplicit = (args) => call<null>("chat_implicit", args);
+
+/** FD-5: the move a reply made, as the work tree writes a line: `from → to: why`. Null: no move. */
+export function moveLine(route: ChatRoute): string | null {
+  if (!route.moved_from) return null;
+  const pick = route.pick;
+  const to = pick?.to === "service" ? `${pick.service}/${pick.model}` : pick?.to === "claude-handoff" ? "claude" : "not recorded";
+  return `${route.moved_from.replace(" ", "/")} → ${to}: ${route.moved_why ?? "not recorded"}`;
+}
+
 export function Chat({
   handoff,
   held,
   send = defaultSend,
   rate = defaultRate,
+  implicit = defaultImplicit,
   resolveLink,
-}: { handoff?: ChatHandoffProps; held?: Held; send?: ChatSend; rate?: ChatRate; resolveLink?: ResolveMessageLink } = {}) {
+}: {
+  handoff?: ChatHandoffProps;
+  held?: Held;
+  send?: ChatSend;
+  rate?: ChatRate;
+  implicit?: ChatImplicit;
+  resolveLink?: ResolveMessageLink;
+} = {}) {
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [route, setRoute] = useState<ChatRoute | null>(null);
@@ -162,6 +207,34 @@ export function Chat({
   const inFlight = useRef(false);
   // The thread the answers were stored in; sent back so the next message continues it.
   const [threadId, setThreadId] = useState<string | undefined>(undefined);
+
+  // FD-9: log an implicit signal about `about` (an answer turn) in the open thread. Without a
+  // stored thread there is nothing to log it in.
+  const logImplicit = (signal: ImplicitSignal, about: ChatTurn | undefined, thread: string | undefined) => {
+    const handoffId = about?.handoff_id ?? thread;
+    if (!handoffId) return;
+    const args: ChatImplicitArgs = { handoffId, signal };
+    if (about?.service) args.service = about.service;
+    if (about?.model) args.model = about.model;
+    if (about?.kind) args.kind = about.kind;
+    void implicit(args).catch(() => undefined);
+  };
+  const lastAnswer = (all: ChatTurn[]) => [...all].reverse().find((turn) => turn.role === "assistant");
+
+  // The view's state as the unmount sees it.
+  const latest = useRef({ turns, ratings, threadId, logImplicit });
+  latest.current = { turns, ratings, threadId, logImplicit };
+  useEffect(
+    () => () => {
+      // FD-9: closing the view on an answer I did not rate is abandoning the chat.
+      const now = latest.current;
+      const last = now.turns.length - 1;
+      if (last >= 0 && now.turns[last].role === "assistant" && now.ratings[last] === undefined) {
+        now.logImplicit("abandoned", now.turns[last], now.threadId);
+      }
+    },
+    [],
+  );
 
   const onRate = async (turnIndex: number, rating: "up" | "down") => {
     if (ratings[turnIndex] === rating) return;
@@ -209,6 +282,11 @@ export function Chat({
     const answer = result.ok;
     // Any reply that names its thread continues it, a queued ask's too (FD-3).
     if (answer.handoff_id) setThreadId(answer.handoff_id);
+    // FD-9: the same message sent again, word for word, is a re-ask of the answer it got.
+    const before = turns.filter((turn) => turn.role === "user").pop();
+    if (before && before.text.trim() === message.trim()) {
+      logImplicit("re-asked", lastAnswer(turns), answer.handoff_id ?? threadId);
+    }
     // A Claude handoff stores no turn in the thread (FD-8); an answer or a queued ask does.
     if (answer.text === undefined && !answer.queued) {
       setTurns((current) => current.map((turn) => (turn === sent ? { ...sent, unstored: true } : turn)));
@@ -232,9 +310,15 @@ export function Chat({
           {handoff ? (
             <ChatHandoff {...handoff} />
           ) : (
-            routed && <ChatHandoff pick={{ ClaudeHandoff: routed.reason }} prompt={routed.prompt} />
+            routed && (
+              <ChatHandoff
+                pick={{ ClaudeHandoff: routed.reason }}
+                prompt={routed.prompt}
+                logImplicit={(signal) => logImplicit(signal, lastAnswer(turns), threadId)}
+              />
+            )
           )}
-          {held && <ChatHeld held={held} />}
+          {held && <ChatHeld held={held} send={(job) => sendAsJob(job, threadId)} />}
         </section>
       ) : turns.length === 0 ? (
         <Empty view="Chat" />
@@ -245,8 +329,9 @@ export function Chat({
             turn.role === "user" ? (
               <UserMessage key={i} text={turn.text} resolveLink={resolveLink} />
             ) : (
+              // FD-9: copying from an answer is a signal about that answer.
+              <div key={i} data-part="answer" onCopy={() => logImplicit("copied-answer", turn, threadId)}>
               <AssistantMessage
-                key={i}
                 text={turn.text}
                 service={turn.service}
                 model={turn.model}
@@ -258,6 +343,7 @@ export function Chat({
                   turn.handoff_id && turn.service && turn.model ? (rating) => void onRate(i, rating) : undefined
                 }
               />
+              </div>
             ),
           )}
         </section>
@@ -267,6 +353,8 @@ export function Chat({
         <p>{`Picked by: ${route.step}${route.kind ? ` (${route.kind})` : ""}`}</p>
       )}
       {route?.queued && <p role="status">{`Queued: ${route.queued}. The ask is kept in this chat.`}</p>}
+      {route?.fallback && <p role="status" data-part="fallback">{`Qwen answered: ${route.fallback}.`}</p>}
+      {route && moveLine(route) && <p data-part="move">{`Moved: ${moveLine(route)}`}</p>}
     </div>
   );
 }

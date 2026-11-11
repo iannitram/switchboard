@@ -69,6 +69,33 @@ fn a_failed_save_leaves_the_old_file_in_place() {
 }
 
 #[test]
+fn a_failed_rename_removes_the_temp_file_on_every_system() {
+    // #371, #419: the test above reaches the clean-up after a failed rename only on Windows
+    // (elsewhere the read-only folder stops the temp-file write first). A folder with a file
+    // in it where the settings file should be lets the temp file be written and then refuses
+    // the rename over it, on Linux, macOS and Windows alike.
+    let d = scratch("rename-blocked");
+    let p = d.join("settings.json");
+    std::fs::create_dir_all(&p).unwrap();
+    std::fs::write(p.join("keep"), "x").unwrap();
+    let saved = save(&p, &Settings::default());
+    match &saved {
+        Err(CoreError::Io(msg)) => assert!(
+            msg.starts_with(&p.display().to_string()) && !msg.contains(".tmp"),
+            "the rename is what failed: {msg}"
+        ),
+        other => panic!("expected CoreError::Io, got {other:?}"),
+    }
+    let names: Vec<String> = std::fs::read_dir(&d)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, ["settings.json"], "no temp file is left");
+    assert!(p.join("keep").exists());
+}
+
+#[test]
 fn saves_at_once_from_many_threads_all_succeed() {
     // #371: every save used to write the same `settings.json.tmp`, so one save renamed the
     // file another was still writing and most saves failed.

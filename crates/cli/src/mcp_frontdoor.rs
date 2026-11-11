@@ -27,6 +27,8 @@ pub enum Call {
         kind: String,
         request: String,
         unmet: Vec<String>,
+        /// FD-6: the chat this job is sent from; the job then carries its packet.
+        thread: Option<String>,
     },
     Rate {
         thread: String,
@@ -69,13 +71,14 @@ pub fn schemas() -> [(&'static str, Value); 3] {
             "ask_as_job",
             json!({
                 "name": "ask_as_job",
-                "description": "Send a request this machine cannot serve as a fleet job another machine pulls.",
+                "description": "Send a request this machine cannot serve as a fleet job another machine pulls. With thread, the job carries that chat's packet (summary, last 6 turns, links) and the move is stored.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "kind": { "type": "string", "description": "The request kind" },
                         "request": { "type": "string" },
-                        "unmet": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "The needs this machine does not meet" }
+                        "unmet": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "The needs this machine does not meet" },
+                        "thread": { "type": "string", "description": "The chat's thread id, to send the chat with its packet" }
                     },
                     "required": ["kind", "request", "unmet"]
                 }
@@ -134,6 +137,7 @@ pub fn call_from(name: &str, args: &Value) -> Result<Call, String> {
                 kind: text("kind"),
                 request: text("request"),
                 unmet,
+                thread: args["thread"].as_str().map(str::to_string),
             })
         }
         "rate" => {
@@ -186,7 +190,14 @@ pub fn run(call: &Call, fleet: Option<&FleetBridge>, data: Option<&Path>) -> Res
             kind,
             request,
             unmet,
-        } => ask::send_as_job(fleet()?, kind, request, unmet).map_err(core),
+            thread,
+        } => {
+            let chat = match thread {
+                Some(id) => Some((data()?, id.as_str())),
+                None => None,
+            };
+            ask::send_as_job(fleet()?, kind, request, unmet, chat).map_err(core)
+        }
         Call::Rate {
             thread,
             turn,
