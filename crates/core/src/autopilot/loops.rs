@@ -232,8 +232,16 @@ fn token_of(pid: u32) -> Option<String> {
         .output()
     {
         Ok(out) if out.status.success() => out,
-        _ => return Some(UNKNOWN_TOKEN.to_string()),
+        other => {
+            eprintln!("TEMPDIAG tasklist {pid} failed: {other:?}");
+            return Some(UNKNOWN_TOKEN.to_string());
+        }
     };
+    eprintln!(
+        "TEMPDIAG tasklist {pid} in {}: {:?}",
+        std::process::id(),
+        String::from_utf8_lossy(&out.stdout)
+    );
     // `tasklist` gives no start time: a process id used again is taken for the same process.
     String::from_utf8_lossy(&out.stdout)
         .contains(&format!("\"{pid}\""))
