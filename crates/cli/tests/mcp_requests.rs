@@ -111,7 +111,13 @@ fn files(dir: &Path) -> Vec<String> {
             if path.is_dir() {
                 todo.push(path);
             } else {
-                found.push(path.strip_prefix(dir).unwrap().display().to_string());
+                found.push(
+                    path.strip_prefix(dir)
+                        .unwrap()
+                        .display()
+                        .to_string()
+                        .replace('\\', "/"),
+                );
             }
         }
     }
