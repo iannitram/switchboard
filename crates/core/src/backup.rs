@@ -1246,7 +1246,12 @@ fn restore_into(
             }
         }
         200 => match track.and_then(|t| t.marks.get(new_repo).transpose()) {
-            Some(Ok(mark)) if track.is_some_and(|t| mark.made_for(t.from)) => {
+            // The same name is not the same repo: one deleted or renamed away and made again by
+            // someone else has another GitHub id, and is refused like any other.
+            Some(Ok(mark))
+                if track.is_some_and(|t| mark.made_for(t.from))
+                    && there.body["id"].as_u64() == Some(mark.id) =>
+            {
                 if there.body["private"] != Value::Bool(true) {
                     return Err(CoreError::Refused(format!(
                         "{new_repo} is not private any more; it is not finished by a restore"
@@ -1279,16 +1284,22 @@ fn restore_into(
                     made.pending, made.failed
                 )));
             }
-            // Written before anything else is: the repo is Switchboard's own from here on.
-            if let Some(track) = track {
-                track.marks.begin(new_repo, track.from)?;
-            }
             let answer = remote.api.rest_get(&path, None)?;
             if answer.status != 200 || answer.body["private"] != Value::Bool(true) {
                 return Err(CoreError::GitHub(format!(
                     "{new_repo}: not there as a private repo after the create (status {})",
                     answer.status
                 )));
+            }
+            // Written before anything is pushed: the repo with this GitHub id is Switchboard's
+            // own from here on. Without an id there is nothing to tie a retry to: none is made.
+            if let Some(track) = track {
+                let Some(id) = answer.body["id"].as_u64() else {
+                    return Err(CoreError::GitHub(format!(
+                        "{new_repo}: GitHub gave no id for the repo it made"
+                    )));
+                };
+                track.marks.begin(new_repo, track.from, id)?;
             }
             made
         }
@@ -1328,6 +1339,8 @@ struct Track<'a> {
 pub struct Mark {
     /// The repo whose backup the restore is of.
     pub from: String,
+    /// The GitHub id of the repo made: a retry finishes that repo, not another one of its name.
+    pub id: u64,
     /// Steps finished so far: `refs`, `labels`.
     pub done: Vec<String>,
 }
@@ -1337,6 +1350,9 @@ impl Mark {
         self.from.eq_ignore_ascii_case(repo)
     }
 }
+
+/// How long a change to the record of new repos waits for another one to finish.
+const MARKS_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// #426: the new repos Switchboard itself made for a restore and has not finished, by the new
 /// repo's name in lower case, in `<data>/waiting/new-repo-restores.json`. A retry of a restore
@@ -1382,42 +1398,64 @@ impl Marks {
         let mut body = serde_json::to_string_pretty(all)
             .map_err(|e| CoreError::Parse(format!("{}: {e}", self.path.display())))?;
         body.push('\n');
-        let tmp = self.path.with_extension("json.tmp");
+        let tmp = crate::lock::temp_path(&self.path, ".tmp");
         std::fs::write(&tmp, body).map_err(io)?;
-        std::fs::rename(&tmp, &self.path).map_err(io)
+        std::fs::rename(&tmp, &self.path).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            io(e)
+        })
+    }
+
+    /// Reads the record, lets `change` change it and writes it back, holding the record's lock
+    /// the whole time (#416): two restores at once never lose each other's marks.
+    fn change(&self, change: impl FnOnce(&mut BTreeMap<String, Mark>)) -> Result<(), CoreError> {
+        if let Some(dir) = self.path.parent() {
+            std::fs::create_dir_all(dir)
+                .map_err(|e| CoreError::Io(format!("{}: {e}", self.path.display())))?;
+        }
+        let _lock = crate::lock::FileLock::take(&self.path, MARKS_LOCK_WAIT)?;
+        let mut all = self.load()?;
+        let before = all.clone();
+        change(&mut all);
+        if all == before {
+            return Ok(());
+        }
+        self.save(&all)
     }
 
     /// Records that Switchboard made `new_repo` for a restore of `from`'s backup.
-    fn begin(&self, new_repo: &str, from: &str) -> Result<(), CoreError> {
-        let mut all = self.load()?;
-        all.insert(
-            new_repo.to_lowercase(),
-            Mark {
-                from: from.to_string(),
-                done: Vec::new(),
-            },
-        );
-        self.save(&all)
+    fn begin(&self, new_repo: &str, from: &str, id: u64) -> Result<(), CoreError> {
+        self.change(|all| {
+            all.insert(
+                new_repo.to_lowercase(),
+                Mark {
+                    from: from.to_string(),
+                    id,
+                    done: Vec::new(),
+                },
+            );
+        })
     }
 
     /// Records that `step` of the restore into `new_repo` finished.
     fn finished(&self, new_repo: &str, step: &str) -> Result<(), CoreError> {
-        let mut all = self.load()?;
-        if let Some(mark) = all.get_mut(&new_repo.to_lowercase()) {
-            if !mark.done.iter().any(|d| d == step) {
-                mark.done.push(step.to_string());
+        self.change(|all| {
+            if let Some(mark) = all.get_mut(&new_repo.to_lowercase()) {
+                if !mark.done.iter().any(|d| d == step) {
+                    mark.done.push(step.to_string());
+                }
             }
-        }
-        self.save(&all)
+        })
     }
 
     /// Drops the record of `new_repo`; none is no change.
     fn clear(&self, new_repo: &str) -> Result<(), CoreError> {
-        let mut all = self.load()?;
-        if all.remove(&new_repo.to_lowercase()).is_some() {
-            self.save(&all)?;
+        if self.get(new_repo)?.is_none() {
+            return Ok(());
         }
-        Ok(())
+        self.change(|all| {
+            all.remove(&new_repo.to_lowercase());
+        })
     }
 }
 

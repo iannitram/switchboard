@@ -905,7 +905,7 @@ fn a_retry_into_the_repo_switchboard_made_finishes_the_restore_and_clears_the_re
         Vec::new(),
         vec![
             answer(404, json!({"message": "Not Found"})),
-            answer(200, json!({"full_name": NEW, "private": true})),
+            answer(200, json!({"full_name": NEW, "private": true, "id": 7})),
             answer(502, json!({"message": "Bad Gateway"})),
         ],
     );
@@ -921,7 +921,7 @@ fn a_retry_into_the_repo_switchboard_made_finishes_the_restore_and_clears_the_re
     let api = Recorded::new(
         Vec::new(),
         vec![
-            answer(200, json!({"full_name": NEW, "private": true})),
+            answer(200, json!({"full_name": NEW, "private": true, "id": 7})),
             answer(200, json!([])),
         ],
     );
@@ -946,7 +946,7 @@ fn a_retry_runs_only_the_steps_that_did_not_finish() {
         Vec::new(),
         vec![
             answer(404, json!({})),
-            answer(200, json!({"full_name": NEW, "private": true})),
+            answer(200, json!({"full_name": NEW, "private": true, "id": 7})),
         ],
     );
     assert!(marked(&f, &data, &api, "owner/demo").is_err());
@@ -958,7 +958,7 @@ fn a_retry_runs_only_the_steps_that_did_not_finish() {
     let api = Recorded::new(
         Vec::new(),
         vec![
-            answer(200, json!({"full_name": NEW, "private": true})),
+            answer(200, json!({"full_name": NEW, "private": true, "id": 7})),
             answer(200, json!([])),
         ],
     );
@@ -978,7 +978,10 @@ fn any_other_existing_repo_is_still_refused_with_the_same_message() {
     let there = || {
         Recorded::new(
             Vec::new(),
-            vec![answer(200, json!({"full_name": NEW, "private": true}))],
+            vec![answer(
+                200,
+                json!({"full_name": NEW, "private": true, "id": 7}),
+            )],
         )
     };
     // No record at all: a pre-existing repo.
@@ -993,7 +996,7 @@ fn any_other_existing_repo_is_still_refused_with_the_same_message() {
     std::fs::create_dir_all(data.join("waiting")).unwrap();
     std::fs::write(
         data.join("waiting").join("new-repo-restores.json"),
-        json!({ NEW: {"from": "owner/else", "done": ["refs"]} }).to_string(),
+        json!({ NEW: {"from": "owner/else", "id": 7, "done": ["refs"]} }).to_string(),
     )
     .unwrap();
     match marked(&f, &data, &there(), "owner/demo") {
@@ -1013,14 +1016,14 @@ fn a_record_of_a_repo_that_is_gone_starts_the_restore_over() {
     std::fs::create_dir_all(data.join("waiting")).unwrap();
     std::fs::write(
         data.join("waiting").join("new-repo-restores.json"),
-        json!({ NEW: {"from": "owner/demo", "done": ["refs", "labels"]} }).to_string(),
+        json!({ NEW: {"from": "owner/demo", "id": 7, "done": ["refs", "labels"]} }).to_string(),
     )
     .unwrap();
     let api = Recorded::new(
         Vec::new(),
         vec![
             answer(404, json!({})),
-            answer(200, json!({"full_name": NEW, "private": true})),
+            answer(200, json!({"full_name": NEW, "private": true, "id": 7})),
             answer(200, json!([])),
         ],
     );
@@ -1039,11 +1042,84 @@ fn a_restore_that_gets_through_leaves_no_record() {
         Vec::new(),
         vec![
             answer(404, json!({})),
-            answer(200, json!({"full_name": NEW, "private": true})),
+            answer(200, json!({"full_name": NEW, "private": true, "id": 7})),
             answer(200, json!([])),
         ],
     );
     marked(&f, &data, &api, "owner/demo").unwrap();
     assert_eq!(Marks::new(&data).get(NEW).unwrap(), None);
     assert!(!data.join("waiting").join("new-repo-restores.json").exists());
+}
+
+/// #426: a record names the repo Switchboard made by its GitHub id, not by its name. The same
+/// name made again by someone else (another id), or Switchboard's repo made public since, is
+/// refused: nothing is queued, pushed or recorded, and the record stays as it was.
+#[test]
+fn a_record_finishes_only_the_private_repo_with_the_id_it_made() {
+    let f = fixture("to-new-resume-id");
+    let data = scratch("to-new-resume-id-data");
+    let file = data.join("waiting").join("new-repo-restores.json");
+    std::fs::create_dir_all(data.join("waiting")).unwrap();
+    let record = json!({ NEW: {"from": "owner/demo", "id": 7, "done": ["refs"]} }).to_string();
+    std::fs::write(&file, &record).unwrap();
+    let there = |body: Value| Recorded::new(Vec::new(), vec![answer(200, body)]);
+    let other = there(json!({"full_name": NEW, "private": true, "id": 8}));
+    match marked(&f, &data, &other, "owner/demo") {
+        Err(CoreError::Refused(why)) => assert_eq!(
+            why,
+            format!("{NEW} already exists; restore goes to a new repo only")
+        ),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    let public = there(json!({"full_name": NEW, "private": false, "id": 7}));
+    match marked(&f, &data, &public, "owner/demo") {
+        Err(CoreError::Refused(why)) => assert!(why.contains("not private"), "{why}"),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    assert!(queued(&f).is_empty());
+    assert!(refs_of(&f.target, "refs").is_empty());
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), record);
+}
+
+/// #426: the record is found whatever case the new repo's name is typed in.
+#[test]
+fn a_retry_finds_the_record_whatever_the_case_of_the_name() {
+    let f = fixture("to-new-resume-case");
+    let data = scratch("to-new-resume-case-data");
+    std::fs::create_dir_all(data.join("waiting")).unwrap();
+    std::fs::write(
+        data.join("waiting").join("new-repo-restores.json"),
+        format!(
+            r#"{{"{}": {{"from": "OWNER/Demo", "id": 7, "done": ["refs", "labels"]}}}}"#,
+            NEW.to_uppercase()
+        ),
+    )
+    .unwrap();
+    assert!(
+        Marks::new(&data).get(NEW).unwrap().is_none(),
+        "keys are lower case"
+    );
+    std::fs::write(
+        data.join("waiting").join("new-repo-restores.json"),
+        format!(
+            r#"{{"{}": {{"from": "OWNER/Demo", "id": 7, "done": ["refs", "labels"]}}}}"#,
+            NEW.to_lowercase()
+        ),
+    )
+    .unwrap();
+    assert!(Marks::new(&data)
+        .get(&NEW.to_uppercase())
+        .unwrap()
+        .is_some());
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            answer(200, json!({"full_name": NEW, "private": true, "id": 7})),
+            answer(200, json!([])),
+        ],
+    );
+    let report = marked(&f, &data, &api, "owner/demo").unwrap();
+    assert_eq!((report.refs, report.labels), (0, 0));
+    assert!(queued(&f).is_empty());
+    assert_eq!(Marks::new(&data).get(NEW).unwrap(), None);
 }
