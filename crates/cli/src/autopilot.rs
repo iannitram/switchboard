@@ -49,7 +49,7 @@ fn stop(code: u8, message: String) -> Stop {
 }
 
 /// The weekly backup of the repos given: `real_backup`, or a test's fake.
-pub type BackupFn<'a> = dyn Fn(&[String]) -> Result<Vec<RepoBackup>, CoreError> + 'a;
+pub use run::BackupFn;
 
 /// What a headless pass runs on: the folders the CLI reads from the environment, and the
 /// seams the tests replace (the clock, GitHub, the weekly backup).
@@ -164,10 +164,11 @@ impl<'a> Headless<'a> {
             if dry_run {
                 run::satellite_dry(&fleet, data, config)
             } else {
-                self.satellite
-                    .borrow_mut()
-                    .get_or_insert_with(|| SatelliteSession::new(fleet.clone(), data))
-                    .tick(config, self.lock_wait)
+                let mut satellite = self.satellite.borrow_mut();
+                let session =
+                    satellite.get_or_insert_with(|| SatelliteSession::new(fleet.clone(), data));
+                session.set_fleet(fleet.clone());
+                session.tick(config, self.lock_wait)
             }
         } else {
             self.poll_pass(pass, dry_run, &fleet)?
@@ -193,6 +194,7 @@ impl<'a> Headless<'a> {
             dev_root: dev_root.clone(),
             machine: self.machine.clone(),
             qwen_probe: Box::new(passes::http_qwen_probe),
+            retry_wait: passes::PM_RETRY_WAIT,
         };
         let transport = (self.transport)();
         let env = RunEnv {
@@ -205,17 +207,14 @@ impl<'a> Headless<'a> {
             transport: transport.as_ref(),
             dry_run,
             lock_wait: self.lock_wait,
+            // #432 (ruling 8): the weekly backup runs inside the passes lock.
+            backup: self.backup,
         };
         let mut reports = run::run_poll_passes(&env, &[pass], &mut starter)
             .map_err(|e| stop(1, format!("switchboard: {e}")))?;
-        let mut report = reports
+        Ok(reports
             .pop()
-            .unwrap_or_else(|| PassReport::new(pass, dry_run));
-        if pass == Pass::Weekly && !dry_run && !report.backup.is_empty() {
-            let result = (self.backup)(&report.backup);
-            run::add_backups(&mut report, result);
-        }
-        Ok(report)
+            .unwrap_or_else(|| PassReport::new(pass, dry_run)))
     }
 
     /// CORE-2, IT-2: keep each fleet error of `report` in the errors file (`switchboard errors`

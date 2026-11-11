@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 /// The autopilot's state file in the app data folder.
 pub const STATE_FILE: &str = "autopilot.json";
@@ -76,8 +77,8 @@ pub trait JobStarter {
     /// Has the job started under `job_id` ended? `FleetStarter` says yes when the job has output,
     /// has no job file, its launcher has exited 0 or 75 ("not now"), or its job file is older than
     /// `PM_JOB_TIMEOUT_SECS`. An error means the job has ended with one: its launcher exited
-    /// non-zero with no output (CORE-2, #379); the caller frees the job's slot and passes the
-    /// error on.
+    /// non-zero with no output (CORE-2, #379), or a Project Manager launcher said 75 again
+    /// after its one retry (#432); the caller frees the job's slot and passes the error on.
     fn finished(&mut self, job_id: &str) -> Result<bool, CoreError>;
     /// `finished` for a read that must change nothing (a dry run, the status read, #385): the
     /// same answer with nothing cleaned up. `FleetStarter` leaves a failed job's worktree alone.
@@ -672,7 +673,8 @@ pub fn merge_pass(
 type ReadyRepo<'a> = (&'a RepoSnapshot, PathBuf, Vec<(&'a PullRequest, bool)>);
 
 /// The PRs a `merge_pass` would try: each repo that is not archived and has a clone under
-/// `dev_root`, with its open, eligible PRs (and their patch-id answer), smallest number first.
+/// `dev_root`, with its open, eligible PRs that are not drafts (and their patch-id answer),
+/// smallest number first.
 fn ready_by_repo<'a>(snaps: &'a [RepoSnapshot], dev_root: &Path) -> Vec<ReadyRepo<'a>> {
     let mut out = Vec::new();
     for snap in snaps.iter().filter(|s| !s.archived) {
@@ -684,7 +686,8 @@ fn ready_by_repo<'a>(snaps: &'a [RepoSnapshot], dev_root: &Path) -> Vec<ReadyRep
         let mut ready: Vec<(&PullRequest, bool)> = snap
             .pulls
             .iter()
-            .filter(|pr| pr.state == "open")
+            // #432 (ruling 7): a draft is not offered for merging; it is skipped, not refused.
+            .filter(|pr| pr.state == "open" && !pr.draft)
             .map(|pr| (pr, carried_over_by_patch_id(&clone, pr)))
             .filter(|(pr, carried)| eligibility(pr, *carried) == MergeEligibility::Eligible)
             .collect();
@@ -728,17 +731,60 @@ pub fn refused_merge_item(refused: &RefusedMerge, at: UnixSeconds) -> Item {
     }
 }
 
-/// Put each refused merge of a pass in Waiting on you (`<data>/waiting/local.json`).
+/// Put each refused merge of a pass in Waiting on you (`<data>/waiting/local.json`). #432
+/// (ruling 5): a PR refused again keeps the `since` of its first refusal; the reason is the
+/// latest.
 pub fn record_refused_merges(
     data_dir: &Path,
     refused: &[RefusedMerge],
     at: UnixSeconds,
 ) -> Result<(), CoreError> {
     let local = LocalItems::new(data_dir);
+    if refused.is_empty() {
+        return Ok(());
+    }
+    let there = local.load()?;
     for r in refused {
-        local.add(refused_merge_item(r, at))?;
+        let mut item = refused_merge_item(r, at);
+        if let Some(old) = there.iter().find(|old| old.source == item.source) {
+            item.since = old.since;
+        }
+        local.add(item)?;
     }
     Ok(())
+}
+
+/// #432 (ruling 6): take out of Waiting on you the item of each refused merge whose PR has
+/// merged or closed since: merged by this pass (`merged`), or `merged` or `closed` in its
+/// repo's snapshot. Answers the PRs cleared, as `(repo, pr)`; with none, nothing is written.
+pub fn clear_settled_merges(
+    data_dir: &Path,
+    snaps: &[RepoSnapshot],
+    merged: &[Merged],
+) -> Result<Vec<(String, u64)>, CoreError> {
+    let local = LocalItems::new(data_dir);
+    let there = local.load()?;
+    let mut settled: Vec<(String, u64)> = Vec::new();
+    for snap in snaps {
+        for pr in snap.pulls.iter().filter(|pr| pr.state != "open") {
+            settled.push((snap.repo.clone(), pr.number));
+        }
+    }
+    for (repo, prs, _) in merged {
+        settled.extend(prs.iter().map(|pr| (repo.clone(), *pr)));
+    }
+    settled.sort();
+    settled.dedup();
+    let mut cleared = Vec::new();
+    for (repo, pr) in settled {
+        let source = Source::GuardedAction {
+            text: format!("Merge {repo}#{pr}"),
+        };
+        if there.iter().any(|item| item.source == source) && local.remove(&source)? {
+            cleared.push((repo, pr));
+        }
+    }
+    Ok(cleared)
 }
 
 /// Write `job` and its brief for `fleet run`: the brief to `<jobs_dir>/<id>.md`, the job to
@@ -877,6 +923,46 @@ pub struct FleetStarter {
     pub machine: Option<String>,
     /// Does the model server at this URL answer? `http_qwen_probe` in the app; a fake in tests.
     pub qwen_probe: QwenProbe,
+    /// #432 (ruling 9): how long a Project Manager launcher that said "not now" (exit 75) with
+    /// no output waits before its one retry. `PM_RETRY_WAIT` in the app; none in tests.
+    pub retry_wait: Duration,
+}
+
+/// #432 (ruling 9): the wait before the one retry of a Project Manager launcher that exited 75
+/// with no output.
+pub const PM_RETRY_WAIT: Duration = Duration::from_secs(30);
+
+/// Is `job_id` a Project Manager job (`pm_job`)? Only its launcher is retried after a 75.
+pub fn is_pm_job(job_id: &str) -> bool {
+    job_id.starts_with("pm-")
+}
+
+/// The file beside a job file (`<job id>.retry`) written when its launcher said "not now" with
+/// no output and was started once more (#432, ruling 9): a 75 after it is a failure.
+pub fn job_retry_file(job_path: &Path) -> PathBuf {
+    job_path.with_extension("retry")
+}
+
+/// Start `command` with stdout and stderr to the files given.
+fn launch(
+    command: &[String],
+    fleet_root: &std::ffi::OsStr,
+    out: std::fs::File,
+    err: std::fs::File,
+) -> std::io::Result<std::process::Child> {
+    let mut cmd = Command::new(&command[0]);
+    cmd.args(&command[1..]);
+    clean_child_env(&mut cmd);
+    cmd.env(FLEET_ROOT_ENV, fleet_root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(out))
+        .stderr(Stdio::from(err))
+        .spawn()
+}
+
+/// Wait for `child`; its exit code, `None` when a signal ended it.
+fn exit_code(mut child: std::process::Child) -> Option<i32> {
+    child.wait().ok().and_then(|status| status.code())
 }
 
 /// A question to the local model server: does it answer at this URL?
@@ -889,7 +975,7 @@ pub const QWEN_PROBE_SECS: u64 = 4;
 /// up; a refused or timed-out connection or a server error is down.
 pub fn http_qwen_probe(url: &str) -> bool {
     let agent = ureq::AgentBuilder::new()
-        .timeout(std::time::Duration::from_secs(QWEN_PROBE_SECS))
+        .timeout(Duration::from_secs(QWEN_PROBE_SECS))
         .build();
     match agent.get(url).call() {
         Ok(_) => true,
@@ -924,23 +1010,36 @@ impl JobStarter for FleetStarter {
         let (out, err) = job_log_files(&path)?;
         let job_file = path.to_string_lossy().into_owned();
         let command = self.fleet.command_line(&["run", &job_file]);
-        let mut cmd = Command::new(&command[0]);
-        cmd.args(&command[1..]);
-        clean_child_env(&mut cmd);
-        let mut child = cmd
-            .env(FLEET_ROOT_ENV, self.fleet.root().as_os_str())
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(out))
-            .stderr(Stdio::from(err))
-            .spawn()
+        let fleet_root = self.fleet.root().as_os_str().to_os_string();
+        let child = launch(&command, &fleet_root, out, err)
             .map_err(|e| CoreError::Io(format!("{}: {e}", command[0])))?;
-        let exit_file = job_exit_file(&path);
+        let retry = job["id"].as_str().is_some_and(is_pm_job);
+        let retry_wait = self.retry_wait;
         let waiter = std::thread::spawn(move || {
-            let code = match child.wait().map(|status| status.code()) {
-                Ok(Some(code)) => code.to_string(),
-                _ => "signal".to_string(),
-            };
-            let _ = std::fs::write(exit_file, code);
+            let mut code = exit_code(child);
+            let silent =
+                || std::fs::metadata(path.with_extension("out")).map_or(true, |m| m.len() == 0);
+            // #432 (ruling 9): a Project Manager launcher that says "not now" with no output
+            // gets one more try after a short wait. Its stderr is kept and the retry's added.
+            if retry && code == Some(super::driver::NOT_NOW) && silent() {
+                std::thread::sleep(retry_wait);
+                let _ = std::fs::write(job_retry_file(&path), "75");
+                let files = std::fs::File::create(path.with_extension("out")).and_then(|out| {
+                    let err = std::fs::OpenOptions::new()
+                        .append(true)
+                        .open(path.with_extension("err"))?;
+                    Ok((out, err))
+                });
+                code = match files.and_then(|(out, err)| launch(&command, &fleet_root, out, err)) {
+                    Ok(child) => exit_code(child),
+                    Err(e) => {
+                        let _ = std::fs::write(path.with_extension("err"), e.to_string());
+                        None
+                    }
+                };
+            }
+            let code = code.map_or("signal".to_string(), |code| code.to_string());
+            let _ = std::fs::write(job_exit_file(&path), code);
         });
         let mut launchers = LAUNCHERS.lock().unwrap_or_else(|p| p.into_inner());
         launchers.retain(|waiter| !waiter.is_finished());
@@ -1006,15 +1105,23 @@ impl FleetStarter {
             .filter(|text| !text.trim().is_empty())
         {
             let code = text.trim().parse::<i32>().ok();
-            // 75 is the fleet's "not now" (CORE-1): an answer, not an error.
-            if code == Some(0) || code == Some(super::driver::NOT_NOW) {
+            let not_now = code == Some(super::driver::NOT_NOW);
+            let retried = job_retry_file(&job_file).exists();
+            // 75 is the fleet's "not now" (CORE-1): an answer, not an error; but a Project
+            // Manager launcher that said it again after its one retry has failed (#432).
+            if code == Some(0) || (not_now && !retried) {
                 return Ok(true);
+            }
+            let mut stderr =
+                std::fs::read_to_string(job_file.with_extension("err")).unwrap_or_default();
+            if not_now {
+                stderr = format!("exit 75 (not now) twice with no output; retried once\n{stderr}");
             }
             let job_arg = job_file.to_string_lossy().into_owned();
             return Err(CoreError::Fleet(FleetError {
                 command: self.fleet.command_line(&["run", &job_arg]),
                 exit_code: code,
-                stderr: std::fs::read_to_string(job_file.with_extension("err")).unwrap_or_default(),
+                stderr,
                 reason: FleetErrorReason::Exit,
                 undo_note: None,
             }));

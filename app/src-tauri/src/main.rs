@@ -27,25 +27,34 @@ const SATELLITE_EVERY: Duration = Duration::from_secs(60);
 /// (`run::SatelliteSession::tick`, the tick `switchboard autopilot satellite` runs): it reads
 /// `satellite.json` (off when missing), records a fleet error for each loop that ended with an
 /// error (CORE-2), classes the failed cards of loops that ended (AUTO-9), and starts the lanes
-/// `driver::tick` allows. #385: the session holds the satellite lock while its loops run, so a
-/// headless tick on this machine starts no lane beside them, and this thread starts none
-/// beside a headless run's.
+/// `driver::tick` allows. #432: the fleet settings are read again at each tick, so a changed
+/// pipeline is used at once; the tick holds the satellite lock only while it runs, and the
+/// loops and holds every satellite on this machine counts are on disk (`loops.json`). Being
+/// held out by another run is said when it starts and when it ends (`run::SatelliteLog`).
 fn satellite_loop(handle: tauri::AppHandle, config_dir: std::path::PathBuf) {
     let data = handle
         .path()
         .app_data_dir()
         .unwrap_or_else(|_| config_dir.clone());
     let mut session: Option<run::SatelliteSession> = None;
+    let mut log = run::SatelliteLog::default();
     loop {
         let state = handle.state::<commands::AppState>();
-        if session.is_none() {
-            if let Ok(fleet) = commands::bridge(&state.settings_path) {
-                session = Some(run::SatelliteSession::new(fleet, &data));
+        // Settings not set yet start nothing, as before; the session keeps its last bridge.
+        if let Ok(fleet) = commands::bridge(&state.settings_path) {
+            match session.as_mut() {
+                Some(session) => session.set_fleet(fleet),
+                None => session = Some(run::SatelliteSession::new(fleet, &data)),
             }
         }
         if let Some(session) = session.as_mut() {
             let report = session.tick(&config_dir, Duration::ZERO);
-            print_report(&state, &report);
+            for e in &report.raised {
+                commands::record_fleet_error(&state, e);
+            }
+            for line in log.lines(&report) {
+                eprintln!("{line}");
+            }
         }
         std::thread::sleep(SATELLITE_EVERY);
     }
@@ -98,6 +107,7 @@ fn autopilot_after_poll(
         dev_root: dev_root.clone(),
         machine: machine.clone(),
         qwen_probe: Box::new(passes::http_qwen_probe),
+        retry_wait: passes::PM_RETRY_WAIT,
     };
     let env = run::RunEnv {
         data_dir: data,
@@ -109,6 +119,9 @@ fn autopilot_after_poll(
         transport,
         dry_run: false,
         lock_wait: Duration::ZERO,
+        // AUTO-5, #432 (ruling 8): the weekly backup runs inside the passes lock, so no other
+        // run's passes start while it works. It holds this poll thread while it runs.
+        backup: &|repos: &[String]| switchboard_core::backup::backup_all(&settings, repos),
     };
     let reports = {
         let _held = state.github.lock().unwrap_or_else(|p| p.into_inner());
@@ -120,18 +133,6 @@ fn autopilot_after_poll(
     };
     for report in reports {
         print_report(&state, &report);
-        if !report.backup.is_empty() {
-            // AUTO-5: the weekly backup is long and holds nothing.
-            let settings = settings.clone();
-            std::thread::spawn(move || {
-                let mut done = run::PassReport::new(run::Pass::Weekly, false);
-                let result = switchboard_core::backup::backup_all(&settings, &report.backup);
-                run::add_backups(&mut done, result);
-                for line in done.lines() {
-                    eprintln!("{line}");
-                }
-            });
-        }
     }
 }
 

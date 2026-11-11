@@ -1,7 +1,6 @@
 //! #385: the passes behind the window's threads, the CLI and the MCP (`autopilot::run`). Each
 //! poll pass runs alone through `run_poll_passes`; a dry run reports the same work and changes
-//! no file; the lock keeps a second run out; the satellite session holds its lock while its
-//! loops run. A fake starter and a stub `fleet.py` and `merge_pr.py` stand in for the fleet.
+//! no file; the lock keeps a second run out; a satellite tick holds its lock while it runs. A fake starter and a stub `fleet.py` and `merge_pr.py` stand in for the fleet.
 
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -13,6 +12,7 @@ use switchboard_core::autopilot::run::{
     self, passes_lock_target, run_poll_passes, satellite_dry, satellite_lock_target, Pass,
     PassReport, RunEnv, SatelliteSession,
 };
+use switchboard_core::backup::{BackupOutcome, RepoBackup};
 use switchboard_core::clock::FixedClock;
 use switchboard_core::fleet::FleetBridge;
 use switchboard_core::github::snapshot::SnapshotStore;
@@ -157,6 +157,7 @@ impl GitHubTransport for FakeGitHub {
 /// yet, PR 8 with a PASS on its head and green CI, and a ROADMAP.md.
 fn demo() -> RepoSnapshot {
     let pr = |number: u64, passed: bool| PullRequest {
+        draft: false,
         number,
         title: format!("PR {number}"),
         state: "open".into(),
@@ -205,6 +206,14 @@ fn demo_world(tag: &str) -> World {
     w
 }
 
+/// The weekly backup as a stub: each repo refused, "stub".
+fn stub_backup(repos: &[String]) -> Result<Vec<RepoBackup>, CoreError> {
+    Ok(repos
+        .iter()
+        .map(|repo| (repo.clone(), Ok(BackupOutcome::Refused("stub".into()))))
+        .collect())
+}
+
 fn run_one(
     w: &World,
     pass: Pass,
@@ -223,6 +232,7 @@ fn run_one(
         transport: github,
         dry_run,
         lock_wait: Duration::ZERO,
+        backup: &stub_backup,
     };
     let mut reports = run_poll_passes(&env, &[pass], starter)?;
     assert_eq!(reports.len(), 1, "one pass, one report");
@@ -336,6 +346,26 @@ fn the_merge_pass_merges_what_passed_and_a_dry_run_says_which() {
     assert_eq!(*github.reads.lock().unwrap(), ["iannitram/demo"]);
 }
 
+/// #432 (ruling 6): the merge pass takes out of Waiting the item of a refused PR it has now
+/// merged; a dry run leaves it.
+#[test]
+fn the_merge_pass_clears_the_waiting_item_of_a_pr_it_merges() {
+    use switchboard_core::autopilot::passes::{record_refused_merges, RefusedMerge};
+    use switchboard_core::waiting::LocalItems;
+    let w = demo_world("merge-clears");
+    let refused = RefusedMerge {
+        repo: "iannitram/demo".into(),
+        pr: 8,
+        why: "branch is behind main".into(),
+    };
+    record_refused_merges(&w.data, &[refused], 50).unwrap();
+    let local = LocalItems::new(&w.data);
+    let (_, real, _, _) = dry_then_real(&w, Pass::Merge);
+    assert_eq!(real.merged[0].prs, [8], "{real:?}");
+    assert!(!real.failed(), "{real:?}");
+    assert!(local.load().unwrap().is_empty());
+}
+
 #[test]
 fn the_weekly_pass_starts_the_drift_clear_and_names_the_backup() {
     let w = demo_world("weekly");
@@ -368,6 +398,52 @@ fn the_weekly_pass_starts_the_drift_clear_and_names_the_backup() {
     assert_eq!(again.text(), "autopilot weekly: nothing to do\n");
 }
 
+/// #432 (ruling 8): the weekly backup runs inside the passes lock, so no other run's passes
+/// start while it works; a dry run backs up nothing.
+#[test]
+fn the_weekly_backup_runs_inside_the_passes_lock() {
+    let w = demo_world("backup-lock");
+    let clock = FixedClock::at(SUNDAY_AFTER_SIX);
+    let github = FakeGitHub::default();
+    let seen: Mutex<Vec<(Vec<String>, bool)>> = Mutex::new(Vec::new());
+    let target = passes_lock_target(&w.data);
+    let backup = |repos: &[String]| -> Result<Vec<RepoBackup>, CoreError> {
+        let free = FileLock::take(&target, Duration::ZERO).is_ok();
+        seen.lock().unwrap().push((repos.to_vec(), !free));
+        stub_backup(repos)
+    };
+    let env = |dry_run: bool| RunEnv {
+        data_dir: &w.data,
+        pipeline_root: &w.pipeline,
+        dev_root: &w.dev,
+        machine: Some("test-box"),
+        clock: &clock,
+        utc_offset_secs: Some(PACIFIC),
+        transport: &github,
+        dry_run,
+        lock_wait: Duration::ZERO,
+        backup: &backup,
+    };
+    let mut starter = FakeStarter::default();
+    let dry = run_poll_passes(&env(true), &[Pass::Weekly], &mut starter).unwrap();
+    assert_eq!(dry[0].backup, ["iannitram/demo"]);
+    assert!(dry[0].backups.is_empty());
+    assert!(
+        seen.lock().unwrap().is_empty(),
+        "a dry run backs up nothing"
+    );
+
+    let real = run_poll_passes(&env(false), &[Pass::Weekly], &mut starter).unwrap();
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [(vec!["iannitram/demo".to_string()], true)],
+        "backed up once, with the passes lock held"
+    );
+    assert_eq!(real[0].backups.len(), 1, "{:?}", real[0]);
+    assert_eq!(real[0].backups[0].outcome, "refused");
+    assert!(!lock::held(&target));
+}
+
 #[test]
 fn the_weekly_pass_waits_when_the_utc_offset_is_not_known() {
     let w = demo_world("no-offset");
@@ -384,6 +460,7 @@ fn the_weekly_pass_waits_when_the_utc_offset_is_not_known() {
         transport: &github,
         dry_run: false,
         lock_wait: Duration::ZERO,
+        backup: &stub_backup,
     };
     let mut starter = FakeStarter::default();
     let reports = run_poll_passes(&env, &[Pass::Weekly], &mut starter).unwrap();
@@ -411,6 +488,7 @@ fn the_window_s_four_passes_come_back_in_its_order() {
         transport: &github,
         dry_run: true,
         lock_wait: Duration::ZERO,
+        backup: &stub_backup,
     };
     let mut starter = FakeStarter::default();
     let reports = run_poll_passes(&env, &Pass::AFTER_POLL, &mut starter).unwrap();
@@ -492,17 +570,17 @@ fn a_satellite_tick_starts_its_lanes_and_keeps_a_second_satellite_out() {
     assert!(calls(&w, "fleet").iter().all(|args| args[0] != "run"));
     assert!(!lock::held(&satellite_lock_target(&w.data)));
 
-    // A real tick starts it and holds the satellite.
+    // A real tick starts it. #432 (ruling 1): the tick holds the satellite lock only while it
+    // runs; the loop is on disk (`loops.json`), where every satellite on this machine counts it.
     let tick = session.tick(&w.config, Duration::ZERO);
     assert_eq!(tick.lanes_started, ["gemini"], "{tick:?}");
     assert_eq!(tick.lines(), ["satellite: started gemini"]);
-    assert!(lock::held(&satellite_lock_target(&w.data)));
+    assert!(!lock::held(&satellite_lock_target(&w.data)));
     let status = run::status(&w.data, Some(&w.config), 0, None).unwrap();
-    assert_eq!(status["satellite"]["live"], true);
     assert_eq!(status["satellite"]["on"], true);
 
-    // A second satellite on this machine (the window's, or another headless run's) starts
-    // nothing beside it.
+    // While a tick runs (another run holds the lock), a second satellite starts nothing.
+    let held = FileLock::take(&satellite_lock_target(&w.data), Duration::ZERO).unwrap();
     let mut second = SatelliteSession::new(fleet.clone(), &w.data);
     let refused = second.tick(&w.config, Duration::ZERO);
     assert!(refused.lanes_started.is_empty());
@@ -511,6 +589,7 @@ fn a_satellite_tick_starts_its_lanes_and_keeps_a_second_satellite_out() {
         refused.errors[0].contains("another run holds the satellite"),
         "{refused:?}"
     );
+    drop(held);
 
     // The session waits for its loop, reports it and gives the satellite back.
     let end = session.finish(Duration::from_millis(50));

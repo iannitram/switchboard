@@ -3,6 +3,7 @@
 Newest first. One line per change of stage, release or decision that the next session needs.
 
 
+- 2026-11-11 Autopilot rulings (#432): the satellite lock is per tick in every face; loops and lane holds live in `<data>/satellite/loops.json` and the next run adopts a loop whose run ended; the window re-reads fleet settings each tick and logs "holds the satellite" only on change; a refused merge keeps its first `since` and its Waiting item clears when the PR merges or closes; drafts are not merged; the weekly backup runs inside the passes lock; a Project Manager launcher's silent exit 75 is retried once.
 - 2026-11-11 Front door ruling (#430, FD-3): `switchboard ask --dry-run` routes over the budget snapshot with no `budget allow` call, so it never refreshes a paid pool's reading, and says how old a stale snapshot is.
 - 2026-11-11 Front door rulings (#428, FD-5 to FD-7): a sticky chat moved off a braked pool says so and moves back when the brake lifts; the handoff summary is cached with the chat and only new messages are summarised; a Claude handoff move stores its model and the thread keeps it; open questions match after trim, lower-case and collapsed spaces.
 - 2026-11-11 Front door ruling (#427, FD-3): only a kind with a Qwen row falls back to Qwen (a braked pool or an ask waiting for Claude's budget); a Qwen failure mid-answer holds the ask for Claude with no partial answer kept; a thumbs down on a fallback answer holds the same ask; thumbs on a fallback never teach routing.

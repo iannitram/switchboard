@@ -287,6 +287,100 @@ fn a_satellite_tick_starts_its_lane_and_waits_for_the_loop() {
     assert!(!lock::held(&satellite_lock_target(&w.data)));
 }
 
+/// `fleet run --next` waits (up to a minute) for a file `go` beside the script, then prints
+/// one card; everything else as the support stub. Every call is logged.
+const WAITING_FLEET: &str = r#"import json, os, sys, time
+here = os.path.dirname(os.path.abspath(__file__))
+args = sys.argv[1:]
+with open(os.path.join(here, "calls.log"), "a") as f:
+    f.write(json.dumps(args) + "\n")
+if args[:2] == ["run", "--next"]:
+    give_up = time.time() + 60
+    while not os.path.exists(os.path.join(here, "go")) and time.time() < give_up:
+        time.sleep(0.02)
+    print(json.dumps({"id": "sb-1", "outcome": "done"}))
+"#;
+
+/// The built binary as `run_in` sets it up, started and not waited for.
+fn spawn(argv: &[&str], w: &World) -> std::process::Child {
+    Command::new(env!("CARGO_BIN_EXE_switchboard"))
+        .args(argv)
+        .current_dir(&w.cwd)
+        .env("SWITCHBOARD_PIPELINE", &w.pipeline)
+        .env("SWITCHBOARD_DATA", &w.data)
+        .env("SWITCHBOARD_CONFIG", &w.config)
+        .env("SWITCHBOARD_STATE", w.base.join("no-state"))
+        .env("SWITCHBOARD_DEV_ROOT", &w.dev)
+        .env("FLEET_MACHINE", "test-box")
+        .env_remove("FLEET_ROOT")
+        .env_remove("FLEET_STATE_DIR")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run switchboard")
+}
+
+/// Wait (up to a minute) until `done` says so.
+fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+    let give_up = std::time::Instant::now() + Duration::from_secs(60);
+    while !done() {
+        assert!(
+            std::time::Instant::now() < give_up,
+            "waited a minute for {what}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// #432 (ruling 2): a headless satellite run that is killed while its loop runs leaves the loop
+/// on disk; the next run adopts it and watches it to its end, and no second copy starts.
+#[test]
+fn a_killed_satellite_run_leaves_its_loop_to_the_next_run() {
+    use switchboard_core::autopilot::loops;
+    let w = world("adopt");
+    let tools = w.pipeline.join("tools").join("fleet");
+    std::fs::write(tools.join("fleet.py"), WAITING_FLEET).unwrap();
+    w.satellite_on();
+    let dir = satellite_lock_target(&w.data);
+    let argv = ["--role", "satellite", "autopilot", "satellite"];
+
+    let mut first = spawn(&argv, &w);
+    let first_pid = first.id();
+    wait_until("the first run's loop on disk", || {
+        loops::read(&dir)
+            .loops
+            .iter()
+            .any(|r| r.lane == "gemini" && r.owner_pid == first_pid)
+    });
+    first.kill().unwrap();
+    first.wait().unwrap();
+    let loop_pid = loops::read(&dir).loops[0].pid;
+    assert!(loops::alive(loop_pid, None), "the loop outlives its run");
+
+    let second = spawn(&argv, &w);
+    let second_pid = second.id();
+    wait_until("the second run to adopt the loop", || {
+        loops::read(&dir)
+            .loops
+            .iter()
+            .any(|r| r.pid == loop_pid && r.owner_pid == second_pid)
+    });
+    // The loop ends only once the second run's tick is over (it lets go of the satellite lock):
+    // a loop that ended before that tick looked at its lane is gone, and its lane may start
+    // again (on Windows the look, `tasklist`, takes long enough for that).
+    wait_until("the second run's tick to end", || !lock::held(&dir));
+    std::fs::write(tools.join("go"), "").unwrap();
+    let out = second.wait_with_output().unwrap();
+    assert_eq!(code(&out), Some(0), "{}{}", stdout(&out), stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("adopted the gemini loop"), "{text}");
+    assert!(!text.contains("started gemini"), "{text}");
+    assert_eq!(w.runs().len(), 1, "one loop, never a second copy");
+    assert!(loops::read(&dir).loops.is_empty());
+    assert!(!lock::held(&dir));
+}
+
 #[test]
 fn a_pass_is_refused_while_another_run_holds_the_lock() {
     let w = world("lock");

@@ -5,6 +5,7 @@
 pub mod classify;
 pub mod driver;
 pub mod instructions;
+pub mod loops;
 pub mod passes;
 pub mod review;
 pub mod run;

@@ -62,6 +62,10 @@ _Avoid_: bug, incident, alert
 A fault in a project's own code, such as Z13-Helper's tests failing. It's filed as a bug in that project's repo, never as an IT ticket.
 _Avoid_: IT ticket, fleet error
 
+**Adopted loop**:
+A satellite loop whose run ended while it still ran (the window closed, a headless run killed). It stays on disk, and the next satellite tick on that machine, from any face, takes it over and watches it to its end instead of starting another copy.
+_Avoid_: orphan, zombie
+
 **Repo backup**:
 The one latest copy of a repo, enough to rebuild it if GitHub loses it: all of its git history plus its issues, PRs, comments, labels, milestones, releases and wiki. Each new backup replaces the last one; no older versions are kept.
 _Avoid_: snapshot (that is the cached GitHub read), archive, mirror

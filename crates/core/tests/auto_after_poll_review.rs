@@ -58,6 +58,7 @@ impl JobStarter for FakeStarter {
 
 fn pr(number: u64, labels: &[&str], closes: &[u64]) -> PullRequest {
     PullRequest {
+        draft: false,
         number,
         title: format!("PR {number}"),
         state: "open".into(),

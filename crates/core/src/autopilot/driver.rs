@@ -3,13 +3,14 @@
 //! AUTO-9's `classify`.
 
 use super::classify::{classify, FailureClass};
+use super::loops::{self, LoopRecord};
 use crate::fleet::{FleetBridge, FleetError, FleetErrorReason, FLEET_ROOT_ENV};
 use crate::CoreError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// The lanes the fleet knows. A lane in the satellite file that is not here is skipped.
 pub const FLEET_LANES: [&str; 5] = ["chatgpt", "claudeapi", "deepseek", "gemini", "qwen"];
@@ -231,9 +232,13 @@ pub struct LoopEnd {
     /// The command line it ran, program first.
     pub command: Vec<String>,
     pub stdout: String,
-    /// The exit code; `None` when it was killed by a signal or its status could not be read.
+    /// The exit code; `None` when it was killed by a signal, its status could not be read, or
+    /// it was adopted (#432: another process started it, so its exit code is not known here).
     pub exit_code: Option<i32>,
     pub stderr: String,
+    /// #432: the loop was started by a run that ended before it, and this run watched it to its
+    /// end (`ChildRunner::adopt`).
+    pub adopted: bool,
 }
 
 impl LoopEnd {
@@ -244,9 +249,10 @@ impl LoopEnd {
 
     /// CORE-2: the fleet error of a loop that failed, with its command, exit code and stderr;
     /// `None` for a loop that exited 0, or 75 ("not now": quiet hours, a braked pool, a busy dev
-    /// gate), which the fleet answers on purpose (CORE-1); the lane is still held.
+    /// gate), which the fleet answers on purpose (CORE-1); the lane is still held. `None` too
+    /// for an adopted loop, whose exit code is not known.
     pub fn fleet_error(&self) -> Option<CoreError> {
-        (self.failed() && self.exit_code != Some(NOT_NOW)).then(|| {
+        (self.failed() && !self.adopted && self.exit_code != Some(NOT_NOW)).then(|| {
             CoreError::Fleet(FleetError {
                 command: self.command.clone(),
                 exit_code: self.exit_code,
@@ -261,13 +267,20 @@ impl LoopEnd {
 /// The app's runner: each lane's loop is a child process (the bridge's command line for
 /// `run_args`, `FLEET_ROOT` set), its stdout written to `<out_dir>/<lane>.out` and its stderr to
 /// `<out_dir>/<lane>.err`. A loop that ended with an error holds its lane for `hold`.
+///
+/// #432: the loops and the holds are kept on disk, in `<out_dir>/loops.json` (`loops`), so
+/// every process on this machine sees them: `running` and `held` are what that file says, and
+/// a loop whose run has ended is adopted (`adopt`) and watched to its end here.
 pub struct ChildRunner {
     fleet: FleetBridge,
     out_dir: PathBuf,
     hold: Duration,
     children: Vec<(String, Vec<String>, Child)>,
+    /// Loops of a run that ended, watched here by their process id.
+    adopted: Vec<LoopRecord>,
     finished: Vec<LoopEnd>,
-    held: Vec<(String, Instant)>,
+    /// What could not be written to `loops.json` since `take_errors`.
+    errors: Vec<CoreError>,
 }
 
 impl ChildRunner {
@@ -282,23 +295,60 @@ impl ChildRunner {
             out_dir: out_dir.to_path_buf(),
             hold,
             children: Vec::new(),
+            adopted: Vec::new(),
             finished: Vec::new(),
-            held: Vec::new(),
+            errors: Vec::new(),
         }
     }
 
+    /// #432: the bridge the next loop starts with (the window reads its settings each tick).
+    pub fn set_fleet(&mut self, fleet: FleetBridge) {
+        self.fleet = fleet;
+    }
+
     /// The lanes held now after a failed loop, each with the seconds left (#385: the status
-    /// read). The holds live in this runner only, as before.
+    /// read), as `loops.json` has them.
     pub fn holds(&mut self) -> Vec<(String, u64)> {
-        let now = Instant::now();
-        LaneRunner::held(self)
+        self.reap();
+        loops::read(&self.out_dir)
+            .holds_at(loops::now_ms())
             .into_iter()
-            .zip(
-                self.held
-                    .iter()
-                    .map(|(_, until)| until.saturating_duration_since(now).as_secs()),
-            )
+            .map(|(lane, ms)| (lane, (ms as u64).div_ceil(1000)))
             .collect()
+    }
+
+    /// The lanes of the loops this runner watches: the ones it started and the ones it adopted.
+    pub fn watching(&mut self) -> Vec<String> {
+        self.reap();
+        self.children
+            .iter()
+            .map(|(lane, _, _)| lane.clone())
+            .chain(self.adopted.iter().map(|record| record.lane.clone()))
+            .collect()
+    }
+
+    /// #432: take over each loop in `loops.json` whose owner has ended (a headless run that
+    /// exited or was killed): this process is its owner from now on and watches it to its end,
+    /// so no second copy of it starts. A loop that has ended already ends at the next reap. The
+    /// lanes taken. Call it under the satellite lock, so two runs never take the same loop.
+    pub fn adopt(&mut self) -> Result<Vec<String>, CoreError> {
+        let me = std::process::id();
+        let token = loops::process_token(me);
+        let taken = loops::update(&self.out_dir, |file| {
+            let mut taken = Vec::new();
+            for record in &mut file.loops {
+                if record.owned() {
+                    continue;
+                }
+                record.owner_pid = me;
+                record.owner_token = token.clone();
+                taken.push(record.clone());
+            }
+            taken
+        })?;
+        let lanes = taken.iter().map(|record| record.lane.clone()).collect();
+        self.adopted.extend(taken);
+        Ok(lanes)
     }
 
     /// Each loop that has ended since the last call, oldest first.
@@ -307,7 +357,17 @@ impl ChildRunner {
         std::mem::take(&mut self.finished)
     }
 
+    /// What could not be written to `loops.json` since the last call.
+    pub fn take_errors(&mut self) -> Vec<CoreError> {
+        std::mem::take(&mut self.errors)
+    }
+
+    fn read(&self, lane: &str, ext: &str) -> String {
+        std::fs::read_to_string(self.out_dir.join(format!("{lane}.{ext}"))).unwrap_or_default()
+    }
+
     fn reap(&mut self) {
+        let mut ended: Vec<(LoopEnd, u32)> = Vec::new();
         let mut still = Vec::new();
         for (lane, command, mut child) in std::mem::take(&mut self.children) {
             let status = match child.try_wait() {
@@ -318,39 +378,71 @@ impl ChildRunner {
                 Ok(Some(status)) => status.code(),
                 Err(_) => None,
             };
-            let read = |ext: &str| {
-                std::fs::read_to_string(self.out_dir.join(format!("{lane}.{ext}")))
-                    .unwrap_or_default()
-            };
             let end = LoopEnd {
-                stdout: read("out"),
-                stderr: read("err"),
+                stdout: self.read(&lane, "out"),
+                stderr: self.read(&lane, "err"),
                 exit_code: status,
                 command,
                 lane,
+                adopted: false,
             };
-            if end.failed() {
-                self.held.retain(|(l, _)| *l != end.lane);
-                self.held
-                    .push((end.lane.clone(), Instant::now() + self.hold));
-            }
-            self.finished.push(end);
+            ended.push((end, child.id()));
         }
         self.children = still;
+        let mut watched = Vec::new();
+        for record in std::mem::take(&mut self.adopted) {
+            if record.running() {
+                watched.push(record);
+                continue;
+            }
+            let end = LoopEnd {
+                stdout: self.read(&record.lane, "out"),
+                stderr: self.read(&record.lane, "err"),
+                exit_code: None,
+                command: record.command.clone(),
+                lane: record.lane.clone(),
+                adopted: true,
+            };
+            ended.push((end, record.pid));
+        }
+        self.adopted = watched;
+        if ended.is_empty() {
+            return;
+        }
+        let now = loops::now_ms();
+        let until = now.saturating_add(self.hold.as_millis() as i64);
+        let written = loops::update(&self.out_dir, |file| {
+            for (end, pid) in &ended {
+                file.forget(&end.lane, *pid);
+                // An adopted loop's exit code is not known: it holds nothing.
+                if end.failed() && !end.adopted {
+                    file.hold(&end.lane, until, now);
+                }
+            }
+        });
+        if let Err(e) = written {
+            self.errors.push(e);
+        }
+        self.finished.extend(ended.into_iter().map(|(end, _)| end));
     }
 }
 
 impl LaneRunner for ChildRunner {
+    /// The lanes whose loop runs now on this machine, whoever started it (`loops.json`), and
+    /// the ones this runner started.
     fn running(&mut self) -> Vec<String> {
         self.reap();
-        self.children.iter().map(|(l, _, _)| l.clone()).collect()
+        let mut lanes = loops::read(&self.out_dir).running();
+        for lane in self.watching() {
+            if !lanes.contains(&lane) {
+                lanes.push(lane);
+            }
+        }
+        lanes
     }
 
     fn held(&mut self) -> Vec<String> {
-        self.reap();
-        let now = Instant::now();
-        self.held.retain(|(_, until)| *until > now);
-        self.held.iter().map(|(l, _)| l.clone()).collect()
+        self.holds().into_iter().map(|(lane, _)| lane).collect()
     }
 
     fn start(&mut self, lane: &str) -> Result<(), CoreError> {
@@ -369,7 +461,19 @@ impl LaneRunner for ChildRunner {
             .stderr(Stdio::from(err))
             .spawn()
             .map_err(io)?;
+        let me = std::process::id();
+        let record = LoopRecord {
+            lane: lane.to_string(),
+            pid: child.id(),
+            pid_token: loops::process_token(child.id()),
+            owner_pid: me,
+            owner_token: loops::process_token(me),
+            command: command.clone(),
+            started: loops::now_ms() / 1000,
+        };
         self.children.push((lane.to_string(), command, child));
-        Ok(())
+        // #432: on disk, so every satellite on this machine counts it, and the next one adopts
+        // it if this process ends first. The loop runs (and is watched here) either way.
+        loops::update(&self.out_dir, |file| file.loops.push(record))
     }
 }

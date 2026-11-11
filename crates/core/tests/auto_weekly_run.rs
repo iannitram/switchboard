@@ -414,6 +414,7 @@ fn the_fleet_starter_calls_a_job_finished_when_its_out_file_has_text_or_it_is_un
         dev_root: jobs.clone(),
         machine: None,
         qwen_probe: Box::new(|_| false),
+        retry_wait: std::time::Duration::ZERO,
     };
     assert_eq!(starter.finished("nope"), Ok(true), "no job file");
     std::fs::write(jobs.join("a.json"), "{}").unwrap();

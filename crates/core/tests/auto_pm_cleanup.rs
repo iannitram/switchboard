@@ -119,6 +119,7 @@ fn finished_cleans_up_but_keeps_every_job_file_and_its_answer_is_unchanged() {
         dev_root: jobs.clone(),
         machine: None,
         qwen_probe: Box::new(|_| false),
+        retry_wait: std::time::Duration::ZERO,
     };
     for ext in ["json", "err", "md"] {
         std::fs::write(jobs.join(format!("j.{ext}")), "x").unwrap();

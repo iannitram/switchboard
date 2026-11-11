@@ -9,9 +9,11 @@
 //! nothing.
 
 use super::driver::{self, ChildRunner, LaneRunner, SatelliteConfig, SATELLITE_FILE};
+use super::loops;
 use super::passes::{
-    after_poll_with, job_exit_file, job_timed_out, merge_pass, merge_would, record_refused_merges,
-    AfterPoll, AutopilotState, JobStarter, Merged, PollPasses, RefusedMerge, STATE_FILE,
+    after_poll_with, clear_settled_merges, job_exit_file, job_timed_out, merge_pass, merge_would,
+    record_refused_merges, AfterPoll, AutopilotState, JobStarter, Merged, PollPasses, RefusedMerge,
+    STATE_FILE,
 };
 use super::weekly::weekly_due;
 use crate::backup::{BackupOutcome, RepoBackup};
@@ -20,7 +22,7 @@ use crate::fleet::FleetBridge;
 use crate::github::poll::Poller;
 use crate::github::snapshot::SnapshotStore;
 use crate::github::transport::GitHubTransport;
-use crate::lock::{self, FileLock, FreshLock};
+use crate::lock::{self, FileLock};
 use crate::rules::Role;
 use crate::CoreError;
 use serde::Serialize;
@@ -104,6 +106,8 @@ pub struct BackupRow {
 pub struct LoopRow {
     pub lane: String,
     pub exit_code: Option<i32>,
+    /// #432: started by a run that ended before it and watched here; its exit code is not known.
+    pub adopted: bool,
     pub cards: Vec<CardRow>,
 }
 
@@ -136,6 +140,11 @@ pub struct PassReport {
     /// The errors behind `errors`, for the face to record the fleet ones (CORE-2).
     #[serde(skip)]
     pub raised: Vec<CoreError>,
+    /// A satellite tick only: `Some(true)` when another run held the satellite lock, so the
+    /// tick did nothing; `Some(false)` when the tick took it; `None` when it did not ask
+    /// (`SatelliteLog`, #432).
+    #[serde(skip)]
+    pub held_elsewhere: Option<bool>,
 }
 
 impl PassReport {
@@ -249,7 +258,13 @@ pub struct RunEnv<'a> {
     /// How long to wait for another run's lock: none for the window (it comes back at the next
     /// poll), a moment for a headless run.
     pub lock_wait: Duration,
+    /// AUTO-5: the weekly backup of the repos given (`backup::backup_all` with the app's
+    /// settings, or a test's fake). #432 (ruling 8): it runs inside the passes lock.
+    pub backup: &'a BackupFn<'a>,
 }
+
+/// The weekly backup of the repos given, one outcome each.
+pub type BackupFn<'a> = dyn Fn(&[String]) -> Result<Vec<RepoBackup>, CoreError> + 'a;
 
 /// The lock target of the poll passes: `<data>/autopilot.json`.
 pub fn passes_lock_target(data_dir: &Path) -> PathBuf {
@@ -265,8 +280,9 @@ pub fn satellite_lock_target(data_dir: &Path) -> PathBuf {
 /// review, roadmap, merge, weekly. One report each. The error is another run holding the lock
 /// (the window, or a headless pass), or a data folder that cannot be made: then nothing ran.
 ///
-/// The weekly report names the repos to back up (`backup`); the caller runs the backup, which
-/// is long and needs nothing held, and adds its rows with `add_backups`.
+/// The weekly report names the repos to back up (`backup`); when the week's run is due the
+/// backup (`RunEnv::backup`) runs inside the passes lock, kept fresh while it works (#432,
+/// ruling 8), and its rows are added with `add_backups`. A dry run backs up nothing.
 pub fn run_poll_passes(
     env: &RunEnv<'_>,
     which: &[Pass],
@@ -348,7 +364,7 @@ fn merged_rows(merged: Vec<Merged>) -> Vec<MergedRow> {
 }
 
 /// AUTO-4 (#380): every passed PR is tried, each merge followed by a read of its repo (GH-3);
-/// each refusal lands in Waiting on you.
+/// each refusal lands in Waiting on you, and leaves it once its PR has merged or closed (#432).
 fn merge_report(env: &RunEnv<'_>) -> PassReport {
     let mut report = PassReport::new(Pass::Merge, env.dry_run);
     let store = SnapshotStore::new(env.data_dir);
@@ -370,15 +386,19 @@ fn merge_report(env: &RunEnv<'_>) -> PassReport {
         repos: Vec::new(),
     };
     let pass = merge_pass(&snaps, &poller, env.pipeline_root, env.dev_root);
-    report.merged = merged_rows(pass.merged);
-    report.refused = pass.refused;
-    if let Err(e) = record_refused_merges(env.data_dir, &report.refused, env.clock.now()) {
+    if let Err(e) = record_refused_merges(env.data_dir, &pass.refused, env.clock.now()) {
         report.fail("waiting", e);
     }
+    // #432 (ruling 6): a refused PR that has merged or closed since leaves Waiting on you.
+    if let Err(e) = clear_settled_merges(env.data_dir, &snaps, &pass.merged) {
+        report.fail("waiting", e);
+    }
+    report.merged = merged_rows(pass.merged);
+    report.refused = pass.refused;
     report
 }
 
-/// AUTO-5: the weekly drift clear and the repos to back up, once Sunday 6am local has passed.
+/// AUTO-5: the weekly drift clear and the backup of the repos, once Sunday 6am local has passed.
 fn weekly_report(env: &RunEnv<'_>, starter: &mut dyn JobStarter) -> PassReport {
     let mut report = PassReport::new(Pass::Weekly, env.dry_run);
     let Some(offset) = env.utc_offset_secs else {
@@ -398,6 +418,10 @@ fn weekly_report(env: &RunEnv<'_>, starter: &mut dyn JobStarter) -> PassReport {
             }
         }
         Err(e) => report.fail("weekly", e),
+    }
+    if !env.dry_run && !report.backup.is_empty() {
+        let result = (env.backup)(&report.backup);
+        add_backups(&mut report, result);
     }
     report
 }
@@ -433,22 +457,18 @@ pub fn add_backups(report: &mut PassReport, result: Result<Vec<RepoBackup>, Core
     }
 }
 
-/// The file the running satellite writes after each tick, for the status read: the lanes
-/// running and the lanes held. The holds themselves stay in the runner's memory.
-pub const SATELLITE_STATUS_FILE: &str = "status.json";
-
-/// The satellite of one process (AUTO-6, AUTO-9): the runner with its loops and holds, and,
-/// from the tick that starts a loop until the tick that finds none running, the lock that
-/// keeps a second satellite (the window's, or another headless run's) from starting lanes
-/// beside them. The window keeps one for its life; `switchboard autopilot satellite` one for a
-/// tick and the loops it started; `switchboard mcp` one for the server's life.
+/// The satellite of one process (AUTO-6, AUTO-9): the runner with the loops it watches.
+///
+/// #432: each tick takes the satellite lock for that tick only and gives it back when the tick
+/// returns, in every face (the window, `switchboard autopilot satellite`, `switchboard mcp`).
+/// What keeps a second copy of a loop from starting is `<data>/satellite/loops.json`
+/// (`loops`): every loop is recorded there when it starts, every tick counts the loops running
+/// on this machine whoever started them, and a tick adopts the loops of a run that has ended
+/// and watches them to their end. The holds after a failed loop are kept there too.
 pub struct SatelliteSession {
     fleet: FleetBridge,
     data_dir: PathBuf,
     runner: ChildRunner,
-    /// Kept fresh by its own thread (#385 review): an MCP server ticks when its client asks,
-    /// and a loop can outlast `lock::STALE_LOCK` with no tick.
-    lock: Option<FreshLock>,
 }
 
 impl SatelliteSession {
@@ -463,15 +483,22 @@ impl SatelliteSession {
             fleet,
             data_dir: data_dir.to_path_buf(),
             runner,
-            lock: None,
         }
+    }
+
+    /// #432: the bridge the next tick asks and starts loops with. The window reads its settings
+    /// at each tick and hands the bridge in here, so a changed pipeline is used at once.
+    pub fn set_fleet(&mut self, fleet: FleetBridge) {
+        self.runner.set_fleet(fleet.clone());
+        self.fleet = fleet;
     }
 
     /// One tick: read `satellite.json` in `config_dir` (off when missing), record each loop
     /// that ended (a fleet error for one that ended with an error, CORE-2; the class of each
-    /// failed card, AUTO-9) and start the lanes `driver::tick` allows. The tick takes the
-    /// satellite lock and keeps it while a loop of this session runs; another run holding it is
-    /// this tick's error and nothing starts.
+    /// failed card, AUTO-9) and, with the switch on, take the satellite lock, adopt the loops
+    /// of a run that has ended (#432), start the lanes `driver::tick` allows and give the lock
+    /// back. Another run holding the lock (another tick, now) is this tick's error and nothing
+    /// starts.
     pub fn tick(&mut self, config_dir: &Path, lock_wait: Duration) -> PassReport {
         let mut report = PassReport::new(Pass::Satellite, false);
         let config = match driver::load_config(&config_dir.join(SATELLITE_FILE)) {
@@ -481,30 +508,36 @@ impl SatelliteSession {
                 return report;
             }
         };
-        match &self.lock {
-            Some(_) => {}
-            None if !config.satellite_on => {
+        self.reap(&mut report);
+        if !config.satellite_on {
+            report
+                .notes
+                .push("the satellite switch is off (satellite.json)".to_string());
+            return report;
+        }
+        let taken = std::fs::create_dir_all(&self.data_dir)
+            .map_err(|e| CoreError::Io(format!("{}: {e}", self.data_dir.display())))
+            .and_then(|()| FileLock::take(&satellite_lock_target(&self.data_dir), lock_wait));
+        let _held = match taken {
+            Ok(lock) => lock,
+            Err(e) => {
+                report.held_elsewhere = Some(true);
                 report
-                    .notes
-                    .push("the satellite switch is off (satellite.json)".to_string());
+                    .errors
+                    .push(format!("another run holds the satellite ({e})"));
                 return report;
             }
-            None => {
-                let taken = std::fs::create_dir_all(&self.data_dir)
-                    .map_err(|e| CoreError::Io(format!("{}: {e}", self.data_dir.display())))
-                    .and_then(|()| {
-                        FileLock::take(&satellite_lock_target(&self.data_dir), lock_wait)
-                    });
-                match taken {
-                    Ok(lock) => self.lock = Some(lock.kept_fresh(lock::REFRESH_EVERY)),
-                    Err(e) => {
-                        report
-                            .errors
-                            .push(format!("another run holds the satellite ({e})"));
-                        return report;
-                    }
+        };
+        report.held_elsewhere = Some(false);
+        match self.runner.adopt() {
+            Ok(lanes) => {
+                for lane in lanes {
+                    report.notes.push(format!(
+                        "adopted the {lane} loop of a run that ended; watching it to its end"
+                    ));
                 }
             }
+            Err(e) => report.fail("", e),
         }
         self.reap(&mut report);
         let fleet = &self.fleet;
@@ -513,34 +546,29 @@ impl SatelliteSession {
             Ok(started) => report.lanes_started = started,
             Err(e) => report.fail("", e),
         }
-        self.write_status();
-        if self.runner.running().is_empty() {
-            self.lock = None;
+        for e in self.runner.take_errors() {
+            report.fail("", e);
         }
         report
     }
 
-    /// The lanes whose loop is running in this session.
+    /// The lanes whose loop runs on this machine now, whoever started it.
     pub fn running(&mut self) -> Vec<String> {
         self.runner.running()
     }
 
-    /// Wait until every loop this session started has ended, looking every `every`, then give
-    /// the lock back. The report holds each loop that ended, as a tick's does. A headless run
-    /// calls this before it exits, so a loop's failed cards are classed and its error recorded.
+    /// Wait until every loop this session watches (started or adopted) has ended, looking every
+    /// `every`. The report holds each loop that ended, as a tick's does. A headless run calls
+    /// this before it exits, so a loop's failed cards are classed and its error recorded.
     pub fn finish(&mut self, every: Duration) -> PassReport {
         let mut report = PassReport::new(Pass::Satellite, false);
         loop {
             self.reap(&mut report);
-            if self.runner.running().is_empty() {
+            if self.runner.watching().is_empty() {
                 break;
             }
             std::thread::sleep(every);
         }
-        if self.lock.is_some() {
-            self.write_status();
-        }
-        self.lock = None;
         report
     }
 
@@ -557,6 +585,7 @@ impl SatelliteSession {
             let mut row = LoopRow {
                 lane: end.lane.clone(),
                 exit_code: end.exit_code,
+                adopted: end.adopted,
                 cards: Vec::new(),
             };
             match driver::classify_failed(&self.fleet, &dir, &end.stdout) {
@@ -573,40 +602,49 @@ impl SatelliteSession {
             }
             report.loops.push(row);
         }
-    }
-
-    /// Write `<data>/satellite/status.json`: best effort, a status read without it shows no
-    /// lanes.
-    fn write_status(&mut self) {
-        let held: Vec<Value> = self
-            .runner
-            .holds()
-            .into_iter()
-            .map(|(lane, left)| json!({ "lane": lane, "seconds_left": left }))
-            .collect();
-        let status = json!({ "at": unix_now(), "running": self.runner.running(), "held": held });
-        let dir = satellite_lock_target(&self.data_dir);
-        let path = dir.join(SATELLITE_STATUS_FILE);
-        let temp = lock::temp_path(&path, ".tmp");
-        if std::fs::create_dir_all(&dir).is_ok()
-            && std::fs::write(&temp, status.to_string()).is_ok()
-        {
-            let _ = std::fs::rename(&temp, &path);
+        for e in self.runner.take_errors() {
+            report.fail("", e);
         }
     }
 }
 
-fn unix_now() -> UnixSeconds {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs() as UnixSeconds)
+/// #432: the window's satellite lines. A tick refused because another run holds the satellite
+/// is said once when that starts, not at every tick, and "free again" once a tick takes the
+/// lock again.
+#[derive(Debug, Default)]
+pub struct SatelliteLog {
+    held_elsewhere: bool,
 }
 
-/// What a satellite on this machine last wrote (`SatelliteSession::write_status`), read at
-/// `now`: whether one has loops running now (its lock is held), those lanes, the holds whose
-/// time has not passed (`{lane, seconds_left}`), and when it wrote. The holds live in that
-/// process's memory: if it has exited they are gone, and this still shows them until they
-/// would have ended.
+/// The line `SatelliteLog` prints when a tick takes the satellite again.
+pub const SATELLITE_FREE_AGAIN: &str = "satellite: free again";
+
+impl SatelliteLog {
+    /// The lines to print for this tick's report (`PassReport::lines`, less the repeat).
+    pub fn lines(&mut self, report: &PassReport) -> Vec<String> {
+        let mut lines = report.lines();
+        match report.held_elsewhere {
+            Some(true) => {
+                if self.held_elsewhere {
+                    lines.retain(|line| !line.contains("another run holds the satellite"));
+                }
+                self.held_elsewhere = true;
+            }
+            Some(false) => {
+                if self.held_elsewhere {
+                    lines.insert(0, SATELLITE_FREE_AGAIN.to_string());
+                }
+                self.held_elsewhere = false;
+            }
+            None => {}
+        }
+        lines
+    }
+}
+
+/// What the satellites on this machine have on disk (`loops.json`), read at `now`: whether
+/// one is at work now (a loop runs, or a tick holds the lock), the lanes whose loop runs, the
+/// holds whose time has not passed (`{lane, seconds_left}`), and when the file last changed.
 struct SatelliteSeen {
     live: bool,
     running: Vec<String>,
@@ -616,36 +654,22 @@ struct SatelliteSeen {
 
 fn satellite_seen(data_dir: &Path, now: UnixSeconds) -> SatelliteSeen {
     let target = satellite_lock_target(data_dir);
-    let live = lock::held(&target);
-    let file: Value = std::fs::read_to_string(target.join(SATELLITE_STATUS_FILE))
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or(Value::Null);
-    let at = file["at"].as_i64().unwrap_or(0);
-    let held = file["held"]
-        .as_array()
+    let file = loops::read(&target);
+    let running = file.running();
+    let held = file
+        .holds_at(now.saturating_mul(1000))
         .into_iter()
-        .flatten()
-        .filter_map(|hold| {
-            let left = at + hold["seconds_left"].as_i64()? - now;
-            (left > 0).then(|| json!({ "lane": hold["lane"], "seconds_left": left }))
-        })
+        .map(|(lane, ms)| json!({ "lane": lane, "seconds_left": (ms + 999) / 1000 }))
         .collect();
-    let running = if live {
-        file["running"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|lane| lane.as_str().map(str::to_string))
-            .collect()
-    } else {
-        Vec::new()
-    };
     SatelliteSeen {
-        live,
+        live: !running.is_empty() || lock::held(&target),
         running,
         held,
-        as_of: file["at"].clone(),
+        as_of: if file.at > 0 {
+            json!(file.at)
+        } else {
+            Value::Null
+        },
     }
 }
 
@@ -671,8 +695,8 @@ impl LaneRunner for DryRunner {
 
 /// A satellite tick as a dry run: the lanes a tick would start now, with no loop started, no
 /// lock taken and nothing written. The budget is still asked (`fleet budget allow`, AUTO-1).
-/// The lanes another satellite on this machine has running or held are counted; while it has
-/// loops running the note says a real tick would be refused.
+/// #432: the loops running and the holds on this machine (`loops.json`) are read and counted,
+/// as a real tick counts them; a note names the loops running.
 pub fn satellite_dry(fleet: &FleetBridge, data_dir: &Path, config_dir: &Path) -> PassReport {
     let mut report = PassReport::new(Pass::Satellite, true);
     let config = match driver::load_config(&config_dir.join(SATELLITE_FILE)) {
@@ -688,12 +712,12 @@ pub fn satellite_dry(fleet: &FleetBridge, data_dir: &Path, config_dir: &Path) ->
             .push("the satellite switch is off (satellite.json)".to_string());
         return report;
     }
-    let seen = satellite_seen(data_dir, unix_now());
-    if seen.live {
-        report.notes.push(
-            "a satellite has loops running on this machine; a tick from here would be refused"
-                .to_string(),
-        );
+    let seen = satellite_seen(data_dir, loops::now_ms() / 1000);
+    if !seen.running.is_empty() {
+        report.notes.push(format!(
+            "loops running on this machine: {}",
+            seen.running.join(", ")
+        ));
     }
     let mut runner = DryRunner {
         running: seen.running,
@@ -745,9 +769,10 @@ fn running_jobs(data_dir: &Path) -> Vec<Value> {
 
 /// The status read (#385): what `autopilot.json` holds (each ROADMAP by its repo's name only),
 /// whether the week's run is due, whether a run holds the passes now, the jobs still running,
-/// and the satellite: its switch and lanes, whether one has loops running on this machine
-/// (`live`), those lanes, and the holds as it last wrote them (`as_of`; they live in that
-/// process's memory). It reads only; nothing is changed or cleaned up.
+/// and the satellite: its switch and lanes, whether one is at work on this machine (`live`: a
+/// loop runs or a tick holds the lock), the lanes whose loop runs, and the holds, as
+/// `loops.json` has them (`as_of`: when it last changed, #432). It reads only; nothing is
+/// changed or cleaned up.
 pub fn status(
     data_dir: &Path,
     config_dir: Option<&Path>,

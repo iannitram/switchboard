@@ -29,6 +29,7 @@ fn starter(root: &Path, script: &str) -> FleetStarter {
         dev_root: root.join("dev"),
         machine: None,
         qwen_probe: Box::new(|_| false),
+        retry_wait: Duration::ZERO,
     }
 }
 
@@ -119,17 +120,106 @@ fn a_launcher_still_running_is_not_finished() {
     assert_eq!(starter.finished(&id), Ok(false));
 }
 
+/// A stub fleet that writes one line to `runs` beside itself each time it runs, then does what
+/// `then` says.
+fn counting(then: &str) -> String {
+    format!(
+        "import os, sys\nruns = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'runs')\n\
+         with open(runs, 'a') as f:\n    f.write('run\\n')\n\
+         count = len(open(runs).read().splitlines())\n{then}"
+    )
+}
+
+fn runs(root: &Path) -> usize {
+    std::fs::read_to_string(root.join("tools").join("fleet").join("runs"))
+        .unwrap_or_default()
+        .lines()
+        .count()
+}
+
 #[test]
-fn a_launcher_that_says_not_now_with_no_output_is_finished_with_no_error() {
-    // Review of #379: exit 75 is the fleet's "not now" (CORE-1), an answer and not an error, so
-    // the slot is freed and nothing is recorded or filed.
-    let root = temp_dir("not-now");
-    let mut starter = starter(&root, "import sys\nsys.exit(75)\n");
+fn a_pm_launcher_that_says_not_now_twice_is_retried_once_then_fails() {
+    // #432 (ruling 9): exit 75 with no output is retried once after a short wait (none here:
+    // the wait is the starter's); a second 75 is a failure that says so.
+    let root = temp_dir("not-now-twice");
+    let mut starter = starter(
+        &root,
+        &counting("sys.stderr.write('busy\\n')\nsys.exit(75)\n"),
+    );
     let job = pm_job("o/a", "drift", 100, "claude");
     let id = job["id"].as_str().unwrap().to_string();
     starter.start(&job, "brief").unwrap();
     wait_for_exit(&root.join("jobs"), &id);
+    assert_eq!(runs(&root), 2, "retried once, not more");
+    match starter.finished(&id) {
+        Err(CoreError::Fleet(e)) => {
+            assert_eq!(e.exit_code, Some(75));
+            assert!(e.stderr.contains("twice with no output"), "{e:?}");
+            assert!(e.stderr.contains("busy"), "{e:?}");
+        }
+        other => panic!("expected a fleet error, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_pm_launcher_that_says_not_now_once_is_retried_and_its_second_run_counts() {
+    let root = temp_dir("not-now-once");
+    let script = counting("if count == 1:\n    sys.exit(75)\nprint('{}')\n");
+    let mut starter = starter(&root, &script);
+    let job = pm_job("o/a", "drift", 100, "claude");
+    let id = job["id"].as_str().unwrap().to_string();
+    starter.start(&job, "brief").unwrap();
+    wait_for_exit(&root.join("jobs"), &id);
+    assert_eq!(runs(&root), 2);
     assert_eq!(starter.finished(&id), Ok(true));
+}
+
+#[test]
+fn a_pm_retry_waits_and_the_job_is_not_finished_while_it_does() {
+    let root = temp_dir("not-now-wait");
+    let mut starter = starter(&root, &counting("sys.exit(75)\n"));
+    starter.retry_wait = Duration::from_secs(600);
+    let job = pm_job("o/a", "drift", 100, "claude");
+    let id = job["id"].as_str().unwrap().to_string();
+    starter.start(&job, "brief").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while runs(&root) < 1 {
+        assert!(Instant::now() < deadline, "the stub launcher did not run");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(runs(&root), 1, "the retry waits");
+    assert_eq!(
+        starter.finished(&id),
+        Ok(false),
+        "a job waiting for its retry runs on"
+    );
+    assert!(!job_exit_file(&root.join("jobs").join(format!("{id}.json"))).exists());
+}
+
+#[test]
+fn a_launcher_that_says_not_now_with_output_is_not_retried() {
+    let root = temp_dir("not-now-output");
+    let mut starter = starter(&root, &counting("print('{}')\nsys.exit(75)\n"));
+    let job = pm_job("o/a", "drift", 100, "claude");
+    let id = job["id"].as_str().unwrap().to_string();
+    starter.start(&job, "brief").unwrap();
+    wait_for_exit(&root.join("jobs"), &id);
+    assert_eq!(runs(&root), 1);
+    assert_eq!(starter.finished(&id), Ok(true));
+}
+
+#[test]
+fn a_review_launcher_that_says_not_now_is_finished_and_not_retried() {
+    // Review of #379: exit 75 is the fleet's "not now" (CORE-1), an answer and not an error.
+    // #432 (ruling 9) retries only the Project Manager's launcher.
+    let root = temp_dir("not-now");
+    let mut starter = starter(&root, &counting("sys.exit(75)\n"));
+    let job = serde_json::json!({ "id": "review-a-7", "repo": "o/a", "lane": "claude" });
+    starter.start(&job, "brief").unwrap();
+    wait_for_exit(&root.join("jobs"), "review-a-7");
+    assert_eq!(runs(&root), 1);
+    assert_eq!(starter.finished("review-a-7"), Ok(true));
 }
 
 #[test]
