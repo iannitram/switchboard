@@ -216,9 +216,9 @@ fn budget_manager_set_pool_cap_reaches_the_core_once() {
 }
 
 #[test]
-fn satellite_lists_no_write_tool() {
-    // #375: the satellite's one extra tool is a read (`errors`), never a write.
-    // #385: and the autopilot's status read and the satellite's own tick.
+fn satellite_lists_its_tick_as_its_one_write_tool() {
+    // #375: the satellite reads `errors`. #385: it also reads the autopilot's status, and its
+    // one write tool is its own tick; it holds no other role's write.
     assert_eq!(
         tool_names(Some(Role::Satellite)),
         with_extra(&["errors", "autopilot_status", "satellite_tick"])

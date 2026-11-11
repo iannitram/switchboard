@@ -104,7 +104,25 @@ impl FileLock {
     /// Write the lock file again, so a holder that works longer than `STALE_LOCK` (#385: a
     /// merge pass, a satellite loop) is not taken for a run that died.
     pub fn refresh(&self) {
-        let _ = std::fs::write(&self.path, format!("{}\n", run_tag()));
+        rewrite(&self.path);
+    }
+
+    /// Keep this lock fresh every `every` from a thread of its own until the `FreshLock` drops
+    /// (#385 review: a lock held across calls, as an MCP server's satellite between ticks, which
+    /// no one call can `keep_fresh`). The thread ends before the lock file is removed.
+    pub fn kept_fresh(self, every: Duration) -> FreshLock {
+        let (stop, wait) = std::sync::mpsc::channel::<()>();
+        let path = self.path.clone();
+        let refresher = std::thread::spawn(move || {
+            while let Err(std::sync::mpsc::RecvTimeoutError::Timeout) = wait.recv_timeout(every) {
+                rewrite(&path);
+            }
+        });
+        FreshLock {
+            stop: Some(stop),
+            refresher: Some(refresher),
+            _lock: self,
+        }
     }
 
     /// Run `work` with the lock refreshed every `REFRESH_EVERY` until it ends.
@@ -123,6 +141,29 @@ impl FileLock {
             out
         })
     }
+}
+
+/// A `FileLock` a thread keeps fresh (`FileLock::kept_fresh`); dropping it stops the thread,
+/// then removes the lock file.
+#[derive(Debug)]
+pub struct FreshLock {
+    stop: Option<std::sync::mpsc::Sender<()>>,
+    refresher: Option<std::thread::JoinHandle<()>>,
+    _lock: FileLock,
+}
+
+impl Drop for FreshLock {
+    fn drop(&mut self) {
+        drop(self.stop.take());
+        if let Some(refresher) = self.refresher.take() {
+            let _ = refresher.join();
+        }
+    }
+}
+
+/// Write a held lock file again, so its age starts over.
+fn rewrite(path: &Path) {
+    let _ = std::fs::write(path, format!("{}\n", run_tag()));
 }
 
 /// How often `FileLock::keep_fresh` writes the lock file again.

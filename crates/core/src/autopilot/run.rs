@@ -20,7 +20,7 @@ use crate::fleet::FleetBridge;
 use crate::github::poll::Poller;
 use crate::github::snapshot::SnapshotStore;
 use crate::github::transport::GitHubTransport;
-use crate::lock::{self, FileLock};
+use crate::lock::{self, FileLock, FreshLock};
 use crate::rules::Role;
 use crate::CoreError;
 use serde::Serialize;
@@ -446,7 +446,9 @@ pub struct SatelliteSession {
     fleet: FleetBridge,
     data_dir: PathBuf,
     runner: ChildRunner,
-    lock: Option<FileLock>,
+    /// Kept fresh by its own thread (#385 review): an MCP server ticks when its client asks,
+    /// and a loop can outlast `lock::STALE_LOCK` with no tick.
+    lock: Option<FreshLock>,
 }
 
 impl SatelliteSession {
@@ -480,7 +482,7 @@ impl SatelliteSession {
             }
         };
         match &self.lock {
-            Some(lock) => lock.refresh(),
+            Some(_) => {}
             None if !config.satellite_on => {
                 report
                     .notes
@@ -494,7 +496,7 @@ impl SatelliteSession {
                         FileLock::take(&satellite_lock_target(&self.data_dir), lock_wait)
                     });
                 match taken {
-                    Ok(lock) => self.lock = Some(lock),
+                    Ok(lock) => self.lock = Some(lock.kept_fresh(lock::REFRESH_EVERY)),
                     Err(e) => {
                         report
                             .errors
@@ -528,20 +530,12 @@ impl SatelliteSession {
     /// calls this before it exits, so a loop's failed cards are classed and its error recorded.
     pub fn finish(&mut self, every: Duration) -> PassReport {
         let mut report = PassReport::new(Pass::Satellite, false);
-        let mut since_refresh = Duration::ZERO;
         loop {
             self.reap(&mut report);
             if self.runner.running().is_empty() {
                 break;
             }
             std::thread::sleep(every);
-            since_refresh += every;
-            if since_refresh >= lock::REFRESH_EVERY {
-                since_refresh = Duration::ZERO;
-                if let Some(lock) = &self.lock {
-                    lock.refresh();
-                }
-            }
         }
         if self.lock.is_some() {
             self.write_status();

@@ -599,3 +599,38 @@ fn a_pass_by_hand_needs_its_role_and_is_refused_in_a_job_worktree() {
         );
     }
 }
+
+/// #385 review: a lock held across calls (an MCP server's satellite between ticks) is kept
+/// fresh by its own thread, so the 10-minute stale rule cannot hand it to a second run while a
+/// loop outlasts it; dropped, its thread stops before the file goes and never writes it again.
+#[test]
+fn a_lock_held_across_calls_is_kept_fresh_and_gone_when_dropped() {
+    let w = world("fresh");
+    std::fs::create_dir_all(&w.data).unwrap();
+    let target = satellite_lock_target(&w.data);
+    let held = FileLock::take(&target, Duration::ZERO)
+        .unwrap()
+        .kept_fresh(Duration::from_millis(20));
+    // The lock file as a dead run's would look: older than the stale rule.
+    let old = std::time::SystemTime::now() - lock::STALE_LOCK - Duration::from_secs(60);
+    std::fs::File::options()
+        .write(true)
+        .open(lock::lock_path(&target))
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(lock::held(&target), "the holder's thread wrote it again");
+    assert!(
+        FileLock::take(&target, Duration::ZERO).is_err(),
+        "no second run takes a lock its holder keeps fresh"
+    );
+    drop(held);
+    assert!(!lock::lock_path(&target).exists());
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(
+        !lock::lock_path(&target).exists(),
+        "nothing writes it again"
+    );
+    assert!(FileLock::take(&target, Duration::ZERO).is_ok());
+}
