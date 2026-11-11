@@ -55,6 +55,11 @@ fn scratch(name: &str) -> PathBuf {
 /// A pipeline root under `dir` with the fixture stub and a config that names this machine's
 /// qwen model and server.
 fn fleet(dir: &Path) -> FleetBridge {
+    fleet_with(dir, &|_| {})
+}
+
+/// `fleet` with the budget snapshot changed by `edit`.
+fn fleet_with(dir: &Path, edit: &dyn Fn(&mut Value)) -> FleetBridge {
     let stub = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fleet-stub");
     let root = dir.join("pipeline");
     for sub in ["tools/fleet", "answers"] {
@@ -72,6 +77,7 @@ fn fleet(dir: &Path) -> FleetBridge {
     let mut budget: Value =
         serde_json::from_str(&std::fs::read_to_string(&budget_file).unwrap()).unwrap();
     budget["qwen"] = json!({ "verdict": "on-pace", "stale": false });
+    edit(&mut budget);
     std::fs::write(&budget_file, budget.to_string()).unwrap();
     let config = json!({ "machines": { MACHINE: {
         "qwen_capable": true,
@@ -89,6 +95,17 @@ fn ask(
     thread: Option<&str>,
     dry_run: bool,
 ) -> (Result<Asked, CoreError>, Vec<String>) {
+    ask_over(dir, message, thread, dry_run, &|_| {})
+}
+
+/// `ask` with the budget snapshot changed by `edit`.
+fn ask_over(
+    dir: &Path,
+    message: &str,
+    thread: Option<&str>,
+    dry_run: bool,
+    edit: &dyn Fn(&mut Value),
+) -> (Result<Asked, CoreError>, Vec<String>) {
     let seen: Seen = Arc::default();
     let env = |_: &str| None;
     let transport = {
@@ -103,7 +120,7 @@ fn ask(
         qwen_up: &|_| false,
     };
     let asked = ask_on(
-        &fleet(dir),
+        &fleet_with(dir, edit),
         &dir.join("data"),
         message,
         thread,
@@ -147,6 +164,55 @@ fn a_dry_run_is_the_route_alone_and_sends_and_stores_nothing() {
             "budget_snapshot": "stale (chatgpt 138 min old)"
         })
     );
+}
+
+/// #433: `fleet budget allow qwen` (no `--machine`, as a real ask calls it) lets the local lane
+/// through even when every Qwen machine is busy, so the dry run must too.
+#[test]
+fn a_dry_run_lets_qwen_through_when_every_qwen_machine_is_busy() {
+    let dir = scratch("dry-qwen-busy");
+    let busy = |budget: &mut Value| {
+        budget["qwen"] = json!({
+            "verdict": "brake",
+            "stale": false,
+            "why": "all qwen machines busy: strix-halo"
+        });
+    };
+    let (asked, seen) = ask_over(&dir, ASK, None, true, &busy);
+    let asked = asked.unwrap();
+    assert_eq!(asked.reply.route.pick, qwen());
+    assert!(seen.is_empty());
+    assert!(!dir.join("data").exists());
+}
+
+/// #433: a dry run whose route asks about a stale auto-read pool does not refresh it, but says
+/// a real ask would, and how old the reading it used is.
+#[test]
+fn a_dry_run_says_a_real_ask_would_refresh_a_stale_auto_read_pool_first() {
+    let dir = scratch("dry-refresh");
+    let fresh_chatgpt = |budget: &mut Value| {
+        budget["chatgpt"]["verdict"] = json!("on-pace");
+    };
+    let message = "search the web for the latest rust release";
+    let (asked, seen) = ask_over(&dir, message, None, true, &fresh_chatgpt);
+    let asked = asked.unwrap();
+    assert_eq!(asked.reply.route.kind.as_deref(), Some("web-research"));
+    assert_eq!(
+        asked.refresh_first,
+        ["a real ask would refresh chatgpt first; this answer uses the reading from 138 min ago"]
+    );
+    let wire = serde_json::to_value(&asked).unwrap();
+    assert_eq!(
+        wire["refresh_first"],
+        json!([
+            "a real ask would refresh chatgpt first; this answer uses the reading from 138 min ago"
+        ])
+    );
+    assert!(seen.is_empty());
+    assert!(!dir.join("data").exists(), "the dry run writes nothing");
+    // A route that never asks about the stale pool says nothing of it.
+    let (asked, _) = ask_over(&dir, ASK, None, true, &fresh_chatgpt);
+    assert!(asked.unwrap().refresh_first.is_empty());
 }
 
 #[test]
@@ -291,4 +357,82 @@ fn nothing_passes_the_front_door_inside_a_job_worktree() {
             Verdict::Refuse("ask_as_job: refused inside a job worktree".to_string())
         );
     }
+}
+
+// --- FD-12: held requests and their unmet needs (#429, #433) ---
+
+use switchboard_core::frontdoor::ask::{held_request, infer_unmet, unmet_needs, Held};
+use switchboard_core::it::Loadout;
+
+#[test]
+fn unmet_needs_are_the_request_kinds_needs_the_loadout_does_not_meet() {
+    let dir = scratch("unmet");
+    let fleet = fleet(&dir);
+    let bare = Loadout::default();
+    assert_eq!(
+        unmet_needs(&fleet, Some(MACHINE), "web-research", &bare),
+        Ok(vec!["web".to_string()])
+    );
+    let web = Loadout {
+        toolchains: vec!["web".to_string()],
+        ..Loadout::default()
+    };
+    assert_eq!(
+        unmet_needs(&fleet, Some(MACHINE), "web-research", &web),
+        Ok(vec![])
+    );
+    for kind in ["no-such-kind", "small-code-change-exact-brief"] {
+        assert_eq!(
+            unmet_needs(&fleet, Some(MACHINE), kind, &bare),
+            Err(refused(&format!("no request kind {kind}"))),
+            "not a request kind: {kind}"
+        );
+    }
+}
+
+#[test]
+fn ask_as_job_infers_its_unmet_needs_and_refuses_a_kind_this_machine_meets() {
+    let dir = scratch("infer");
+    let fleet = fleet(&dir);
+    let bare = Loadout::default();
+    assert_eq!(
+        infer_unmet(&fleet, "web-research", &bare),
+        Ok(vec!["web".to_string()])
+    );
+    assert_eq!(
+        infer_unmet(&fleet, "quick-lookup", &bare),
+        Err(refused(
+            "this machine meets every need of quick-lookup: nothing to send as a job"
+        ))
+    );
+}
+
+#[test]
+fn a_routed_request_is_held_only_when_the_loadout_misses_a_need() {
+    let dir = scratch("held");
+    let fleet = fleet(&dir);
+    let message = "search the web for the latest rust release";
+    let (asked, _) = ask(&dir, message, None, true);
+    let reply = asked.unwrap().reply;
+    let bare = Loadout::default();
+    assert_eq!(
+        held_request(&fleet, Some(MACHINE), &reply, message, Some(&bare)),
+        Some(Held {
+            kind: "web-research".to_string(),
+            request: message.to_string(),
+            unmet: vec!["web".to_string()],
+        })
+    );
+    assert_eq!(
+        held_request(&fleet, Some(MACHINE), &reply, message, None),
+        None,
+        "the loadout not read yet: nothing is held"
+    );
+    let (asked, _) = ask(&dir, ASK, None, true);
+    let lookup = asked.unwrap().reply;
+    assert_eq!(
+        held_request(&fleet, Some(MACHINE), &lookup, ASK, Some(&bare)),
+        None,
+        "a kind with no needs is never held"
+    );
 }

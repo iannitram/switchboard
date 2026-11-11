@@ -204,7 +204,7 @@ fn each_signal_says_why_the_chat_moved() {
         moves(&chat.rows()),
         [line(
             ("qwen", "qwen-small"),
-            ("claude", "sonnet"),
+            ("claude", "model not chosen by Switchboard"),
             "I said \"ask Claude\""
         )]
     );

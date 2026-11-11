@@ -11,7 +11,7 @@ use super::adapters::{
     GeminiAdapter, QwenAdapter,
 };
 use super::chat::{
-    qwen_failed_line, ChatPick, ChatRoute, Fallback, BRAKE_LIFTED_STEP, DEFAULT_CLAUDE_MODEL,
+    claude_label, qwen_failed_line, ChatPick, ChatRoute, Fallback, BRAKE_LIFTED_STEP,
 };
 use super::packet::{self, Packet, Turn};
 use super::rating_log::rating_id;
@@ -103,6 +103,10 @@ pub struct ChatReply {
     /// session starts from: the packet (`packet::as_prompt`), then the ask.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub packet: Option<String>,
+    /// #433: on a Claude handoff, how its model shows: `Claude <model>`, or
+    /// `chat::CLAUDE_MODEL_NOT_CHOSEN` when Switchboard chose none (`chat::claude_label`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claude_label: Option<String>,
 }
 
 /// The `role` of a thread's rolling-summary row (one per thread, rewritten at each move).
@@ -244,6 +248,35 @@ struct Move {
     why: String,
     /// #428: how many of the thread's turns the summary covers (`JobRow::covers_turns`).
     covers: Option<u32>,
+    /// #433: the content hash of those turns (`JobRow::covers_hash`, `turns_hash`).
+    covers_hash: Option<String>,
+}
+
+/// #433: a stable content hash of `turns` (each one's role, text and outcome), so a cached
+/// summary is only reused for the very turns it was written from: 64-bit FNV-1a, as 16 hex
+/// digits. Not for security; it only has to change when a turn is edited or removed.
+pub fn turns_hash(turns: &[&JobRow]) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut feed = |bytes: &[u8]| {
+        for byte in bytes {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    };
+    for turn in turns {
+        for field in [&turn.role, &turn.text, &turn.outcome] {
+            match field {
+                Some(value) => {
+                    feed(b"\x01");
+                    feed(value.as_bytes());
+                }
+                None => feed(b"\x00"),
+            }
+            feed(b"\x1f");
+        }
+        feed(b"\x1e");
+    }
+    format!("{hash:016x}")
 }
 
 /// The lane a move row names when the chat went to a Claude session (FD-8): the Claude
@@ -348,9 +381,23 @@ fn plan_move(
     let earlier = summary_row
         .and_then(|row| row.text.clone())
         .unwrap_or_default();
-    let covered = summary_row.and_then(|row| row.covers_turns);
+    let stored_covered = summary_row.and_then(|row| row.covers_turns);
+    let stored_hash = summary_row.and_then(|row| row.covers_hash.clone());
     let thread_turns: Vec<&JobRow> = rows.iter().filter(|row| is_turn(row)).collect();
     let now = u32::try_from(thread_turns.len()).unwrap_or(u32::MAX);
+    // #433: the summary covers its turns only while they are the turns it was written from (the
+    // hash of the first `covered` turns matches). A summary that counts turns but has no hash
+    // (stored before #433), or whose turns changed, is a miss: it is written again from every
+    // turn. A summary stored before #428 (no count) is summarised on top of, as before.
+    let unchanged = stored_covered.is_some_and(|covered| {
+        thread_turns
+            .get(..covered as usize)
+            .is_some_and(|turns| stored_hash.as_deref() == Some(turns_hash(turns).as_str()))
+    });
+    let (from_text, covered) = match stored_covered {
+        Some(_) if !unchanged => (String::new(), Some(0)),
+        _ => (earlier.clone(), stored_covered),
+    };
     let turns: Vec<Turn> = rows
         .iter()
         .filter(|row| is_turn(row) && row.outcome.as_deref() != Some(QUEUED))
@@ -364,49 +411,52 @@ fn plan_move(
     let mut links: Vec<String> = turns.iter().flat_map(|t| links_in(&t.text)).collect();
     links.extend(links_in(message));
     let questions = open_questions(&rows);
-    let (summary, covers) = if covered == Some(now) {
+    let rewritten = if unchanged && covered == Some(now) {
         // #428: no new turn since the summary: it is reused, and no model is asked.
-        (earlier, covered)
+        None
     } else {
         rewrite_summary(
             store,
             handoff_id,
             &from,
-            earlier,
+            &from_text,
             covered,
-            now,
             &thread_turns,
             &links,
             &questions,
             ctx,
         )?
     };
+    // The model could not be reached (or nothing changed): the stored summary is kept as it is.
+    let (summary, covers, covers_hash) = match rewritten {
+        Some(summary) => (summary, Some(now), Some(turns_hash(&thread_turns))),
+        None => (earlier, stored_covered, stored_hash),
+    };
     Ok(Move {
         packet: packet::build(&summary, &turns, &links),
         from,
         why,
         covers,
+        covers_hash,
     })
 }
 
 /// FD-6, FD-7 (#428): the outgoing model rewrites the summary `earlier`, which covers the
 /// first `covered` of the thread's turns: it is sent only the turns since (answered ones), or,
-/// for a summary stored before #428 or none, the turns since the last move. Returns the
-/// summary and how many turns it covers: `now`, or `earlier` and `covered` as they were when
-/// the model cannot be reached.
+/// for a summary stored before #428 or none, the turns since the last move. Returns the new
+/// summary, which covers every turn of the thread, or None when the model cannot be reached.
 #[allow(clippy::too_many_arguments)]
 fn rewrite_summary(
     store: &ThreadStore,
     handoff_id: &str,
     from: &OpenChat,
-    earlier: String,
+    earlier: &str,
     covered: Option<u32>,
-    now: u32,
     thread_turns: &[&JobRow],
     links: &[String],
     questions: &[String],
     ctx: &AnswerContext,
-) -> Result<(String, Option<u32>), CoreError> {
+) -> Result<Option<String>, CoreError> {
     let summary = match adapter_for(&from.service, ctx) {
         Ok(outgoing) => {
             let (system, since_move) = context(store, handoff_id)?;
@@ -461,12 +511,12 @@ fn rewrite_summary(
                     };
                     let checked =
                         packet::checked_summary(first.text.clone(), links, questions, &mut again);
-                    (checked.0, Some(now))
+                    Some(checked.0)
                 }
-                Err(_) => (earlier, covered),
+                Err(_) => None,
             }
         }
-        Err(_) => (earlier, covered),
+        Err(_) => None,
     };
     Ok(summary)
 }
@@ -491,6 +541,7 @@ fn record_move(
         handoff_id: Some(handoff_id.to_string()),
         source: RowSource::Chat,
         covers_turns: planned.covers,
+        covers_hash: planned.covers_hash.clone(),
         ..JobRow::default()
     };
     store.upsert(handoff_id, &summary)?;
@@ -674,7 +725,12 @@ fn hold(
 
 /// A reply that is the route alone.
 pub(crate) fn route_alone(route: ChatRoute) -> ChatReply {
+    let claude_label = match &route.pick {
+        ChatPick::ClaudeHandoff { model, .. } => Some(claude_label(model.as_deref())),
+        _ => None,
+    };
     ChatReply {
+        claude_label,
         route,
         handoff_id: None,
         text: None,
@@ -711,13 +767,12 @@ fn answer(
         let (Some(id), Some(from)) = (handoff_id, open) else {
             return Ok(route_alone(route));
         };
-        // #428: the move stores the Claude model, and the thread stays on one model.
+        // #428, #433: the move stores a Claude model only when one was chosen: the route's
+        // (named in the ask or by its kind), else the thread's earlier one; else none.
         let mut route = route;
         let thread_model = claude_model_of(&store.read(id)?);
         if let ChatPick::ClaudeHandoff { model, .. } = &mut route.pick {
-            *model = thread_model
-                .or_else(|| model.take())
-                .or_else(|| Some(DEFAULT_CLAUDE_MODEL.to_string()));
+            *model = model.take().or(thread_model);
         }
         let to = match &route.pick {
             ChatPick::ClaudeHandoff { model, .. } => model.clone(),
@@ -792,6 +847,7 @@ fn answer(
         moved_why: planned.map(|p| p.why),
         fallback: fallback.map(str::to_string),
         packet: None,
+        claude_label: None,
         route,
     })
 }

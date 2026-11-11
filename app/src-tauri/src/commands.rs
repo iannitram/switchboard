@@ -2,6 +2,7 @@
 //! renders, or the core's error as `{ "error": { "command", "lines" } }` (SHELL-3).
 
 use serde::Serialize;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use switchboard_core::budget::{self, PoolEdit, PoolRow};
@@ -587,11 +588,47 @@ pub fn backup_all(
         .map_err(|e| FaceError::new("backup_all", &e))
 }
 
+/// FD-12 (#429): the held requests being filed now, one key each (`filing_key`).
+static FILING_HELD: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+
+/// FD-12 (#429): one held request being filed; dropping it ends the filing.
+#[derive(Debug)]
+pub struct FilingHeld(String);
+
+impl Drop for FilingHeld {
+    fn drop(&mut self) {
+        FILING_HELD
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&self.0);
+    }
+}
+
+/// FD-12 (#429): the key of one held request: its kind, its text and the chat it is sent from.
+pub fn filing_key(kind: &str, request: &str, handoff_id: Option<&str>) -> String {
+    format!(
+        "{kind}\u{1f}{request}\u{1f}{}",
+        handoff_id.unwrap_or_default()
+    )
+}
+
+/// FD-12 (#429): start filing `key`, or None while the same request is already being filed
+/// (a second press, or the view opened again, files it once).
+pub fn start_filing(key: String) -> Option<FilingHeld> {
+    let mut filing = FILING_HELD.lock().unwrap_or_else(|p| p.into_inner());
+    // Lazily: a refused press must not build (and so drop) a guard that removes the key.
+    filing.insert(key.clone()).then(|| FilingHeld(key))
+}
+
 /// FD-12: send a held Chat request as a fleet job another machine pulls (the Chat view's
 /// "Send as a fleet job"). This machine's name comes from `FLEET_MACHINE` or the machine file.
 /// With `handoff_id` (the chat it is sent from) the job carries the chat's packet and the move
 /// is stored in the thread (FD-6).
-#[tauri::command]
+///
+/// #429 (owner ruling 2026-11-11): it does not block the window. It runs off the main thread,
+/// as `chat_route` does, so the view stays usable and its answer comes when filing ends; the
+/// same request sent again while it is being filed is refused, so it is filed once.
+#[tauri::command(async)]
 pub fn chat_send_as_job(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
@@ -600,6 +637,12 @@ pub fn chat_send_as_job(
     unmet: Vec<String>,
     handoff_id: Option<String>,
 ) -> Result<serde_json::Value, FaceError> {
+    let Some(_filing) = start_filing(filing_key(&kind, &request, handoff_id.as_deref())) else {
+        return Err(FaceError::new(
+            "chat_send_as_job",
+            &CoreError::Refused("this request is already being sent as a fleet job".to_string()),
+        ));
+    };
     bridge(&state.settings_path)
         .and_then(|fleet| {
             let data = match &handoff_id {
@@ -743,6 +786,20 @@ mod sky_ledger_tests;
 #[path = "commands_tests.rs"]
 mod tests;
 
+/// FD-1, FD-12 (#429): what `chat_route` answers: the reply, and the request this machine holds
+/// for it (`ask::held_request`), which the window hands the Chat view.
+#[derive(Debug, Serialize)]
+pub struct ChatRouted {
+    #[serde(flatten)]
+    pub reply: switchboard_core::frontdoor::answer::ChatReply,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub held: Option<switchboard_core::frontdoor::ask::Held>,
+}
+
+#[cfg(test)]
+#[path = "chat_held_tests.rs"]
+mod chat_held_tests;
+
 /// FD-1, FD-11: route one Chat message (the composer's Send, #177), then answer it: a service
 /// pick is sent through its adapter and both turns are stored in the thread (`handoff_id` names
 /// an open thread; none starts one). FD-5: an open thread stays on its model until a signal
@@ -750,13 +807,17 @@ mod tests;
 /// is the route (`step`, `kind`, `pick`) with `text`, `service`, `model`, `handoff` and
 /// `handoff_id` when answered, `moved_from` on a move and `packet` on a Claude handoff that
 /// moves an open chat. It runs off the main thread: it calls a model.
+///
+/// FD-12 (#429): with the reply comes `held`, the request this machine holds when its loadout
+/// (the newest read) misses a need of the route's kind; the Chat view offers to send it as a
+/// fleet job.
 #[tauri::command(async)]
 pub fn chat_route(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     message: String,
     handoff_id: Option<String>,
-) -> Result<switchboard_core::frontdoor::answer::ChatReply, FaceError> {
+) -> Result<ChatRouted, FaceError> {
     use switchboard_core::frontdoor::ask;
     let data = app
         .path()
@@ -765,7 +826,19 @@ pub fn chat_route(
     bridge(&state.settings_path)
         .and_then(|fleet| {
             let asked = ask::ask(&fleet, &data?, &message, handoff_id.as_deref(), false)?;
-            Ok(asked.reply)
+            let machine = switchboard_core::abilities::FleetModels::local_machine();
+            let loadout = latest_loadout(&state);
+            let held = ask::held_request(
+                &fleet,
+                machine.as_deref(),
+                &asked.reply,
+                &message,
+                loadout.as_ref(),
+            );
+            Ok(ChatRouted {
+                reply: asked.reply,
+                held,
+            })
         })
         .map_err(|e| {
             record_fleet_error(&state, &e);

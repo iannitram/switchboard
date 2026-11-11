@@ -390,19 +390,77 @@ fn a_dry_run_answers_from_the_snapshot_and_says_how_old_a_stale_one_is() {
     assert!(!w.data.join("threads").exists(), "a dry run writes nothing");
     assert_eq!(w.asked(), 0);
 
-    // qwen braked in the snapshot: the dry run says where the ask would go instead.
+    // #433 (changes the #430 assertion, which routed past a braked qwen): qwen braked in the
+    // snapshot (every Qwen machine busy) is still allowed, as `fleet budget allow qwen` with no
+    // `--machine` allows the local lane, so the dry run routes where a real ask would.
     let out = w.run_with(&["ask", ASK, "--dry-run"], &[("STUB_BRAKED", "qwen")]);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     assert!(
-        stdout(&out).starts_with("route: gemini "),
+        stdout(&out).starts_with(&format!("route: qwen {MODEL}\n")),
         "{}",
         stdout(&out)
     );
+    // A paid pool braked in the snapshot is still routed past.
+    let out = w.run_with(
+        &["ask", ASK, "--dry-run"],
+        &[("STUB_BRAKED", "qwen,gemini")],
+    );
+    assert!(stdout(&out).starts_with("route: qwen "), "{}", stdout(&out));
     assert!(
         !stdout(&out).contains("budget snapshot"),
         "{}",
         stdout(&out)
     );
+}
+
+/// #433: a Claude handoff's model shows as Switchboard chose it: the tier the ask names, or
+/// "Claude (model not chosen by Switchboard)", in the text and the JSON.
+#[test]
+fn a_claude_handoff_says_which_model_or_that_none_was_chosen() {
+    let w = world("dry-claude");
+    let out = w.run(&["ask", "ask Claude about worktrees", "--dry-run"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(
+        stdout(&out)
+            .starts_with("route: claude handoff: Claude (model not chosen by Switchboard)\n"),
+        "{}",
+        stdout(&out)
+    );
+    let json = w.run(&["ask", "ask Claude about worktrees", "--dry-run", "--json"]);
+    assert_eq!(
+        json_out(&json)["claude_label"],
+        "Claude (model not chosen by Switchboard)"
+    );
+    assert_eq!(json_out(&json)["pick"].get("model"), None);
+    let out = w.run(&["ask", "ask Claude Opus about worktrees", "--dry-run"]);
+    assert!(
+        stdout(&out).starts_with("route: claude handoff: Claude opus\n"),
+        "{}",
+        stdout(&out)
+    );
+    assert!(w.threads().is_empty());
+}
+
+/// #433: a dry run that used a stale auto-read pool's reading says a real ask would refresh it
+/// first, and how old the reading is; it still refreshes nothing.
+#[test]
+fn a_dry_run_says_a_real_ask_would_refresh_a_stale_auto_read_pool() {
+    let w = world("dry-refresh");
+    let message = "search the web for the latest rust release";
+    let out = w.run_with(&["ask", message, "--dry-run"], &[("STUB_STALE", "chatgpt")]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains(
+            "\na real ask would refresh chatgpt first; this answer uses the reading from 95 min ago\n"
+        ),
+        "{}",
+        stdout(&out)
+    );
+    for (argv, _) in w.fleet_calls() {
+        assert!(!argv.starts_with("budget allow"), "{argv}");
+        assert!(!argv.contains("--refresh"), "{argv}");
+    }
+    assert!(!w.data.join("threads").exists(), "a dry run writes nothing");
 }
 
 #[test]
@@ -432,13 +490,16 @@ fn a_dry_run_needs_no_role_and_runs_in_a_job_worktree() {
     assert!(w.threads().is_empty());
 }
 
+/// #433 (changes the test that expected `route: wait`): with every pool braked in the snapshot,
+/// the dry run still lets the local Qwen lane through, as `fleet budget allow qwen` does for a
+/// real ask, and queues nothing.
 #[test]
-fn a_dry_run_with_every_pool_braked_says_wait_and_queues_nothing() {
+fn a_dry_run_with_every_pool_braked_goes_to_the_local_qwen_lane_and_queues_nothing() {
     let w = world("dry-braked");
     let out = w.run_with(&["ask", ASK, "--dry-run"], &[("STUB_BUDGET_EXIT", "75")]);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     assert!(
-        stdout(&out).starts_with("route: wait\n"),
+        stdout(&out).starts_with(&format!("route: qwen {MODEL}\n")),
         "{}",
         stdout(&out)
     );
@@ -618,7 +679,7 @@ fn an_ask_with_no_pipeline_set_says_which_variable() {
 #[test]
 fn bad_lines_are_usage_errors() {
     let w = world("usage");
-    let cases: [(&[&str], &str); 13] = [
+    let cases: [(&[&str], &str); 12] = [
         (&["ask"], "ask needs one \"<text>\""),
         (&["ask", "what", "is", "this"], "ask needs one \"<text>\""),
         (&["ask", ASK, "--thread"], "--thread needs a value"),
@@ -645,10 +706,6 @@ fn bad_lines_are_usage_errors() {
         (
             &["rate", "t", "1", "sideways"],
             "rate: rating must be up or down, got sideways",
-        ),
-        (
-            &["ask_as_job", "code-change", "fix it"],
-            "ask_as_job needs --unmet",
         ),
     ];
     for (argv, message) in cases {
@@ -679,7 +736,7 @@ fn the_usage_line_names_the_front_door() {
     assert_eq!(out.status.code(), Some(0));
     for part in [
         "ask \"<text>\" [--dry-run] [--thread <id>]",
-        "ask_as_job <kind> \"<text>\" --unmet <need>[,<need>]",
+        "ask_as_job <kind> \"<text>\" [--unmet <need>[,<need>]] [--thread <id>]",
         "rate <thread> <turn> <up|down>",
     ] {
         assert!(stdout(&out).contains(part), "{}", stdout(&out));
@@ -948,6 +1005,51 @@ fn an_ask_whose_pool_is_braked_is_answered_by_qwen_and_says_so() {
     assert!(reply.get("fallback").is_none(), "{reply}");
 }
 
+/// #433 (#429): `ask_as_job` with no `--unmet` (it was a usage error) sends the kind's needs
+/// this machine's loadout does not meet. The fixture's `web-research` needs `web`, which no
+/// probe on a test machine reports; a kind that is not a request kind is refused before any
+/// job is sent.
+#[test]
+fn ask_as_job_without_unmet_infers_the_needs_this_machine_lacks() {
+    let w = world("job-infer");
+    let out = w.run(&pm(&[
+        "--json",
+        "ask_as_job",
+        "web-research",
+        "find the release notes",
+    ]));
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let job = json!({
+        "kind": "web-research",
+        "request": "find the release notes",
+        "needs": ["web"],
+        "never_on": [MACHINE]
+    });
+    assert_eq!(json_out(&out), job);
+    let attach: Vec<_> = w
+        .fleet_calls()
+        .into_iter()
+        .filter(|(argv, _)| argv.starts_with("attach"))
+        .collect();
+    assert_eq!(attach.len(), 1, "{attach:?}");
+    assert_eq!(serde_json::from_str::<Value>(&attach[0].1).unwrap(), job);
+
+    let w = world("job-infer-unknown");
+    let out = w.run(&pm(&["ask_as_job", "code-change", "fix it"]));
+    assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
+    assert!(
+        stderr(&out).contains("no request kind code-change"),
+        "{}",
+        stderr(&out)
+    );
+    assert!(
+        !w.fleet_calls()
+            .iter()
+            .any(|(argv, _)| argv.starts_with("attach")),
+        "nothing is sent"
+    );
+}
+
 #[test]
 fn ask_as_job_that_fleet_does_not_queue_is_exit_1() {
     let w = world("job-75");
@@ -1081,4 +1183,45 @@ fn mcp_in_a_job_worktree_holds_no_front_door() {
     assert_eq!(replies[1]["error"]["message"], "unknown tool: ask");
     assert!(w.fleet_calls().is_empty());
     assert_eq!(w.asked(), 0);
+}
+
+/// #433: a dry run on a stored thread, the routes a real ask would take from it included (a
+/// Claude handoff that would move it, a braked pool), writes nothing: every file under the data
+/// folder is byte for byte as it was.
+#[test]
+fn a_dry_run_on_a_stored_thread_writes_nothing() {
+    fn files(dir: &Path, out: &mut Vec<(PathBuf, Vec<u8>)>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                out.push((path.clone(), Vec::new()));
+                files(&path, out);
+            } else {
+                let bytes = std::fs::read(&path).unwrap();
+                out.push((path, bytes));
+            }
+        }
+    }
+    let w = world("dry-thread");
+    let thread = w.ask();
+    let tree = || {
+        let mut all = Vec::new();
+        files(&w.data, &mut all);
+        all.sort();
+        all
+    };
+    let before = tree();
+    for (message, env) in [
+        (ASK, ("STUB_BRAKED", "")),
+        ("ask Claude about worktrees", ("STUB_BRAKED", "")),
+        (ASK, ("STUB_BRAKED", "qwen,gemini")),
+        (
+            "search the web for the latest rust release",
+            ("STUB_STALE", "chatgpt"),
+        ),
+    ] {
+        let out = w.run_with(&["ask", message, "--dry-run", "--thread", &thread], &[env]);
+        assert_eq!(out.status.code(), Some(0), "{message}: {}", stderr(&out));
+    }
+    assert!(tree() == before, "a dry run changed the data folder");
 }
