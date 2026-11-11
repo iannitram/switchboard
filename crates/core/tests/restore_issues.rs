@@ -1887,3 +1887,58 @@ fn a_label_that_is_there_with_another_colour_is_left_and_named() {
     assert_eq!(queued(&f), expected_issue_queue(), "no label was queued");
     assert_eq!(patches(&api), closes_old(2), "and none was changed");
 }
+
+/// #365, owner ruling of 2026-11-11: a label the live repo already has keeps the live colour
+/// and description. The restore queues no create for it, sends nothing that changes it, and
+/// names it in the report.
+#[test]
+fn a_label_that_is_there_keeps_its_live_colour_and_description() {
+    let f = fixture("colour-kept");
+    made_as(&f, &[("Bug", 1), ("Old", 2)]);
+    std::fs::write(
+        f.backup.join("labels.json"),
+        r#"[{"name": "bug", "color": "d73a4a", "description": "as backed up"},
+            {"name": "size:Easy", "color": "0E8A16", "description": "as backed up"}]"#,
+    )
+    .unwrap();
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            answer(200, json!({"private": true})),
+            answer(
+                200,
+                json!([{"name": "Bug", "color": "ffffff", "description": "the live one"},
+                       {"name": "size:Easy", "color": "0e8a16", "description": "the live one"}]),
+            ),
+            answer(200, json!([{"title": "1.0"}])),
+            listed(&[]),
+            listed(&[(1, "Bug"), (2, "Old")]),
+            answer(200, json!([])),
+        ],
+    );
+    let report = restore_over_live_from(
+        &caller(Face::Gui, false),
+        &f.fleet,
+        &f.backup,
+        NEW,
+        true,
+        &remote(&f, &api),
+    )
+    .unwrap();
+    assert_eq!(report.labels, 0);
+    assert_eq!(
+        report.left_out,
+        ["1 labels are there with another colour and were left as they are: bug"]
+    );
+    assert!(
+        queued(&f).iter().all(|item| item["kind"] != "label"),
+        "no label was queued"
+    );
+    let log = api.log.lock().unwrap().clone();
+    let on_labels: Vec<&String> = log.iter().filter(|line| line.contains("/labels")).collect();
+    assert!(
+        on_labels.iter().all(|line| line.starts_with("GET ")),
+        "labels are only read: {on_labels:?}"
+    );
+    assert_eq!(patches(&api), closes_old(2), "only the old issue is closed");
+}
