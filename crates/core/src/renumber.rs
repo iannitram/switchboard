@@ -467,6 +467,29 @@ mod tests {
         );
     }
 
+    /// Review of #422: the edges of a reference (#365).
+    #[test]
+    fn the_edges_of_a_named_reference() {
+        assert_eq!(
+            over("https://github.com/owner/demo/issues/12/comments and https://github.com/owner/demo/pull/12/files#diff-1"),
+            "https://github.com/owner/demo/issues/40/comments and https://github.com/owner/demo/pull/40/files#diff-1"
+        );
+        assert_eq!(
+            over("owner/demo#12, owner/demo#12. (https://github.com/owner/demo/pull/12)!"),
+            "owner/demo#40, owner/demo#40. (https://github.com/owner/demo/pull/40)!"
+        );
+        for same in [
+            "owner/demo#123 #123 https://github.com/owner/demo/issues/123",
+            "owner/demo#05x https://github.com/owner/demo/issues/12abc",
+            "https://github.com.evil.example/owner/demo/issues/12",
+            "https://evil.example/github.com/owner/demo/issues/12",
+            "https://github.com/evil/owner/demo/issues/12",
+            "evil.example/owner/demo#12",
+        ] {
+            assert_eq!(over(same), same);
+        }
+    }
+
     #[test]
     fn without_the_restored_repo_only_plain_numbers_are_read() {
         let same = "owner/demo#5 https://github.com/owner/demo/issues/5";
