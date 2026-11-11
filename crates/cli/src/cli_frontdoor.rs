@@ -159,7 +159,13 @@ fn ask_text(asked: &Asked) -> String {
     let reply = &asked.reply;
     let (to, why) = match &reply.route.pick {
         ChatPick::Service { service, model } => (format!("{service} {model}"), None),
-        ChatPick::ClaudeHandoff { reason } => ("claude handoff".to_string(), Some(reason)),
+        ChatPick::ClaudeHandoff { reason, model } => (
+            match model {
+                Some(model) => format!("claude handoff {model}"),
+                None => "claude handoff".to_string(),
+            },
+            Some(reason),
+        ),
         ChatPick::Wait { reason } => ("wait".to_string(), Some(reason)),
     };
     let mut reason = reply.route.step.clone();
@@ -175,6 +181,9 @@ fn ask_text(asked: &Asked) -> String {
     ];
     if asked.dry_run {
         lines.push("dry run: nothing sent, nothing stored, nothing spent".to_string());
+    }
+    if let Some(snapshot) = &asked.budget_snapshot {
+        lines.push(format!("budget snapshot: {}", terminal_safe(snapshot)));
     }
     let mut line = |name: &str, value: &Option<String>| {
         if let Some(value) = value {

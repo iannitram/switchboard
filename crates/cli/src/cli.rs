@@ -2,7 +2,7 @@
 //! `--json`, printing what the GUI shows. `errors` (#375) lists the fleet errors the app
 //! recorded and the open IT tickets.
 //! CLI-2: `switchboard refresh | backup <repo> | backup --all`, the GUI buttons.
-//! CLI-3: a repo archive (`delete <repo>`; nothing is ever deleted) or a restore over a live repo is refused and becomes a Waiting on you
+//! CLI-3: a repo archive (`archive <repo>`; nothing is ever deleted) or a restore over a live repo is refused and becomes a Waiting on you
 //! item; `--role <role> merge <repo>#<pr>` goes through CORE-3; inside a job worktree no role
 //! gives write actions. `--role budget-manager set_pool_cap <pool> <cap>` and `pool_edit <pool>
 //! [--plan <p>] [--cap <n>] [--reset <day time>] [--cost <n>]` edit a pool through
@@ -75,8 +75,9 @@ pub const USAGE: &str = "usage: switchboard [--help | --version] [--json] [--rol
                      ask \"<text>\" [--dry-run] [--thread <id>] | \
                      ask_as_job <kind> \"<text>\" --unmet <need>[,<need>] [--thread <id>] | \
                      rate <thread> <turn> <up|down> | \
-                     star <repo>#<n> | refresh | backup <repo> | backup --all | delete <repo> | \
-                     restore <repo> | drop <delete | restore> <repo> | merge <repo>#<pr> | set_pool_cap <pool> <cap> | \
+                     star <repo>#<n> | refresh | backup <repo> | backup --all | archive <repo> | \
+                     restore <repo> | confirm restore <owner/name> --into <owner/new-name> | \
+                     drop <archive | restore> <repo> | merge <repo>#<pr> | set_pool_cap <pool> <cap> | \
                      pool_edit <pool> [--plan <p>] [--cap <n>] [--reset <day time>] [--cost <n>] | \
                      autopilot <roadmap | review | merge | weekly | satellite> [--dry-run] | \
                      autopilot status | mcp>";
@@ -109,6 +110,18 @@ pub trait Writes {
     ) -> Result<Vec<String>, String> {
         let _ = (action, caller);
         Err("drop: no Waiting on you list here".to_string())
+    }
+    /// #426: confirm the waiting request to restore `typed` (an `owner/name`, as typed) into the
+    /// new private repo `into` (`confirm::confirm_into`). `Ok` is the plain lines of what was
+    /// done, an error the refusal text. The default has no Waiting on you list to confirm from.
+    fn confirm_restore_new(
+        &self,
+        typed: &str,
+        into: &str,
+        caller: &Caller,
+    ) -> Result<Vec<String>, String> {
+        let _ = (typed, into, caller);
+        Err("confirm: no Waiting on you list here".to_string())
     }
 }
 
@@ -281,6 +294,15 @@ impl Writes for CliWrites {
             .map(|full| full.map(str::to_string))
     }
 
+    fn confirm_restore_new(
+        &self,
+        typed: &str,
+        into: &str,
+        caller: &Caller,
+    ) -> Result<Vec<String>, String> {
+        self.try_confirm_restore_new(typed, into, caller)
+    }
+
     fn drop_requests(
         &self,
         action: &GuardedAction,
@@ -295,6 +317,51 @@ impl Writes for CliWrites {
             .map_err(|e| match e {
                 CoreError::Refused(why) => why,
                 other => format!("drop: {other}"),
+            })
+    }
+}
+
+impl CliWrites {
+    /// #426: the restore of `typed`'s backup into `into`, through `confirm::confirm_into` as the
+    /// app confirms it, the settings read from the app config folder.
+    fn try_confirm_restore_new(
+        &self,
+        typed: &str,
+        into: &str,
+        caller: &Caller,
+    ) -> Result<Vec<String>, String> {
+        let data = self
+            .data
+            .as_deref()
+            .ok_or("confirm: set SWITCHBOARD_DATA to the app data folder")?;
+        let action = GuardedAction::RestoreOverLive {
+            repo: typed.to_string(),
+        };
+        let text = match confirm::request_text_for(data, &action) {
+            Ok(Some(text)) => text,
+            Ok(None) => {
+                return Err(format!(
+                    "restore over {typed}: no such request is waiting on you; nothing was changed"
+                ))
+            }
+            Err(e) => return Err(format!("confirm: {e}")),
+        };
+        let config = config_dir()
+            .ok_or_else(|| format!("confirm: set {CONFIG_ENV} to the app config folder"))?;
+        let settings =
+            settings::load(&config.join("settings.json")).map_err(|e| format!("confirm: {e}"))?;
+        confirm::confirm_into(&settings, data, &text, typed, Some(into), caller)
+            .map(|done| {
+                let mut lines = vec![format!("{}: done", done.what)];
+                lines.extend(done.lines);
+                if !done.cleared {
+                    lines.push("The request stays in Waiting on you.".to_string());
+                }
+                lines
+            })
+            .map_err(|e| match e {
+                CoreError::Refused(why) => why,
+                other => format!("confirm: {other}"),
             })
     }
 }
@@ -462,6 +529,14 @@ pub fn run_with(
             return ExitCode::from(2);
         }
     };
+    let (into, argv) = match take_into(&argv) {
+        Ok(taken) => taken,
+        Err(e) => {
+            eprintln!("switchboard: {e}");
+            eprintln!("{USAGE}");
+            return ExitCode::from(2);
+        }
+    };
     let (all, argv) = take_all(&argv);
     let (pool_flags, argv) = match take_pool_flags(&argv) {
         Ok(taken) => taken,
@@ -513,6 +588,11 @@ pub fn run_with(
         eprintln!("{USAGE}");
         return ExitCode::from(2);
     }
+    if into.is_some() && command != Some("confirm") {
+        eprintln!("switchboard: --into is for confirm restore");
+        eprintln!("{USAGE}");
+        return ExitCode::from(2);
+    }
     if all && command != Some("backup") {
         eprintln!("switchboard: --all is for backup");
         eprintln!("{USAGE}");
@@ -542,7 +622,11 @@ pub fn run_with(
             }
             run_backup(&target)
         }
-        Some("delete" | "restore" | "merge") => write_command(&args, cwd, now, writes, err),
+        // `delete` is the old word for `archive` (#426): it still works and is not in the help.
+        Some("archive" | "delete" | "restore" | "merge") => {
+            write_command(&args, cwd, now, writes, err)
+        }
+        Some("confirm") => confirm_command(&args, into.as_deref(), cwd, writes, err),
         Some("drop") => drop_command(&args, cwd, writes, err),
         Some("budget") => budget(args.json, pool_flags.refresh),
         Some("set_pool_cap" | "pool_edit") => {
@@ -815,7 +899,7 @@ pub fn backup_with(
     ExitCode::from(u8::from(failed || !written))
 }
 
-/// CLI-3: `delete <repo>`, `restore <repo>` and `merge <repo>#<pr>` through `rules::guard`. A
+/// CLI-3: `archive <repo>`, `restore <repo>` and `merge <repo>#<pr>` through `rules::guard`. A
 /// refusal prints the guard's text and exits 1; `ToWaiting` also adds its Waiting on you item.
 /// A merge the guard allows goes to `writes`, which applies GH-5's rule.
 fn write_command(
@@ -825,7 +909,10 @@ fn write_command(
     writes: &dyn Writes,
     err: &mut dyn Write,
 ) -> ExitCode {
-    let command = args.command.first().map(String::as_str).unwrap_or_default();
+    let command = match args.command.first().map(String::as_str).unwrap_or_default() {
+        "delete" => "archive",
+        other => other,
+    };
     if let Some(extra) = args.command.get(2..).filter(|rest| !rest.is_empty()) {
         let what = if command == "merge" {
             "one <repo>#<pr>"
@@ -848,14 +935,14 @@ fn write_command(
                 return ExitCode::from(2);
             }
         },
-        ("delete", Some(repo)) => GuardedAction::DeleteRepo { repo: repo.clone() },
+        ("archive", Some(repo)) => GuardedAction::DeleteRepo { repo: repo.clone() },
         ("restore", Some(repo)) => GuardedAction::RestoreOverLive { repo: repo.clone() },
         _ => {
             let _ = writeln!(err, "switchboard: {command} needs a repo");
             return ExitCode::from(2);
         }
     };
-    // `delete` and `restore` of a repo Switchboard does not know write nothing (fail closed
+    // `archive` and `restore` of a repo Switchboard does not know write nothing (fail closed
     // when it cannot tell); a bare name is stored as the one `owner/name` it names (#346), so
     // the item links to the repo and asking with either spelling keeps one item.
     let mut action = action;
@@ -897,10 +984,11 @@ fn write_command(
     }
 }
 
-/// #347: `drop delete <repo>` and `drop restore <repo>` turn down the request the command of
-/// that name left in Waiting on you. Its item and its held-restore record go; nothing is
+/// #347: `drop archive <repo>` and `drop restore <repo>` turn down the request the command of
+/// that name left in Waiting on you (`drop delete` is the old word for `archive`, #426). Its
+/// item and its held-restore record go; nothing is
 /// archived, pushed or queued. No role is needed, as none is needed to ask; inside a job
-/// worktree it is refused. A bare repo name is resolved as `delete` and `restore` resolve it;
+/// worktree it is refused. A bare repo name is resolved as `archive` and `restore` resolve it;
 /// an `owner/name` Switchboard no longer knows is taken as written, so its request can still
 /// be dropped.
 fn drop_command(
@@ -911,9 +999,9 @@ fn drop_command(
 ) -> ExitCode {
     let words: Vec<&str> = args.command[1..].iter().map(String::as_str).collect();
     let (kind, repo) = match words.as_slice() {
-        [kind @ ("delete" | "restore"), repo] => (*kind, *repo),
+        [kind @ ("archive" | "delete" | "restore"), repo] => (*kind, *repo),
         _ => {
-            let _ = writeln!(err, "switchboard: drop needs <delete | restore> <repo>");
+            let _ = writeln!(err, "switchboard: drop needs <archive | restore> <repo>");
             let _ = writeln!(err, "{USAGE}");
             return ExitCode::from(2);
         }
@@ -930,7 +1018,7 @@ fn drop_command(
             return ExitCode::from(1);
         }
     };
-    let action = if kind == "delete" {
+    let action = if kind != "restore" {
         GuardedAction::DeleteRepo { repo }
     } else {
         GuardedAction::RestoreOverLive { repo }
@@ -939,6 +1027,70 @@ fn drop_command(
         Ok(lines) => emit(&format!("{}\n", lines.join("\n"))),
         Err(text) => refuse(err, &text),
     }
+}
+
+/// #426: `confirm restore <owner/name> --into <owner/new-name>` restores the backup of a repo
+/// whose restore request waits in Waiting on you into a new private repo, the live repo left
+/// alone. The repo's `owner/name` is the typed name of the app's confirm step: it is written out
+/// whole, letter for letter as the request has it (no bare name is resolved for it), and the
+/// core checks it again. No role is allowed, as the confirm is mine; nothing inside a job
+/// worktree. Only a restore into a new repo is confirmed here: an archive, and a restore over
+/// a live repo, are confirmed in the app (CORE-3).
+fn confirm_command(
+    args: &super::Args,
+    into: Option<&str>,
+    cwd: &Path,
+    writes: &dyn Writes,
+    err: &mut dyn Write,
+) -> ExitCode {
+    let words: Vec<&str> = args.command[1..].iter().map(String::as_str).collect();
+    let typed = match words.as_slice() {
+        ["restore", typed] => *typed,
+        _ => {
+            let _ = writeln!(
+                err,
+                "switchboard: confirm needs restore <owner/name> --into <owner/new-name>"
+            );
+            let _ = writeln!(err, "{USAGE}");
+            return ExitCode::from(2);
+        }
+    };
+    let Some(into) = into else {
+        let _ = writeln!(
+            err,
+            "switchboard: confirm restore needs --into <owner/new-name>: over a live repo a \
+             restore is confirmed in the app"
+        );
+        let _ = writeln!(err, "{USAGE}");
+        return ExitCode::from(2);
+    };
+    // The typed name is the confirm: it is what the CLI holds in place of the app's button.
+    let caller = Caller {
+        confirmed_in_app: true,
+        ..guard_for(args, cwd)
+    };
+    match writes.confirm_restore_new(typed, into, &caller) {
+        Ok(lines) => emit(&format!("{}\n", lines.join("\n"))),
+        Err(text) => refuse(err, &text),
+    }
+}
+
+/// `--into <owner/new-name>` taken out of `argv`, with the other words kept in order.
+fn take_into(argv: &[String]) -> Result<(Option<String>, Vec<String>), String> {
+    let mut into = None;
+    let mut rest = Vec::new();
+    let mut words = argv.iter();
+    while let Some(word) = words.next() {
+        if word != "--into" {
+            rest.push(word.clone());
+            continue;
+        }
+        match words.next() {
+            Some(value) if !value.starts_with("--") && into.is_none() => into = Some(value.clone()),
+            _ => return Err("--into needs one value".to_string()),
+        }
+    }
+    Ok((into, rest))
 }
 
 /// CLI-3: who is asking. The face is the CLI; the role is the `--role` flag, already checked;

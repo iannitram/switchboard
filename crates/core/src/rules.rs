@@ -41,7 +41,8 @@ pub struct Caller {
     pub role: Option<Role>,
     /// True when the process runs inside a job worktree (MCP-3, CLI-3).
     pub in_job_worktree: bool,
-    /// GUI only: I confirmed this action in the app.
+    /// GUI: I confirmed this action in the app. CLI (a restore into a new private repo only,
+    /// `guard_restore_new`): I typed the repo's name.
     pub confirmed_in_app: bool,
 }
 
@@ -87,6 +88,27 @@ pub fn guard(caller: &Caller, action: &GuardedAction) -> Verdict {
                 }
             }
         }
+    }
+}
+
+/// #426: who may restore `repo`'s backup into a new private repo (the live repo is left alone).
+/// The app after my confirm; the CLI after the repo's `owner/name` was typed (`confirmed_in_app`
+/// is that typed name), and only without a role flag: a role is an agent's, and the confirm is
+/// mine. MCP never; nothing inside a job worktree. Every refusal says what the others say.
+pub fn guard_restore_new(caller: &Caller, repo: &str) -> Verdict {
+    let what = format!("restore over {repo}");
+    if caller.in_job_worktree {
+        return Verdict::Refuse(format!("{what}: refused inside a job worktree"));
+    }
+    match caller.face {
+        Face::Gui | Face::Cli if caller.role.is_none() || caller.face == Face::Gui => {
+            if caller.confirmed_in_app {
+                Verdict::Allow
+            } else {
+                Verdict::Refuse(format!("{what}: needs a confirm in the app"))
+            }
+        }
+        _ => Verdict::Refuse(format!("{what}: needs a confirm in the app")),
     }
 }
 

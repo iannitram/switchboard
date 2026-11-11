@@ -201,6 +201,7 @@ fn claude_handoff_sends_and_stores_nothing() {
     // fd_queued_ask.rs).
     let pick = ChatPick::ClaudeHandoff {
         reason: "needs tools".to_string(),
+        model: None,
     };
     let dir = data_dir("handoff");
     let (reply, seen) = run(&dir, pick.clone(), &[], Some("t-5"));
@@ -232,6 +233,7 @@ fn reply_json_keeps_the_route_shape_and_adds_the_answer() {
         &data_dir("json2"),
         ChatPick::ClaudeHandoff {
             reason: "r".to_string(),
+            model: None,
         },
         &[],
         None,

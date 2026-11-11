@@ -10,7 +10,9 @@ use super::adapters::{
     log_row, Answer, ChatAdapter, ChatGptAdapter, ChatTransport, ClaudeApiAdapter, DeepSeekAdapter,
     GeminiAdapter, QwenAdapter,
 };
-use super::chat::{ChatPick, ChatRoute};
+use super::chat::{
+    qwen_failed_line, ChatPick, ChatRoute, Fallback, BRAKE_LIFTED_STEP, DEFAULT_CLAUDE_MODEL,
+};
 use super::packet::{self, Packet, Turn};
 use super::rating_log::rating_id;
 use super::sticky::{handoff_step, open_chat, signals, with_move, OpenChat, Signal};
@@ -240,6 +242,8 @@ struct Move {
     packet: Packet,
     /// FD-5: why the chat moves (the work tree's line).
     why: String,
+    /// #428: how many of the thread's turns the summary covers (`JobRow::covers_turns`).
+    covers: Option<u32>,
 }
 
 /// The lane a move row names when the chat went to a Claude session (FD-8): the Claude
@@ -249,10 +253,31 @@ pub const CLAUDE_LANE: &str = "claude";
 /// request kind.
 pub const FLEET_JOB_LANE: &str = "fleet-job";
 
+/// FD-5 (#393, #428): why a chat moved off `service` when no signal moved it: its pool is
+/// braked or over budget. A move with this why is moved back once the pool is in budget again.
+pub fn braked_why(service: &str) -> String {
+    format!("{service} is braked or over budget")
+}
+
+/// #428: the model the thread's latest Claude handoff move went to, if it stored one.
+pub fn claude_model_of(rows: &[JobRow]) -> Option<String> {
+    rows.iter()
+        .rev()
+        .filter(|row| row.role.as_deref() == Some(MOVE_ROLE))
+        .filter(|row| row.lane.as_deref() == Some(CLAUDE_LANE))
+        .find_map(|row| row.model.clone())
+}
+
 /// FD-5: why an open chat moves with `message` routed as `route`, in the words the work tree
 /// shows: each signal that moved it (`ask Claude`, a named agent, a thumbs down, the model's
-/// handoff marker with its reason), or, with no signal, its pool being braked (FD-3).
+/// handoff marker with its reason), or, with no signal, its pool being braked (FD-3), or (step
+/// `brake lifted`, #428) the pool it left being back in budget.
 pub fn move_why(route: &ChatRoute, from: &OpenChat, message: &str) -> String {
+    if route.step == BRAKE_LIFTED_STEP {
+        if let ChatPick::Service { service, .. } = &route.pick {
+            return format!("{service} is back in budget, so the chat moved back");
+        }
+    }
     let mut why: Vec<String> = Vec::new();
     for signal in signals(message, &[], from.thumbs_down, &from.reply) {
         match signal {
@@ -270,14 +295,15 @@ pub fn move_why(route: &ChatRoute, from: &OpenChat, message: &str) -> String {
         );
     }
     if why.is_empty() {
-        return format!("{} is braked or over budget", from.service);
+        return braked_why(&from.service);
     }
     why.join("; ")
 }
 
 /// FD-7: the open questions the core has logged for a thread: the asks it stored as queued
 /// (FD-3: nothing was in budget, so no model answered) that were not asked again and answered
-/// since, oldest first, no repeats.
+/// since, oldest first, no repeats. Two asks are the same question when they match after
+/// trimming, lower-casing and collapsing spaces (`packet::normalised`, #428); no fuzzy matching.
 pub fn open_questions(rows: &[JobRow]) -> Vec<String> {
     let mut open: Vec<String> = Vec::new();
     for (at, row) in rows.iter().enumerate() {
@@ -287,12 +313,13 @@ pub fn open_questions(rows: &[JobRow]) -> Vec<String> {
         let Some(text) = row.text.as_ref() else {
             continue;
         };
+        let asked = packet::normalised(text);
         let answered_later = rows[at + 1..].iter().any(|later| {
             later.role.as_deref() == Some("user")
                 && later.outcome.as_deref() != Some(QUEUED)
-                && later.text.as_ref() == Some(text)
+                && later.text.as_deref().map(packet::normalised) == Some(asked.clone())
         });
-        if !answered_later && !open.contains(text) {
+        if !answered_later && !open.iter().any(|q| packet::normalised(q) == asked) {
             open.push(text.clone());
         }
     }
@@ -315,11 +342,15 @@ fn plan_move(
     ctx: &AnswerContext,
 ) -> Result<Move, CoreError> {
     let rows = store.read(handoff_id)?;
-    let earlier = rows
+    let summary_row = rows
         .iter()
-        .find(|row| row.role.as_deref() == Some(SUMMARY_ROLE))
+        .find(|row| row.role.as_deref() == Some(SUMMARY_ROLE));
+    let earlier = summary_row
         .and_then(|row| row.text.clone())
         .unwrap_or_default();
+    let covered = summary_row.and_then(|row| row.covers_turns);
+    let thread_turns: Vec<&JobRow> = rows.iter().filter(|row| is_turn(row)).collect();
+    let now = u32::try_from(thread_turns.len()).unwrap_or(u32::MAX);
     let turns: Vec<Turn> = rows
         .iter()
         .filter(|row| is_turn(row) && row.outcome.as_deref() != Some(QUEUED))
@@ -333,9 +364,67 @@ fn plan_move(
     let mut links: Vec<String> = turns.iter().flat_map(|t| links_in(&t.text)).collect();
     links.extend(links_in(message));
     let questions = open_questions(&rows);
+    let (summary, covers) = if covered == Some(now) {
+        // #428: no new turn since the summary: it is reused, and no model is asked.
+        (earlier, covered)
+    } else {
+        rewrite_summary(
+            store,
+            handoff_id,
+            &from,
+            earlier,
+            covered,
+            now,
+            &thread_turns,
+            &links,
+            &questions,
+            ctx,
+        )?
+    };
+    Ok(Move {
+        packet: packet::build(&summary, &turns, &links),
+        from,
+        why,
+        covers,
+    })
+}
+
+/// FD-6, FD-7 (#428): the outgoing model rewrites the summary `earlier`, which covers the
+/// first `covered` of the thread's turns: it is sent only the turns since (answered ones), or,
+/// for a summary stored before #428 or none, the turns since the last move. Returns the
+/// summary and how many turns it covers: `now`, or `earlier` and `covered` as they were when
+/// the model cannot be reached.
+#[allow(clippy::too_many_arguments)]
+fn rewrite_summary(
+    store: &ThreadStore,
+    handoff_id: &str,
+    from: &OpenChat,
+    earlier: String,
+    covered: Option<u32>,
+    now: u32,
+    thread_turns: &[&JobRow],
+    links: &[String],
+    questions: &[String],
+    ctx: &AnswerContext,
+) -> Result<(String, Option<u32>), CoreError> {
     let summary = match adapter_for(&from.service, ctx) {
         Ok(outgoing) => {
-            let (system, mut asked) = context(store, handoff_id)?;
+            let (system, since_move) = context(store, handoff_id)?;
+            let mut asked: Vec<Turn> = match covered {
+                Some(covered) => thread_turns
+                    .get(covered as usize..)
+                    .unwrap_or_default()
+                    .iter()
+                    .filter(|row| row.outcome.as_deref() != Some(QUEUED))
+                    .filter_map(|row| {
+                        Some(Turn {
+                            role: row.role.clone()?,
+                            text: row.text.clone()?,
+                        })
+                    })
+                    .collect(),
+                None => since_move,
+            };
             let system = format!("{SUMMARY_SYSTEM}\n\n{system}");
             let mut ask = format!("The summary so far:\n{earlier}\n\nWrite the new summary.");
             if !questions.is_empty() {
@@ -343,7 +432,7 @@ fn plan_move(
                     "\n\nOpen questions logged for this chat (asked, not answered yet). \
                      Name each one word for word:",
                 );
-                for question in &questions {
+                for question in questions {
                     ask.push_str(&format!("\n- {question}"));
                 }
             }
@@ -370,18 +459,16 @@ fn plan_move(
                             .send(&from.model, &system, &turns)
                             .map_or_else(|_| first.text.clone(), |a| a.text)
                     };
-                    packet::checked_summary(first.text.clone(), &links, &questions, &mut again).0
+                    let checked =
+                        packet::checked_summary(first.text.clone(), links, questions, &mut again);
+                    (checked.0, Some(now))
                 }
-                Err(_) => earlier,
+                Err(_) => (earlier, covered),
             }
         }
-        Err(_) => earlier,
+        Err(_) => (earlier, covered),
     };
-    Ok(Move {
-        packet: packet::build(&summary, &turns, &links),
-        from,
-        why,
-    })
+    Ok(summary)
 }
 
 /// Store a move: the rolling summary (replaced, never stacked), the move row, and on a thumbs
@@ -403,6 +490,7 @@ fn record_move(
         model: Some(planned.from.model.clone()),
         handoff_id: Some(handoff_id.to_string()),
         source: RowSource::Chat,
+        covers_turns: planned.covers,
         ..JobRow::default()
     };
     store.upsert(handoff_id, &summary)?;
@@ -459,6 +547,40 @@ pub fn queued_asks(data_dir: &Path) -> Result<Vec<(String, JobRow)>, CoreError> 
     Ok(out)
 }
 
+/// #427: a thumbs down on an answer the local Qwen lane gave as a fallback holds the same ask
+/// for Claude: the question before turn `answer_turn` is queued again at the thread's end (the
+/// held queue, `queued_asks`), unless it is already the thread's last turn, held. True when it
+/// was queued. Sending it stays manual; the chat is not moved.
+pub fn hold_fallback_ask(
+    store: &ThreadStore,
+    handoff_id: &str,
+    answer_turn: u32,
+) -> Result<bool, CoreError> {
+    let turns = store.turns(handoff_id)?;
+    let Some(ask) = answer_turn
+        .checked_sub(1)
+        .and_then(|at| turns.get(at as usize))
+        .filter(|row| row.role.as_deref() == Some("user"))
+    else {
+        return Ok(false);
+    };
+    let Some(text) = ask.text.as_deref() else {
+        return Ok(false);
+    };
+    let row = JobRow {
+        outcome: Some(QUEUED.to_string()),
+        ..user_row(text, ask.kind.as_deref(), handoff_id)
+    };
+    store.append_if(handoff_id, &row, |rows| {
+        let last = rows.iter().rev().find(|row| is_turn(row));
+        !last.is_some_and(|last| {
+            last.role.as_deref() == Some("user")
+                && last.outcome.as_deref() == Some(QUEUED)
+                && last.text.as_deref() == Some(text)
+        })
+    })
+}
+
 /// The user turn's row in the thread.
 fn user_row(message: &str, kind: Option<&str>, handoff_id: &str) -> JobRow {
     JobRow {
@@ -505,18 +627,49 @@ pub fn answer_route(
 }
 
 /// FD-3 (#377): `answer_route` for a route the local Qwen lane took because the picked pool
-/// was braked or over budget (`chat::qwen_fallback`): `reason` says so in the reply
-/// (`fallback`) and on the answer's row. It is one answer, not a move: Qwen is sent the
-/// thread's turns as any turn is, no summary is asked for, no move is stored, and an open chat
-/// stays open on its own model (`sticky::open_chat` passes over a fallback's answer).
+/// was braked or over budget, or Claude's budget was spent (`chat::qwen_fallback_on`): its
+/// `reason` says so in the reply (`fallback`) and on the answer's row. It is one answer, not a
+/// move: Qwen is sent the thread's turns as any turn is, no summary is asked for, no move is
+/// stored, and an open chat stays open on its own model (`sticky::open_chat` passes over a
+/// fallback's answer). #427: when Qwen fails mid-answer the ask is held for Claude exactly as
+/// if Qwen had been down: the reply is the wait (`fallback.waited`) with the ask queued and
+/// `queued` saying Qwen failed mid-answer (`chat::qwen_failed_line`); nothing of the failed
+/// answer is kept, and sending the held ask stays manual.
 pub fn answer_fallback(
-    route: ChatRoute,
-    reason: &str,
+    fallback: Fallback,
     message: &str,
     handoff_id: Option<&str>,
     ctx: &AnswerContext,
 ) -> Result<ChatReply, CoreError> {
-    answer(route, Some(reason), message, handoff_id, ctx)
+    answer(
+        fallback.route,
+        Some((&fallback.reason, fallback.waited)),
+        message,
+        handoff_id,
+        ctx,
+    )
+}
+
+/// FD-3 (#377, #427): queue `message` in its thread (a new one when `handoff_id` is None):
+/// the user turn marked `queued`; the reply is `route` with the thread and `why`.
+fn hold(
+    route: ChatRoute,
+    why: String,
+    message: &str,
+    handoff_id: Option<&str>,
+    ctx: &AnswerContext,
+) -> Result<ChatReply, CoreError> {
+    let id = handoff_id.map_or_else(new_handoff_id, str::to_string);
+    let row = JobRow {
+        outcome: Some(QUEUED.to_string()),
+        ..user_row(message, route.kind.as_deref(), &id)
+    };
+    ThreadStore::new(ctx.data_dir).append(&id, &row)?;
+    Ok(ChatReply {
+        handoff_id: Some(id),
+        queued: Some(why),
+        ..route_alone(route)
+    })
 }
 
 /// A reply that is the route alone.
@@ -536,26 +689,17 @@ pub(crate) fn route_alone(route: ChatRoute) -> ChatReply {
     }
 }
 
+/// `fallback`: the fallback's reason and the route it waited on (#377, #427).
 fn answer(
     route: ChatRoute,
-    fallback: Option<&str>,
+    fallback: Option<(&str, ChatRoute)>,
     message: &str,
     handoff_id: Option<&str>,
     ctx: &AnswerContext,
 ) -> Result<ChatReply, CoreError> {
     if let ChatPick::Wait { reason } = &route.pick {
-        let id = handoff_id.map_or_else(new_handoff_id, str::to_string);
-        let row = JobRow {
-            outcome: Some(QUEUED.to_string()),
-            ..user_row(message, route.kind.as_deref(), &id)
-        };
-        ThreadStore::new(ctx.data_dir).append(&id, &row)?;
-        let queued = Some(reason.clone());
-        return Ok(ChatReply {
-            handoff_id: Some(id),
-            queued,
-            ..route_alone(route)
-        });
+        let why = reason.clone();
+        return hold(route, why, message, handoff_id, ctx);
     }
     let store = ThreadStore::new(ctx.data_dir);
     let open = match handoff_id {
@@ -567,9 +711,21 @@ fn answer(
         let (Some(id), Some(from)) = (handoff_id, open) else {
             return Ok(route_alone(route));
         };
+        // #428: the move stores the Claude model, and the thread stays on one model.
+        let mut route = route;
+        let thread_model = claude_model_of(&store.read(id)?);
+        if let ChatPick::ClaudeHandoff { model, .. } = &mut route.pick {
+            *model = thread_model
+                .or_else(|| model.take())
+                .or_else(|| Some(DEFAULT_CLAUDE_MODEL.to_string()));
+        }
+        let to = match &route.pick {
+            ChatPick::ClaudeHandoff { model, .. } => model.clone(),
+            _ => None,
+        };
         let why = move_why(&route, &from, message);
         let planned = plan_move(&store, id, from, message, why, ctx)?;
-        record_move(&store, id, &planned, (CLAUDE_LANE, None))?;
+        record_move(&store, id, &planned, (CLAUDE_LANE, to.as_deref()))?;
         let prompt = format!("{}\n\nAsk\n{message}", packet::as_prompt(&planned.packet));
         return Ok(ChatReply {
             handoff_id: Some(id.to_string()),
@@ -600,7 +756,21 @@ fn answer(
         role: "user".to_string(),
         text: message.to_string(),
     });
-    let answer = adapter.send(model, &system, &turns)?;
+    let answer = match adapter.send(model, &system, &turns) {
+        Ok(answer) => answer,
+        Err(e) => match fallback {
+            // #427: Qwen failed mid-answer: held for Claude, as if Qwen had been down.
+            Some((_, waited)) => {
+                let why = match &waited.pick {
+                    ChatPick::Wait { reason } => qwen_failed_line(reason),
+                    _ => qwen_failed_line("no answer"),
+                };
+                return hold(waited, why, message, handoff_id, ctx);
+            }
+            None => return Err(e),
+        },
+    };
+    let fallback = fallback.map(|(reason, _)| reason);
     let kind = route.kind.as_deref();
     if let Some(planned) = &planned {
         record_move(&store, &id, planned, (service, Some(model)))?;
