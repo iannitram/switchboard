@@ -154,7 +154,19 @@ fn record_child() {
         err.command[2] = format!("child-{index}-{k}");
         // A long stderr, so an interleaved write would show as a torn line.
         err.stderr = format!("{index}-{k} ").repeat(2000);
-        fleet_errors::record(Path::new(&data), &err).unwrap();
+        // #416 review: a busy CI runner can keep a child waiting past `RECORD_LOCK_WAIT`. That
+        // refusal writes nothing and is the app's choice, not a lost record, so look again;
+        // this test is about torn lines and racing trims.
+        let started = std::time::Instant::now();
+        loop {
+            match fleet_errors::record(Path::new(&data), &err) {
+                Ok(()) => break,
+                Err(e)
+                    if e.to_string().contains("is being changed by another run")
+                        && started.elapsed() < std::time::Duration::from_secs(60) => {}
+                Err(e) => panic!("child {index}, record {k}: {e}"),
+            }
+        }
     }
 }
 
