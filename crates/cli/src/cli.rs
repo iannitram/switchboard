@@ -73,7 +73,7 @@ pub const USAGE: &str = "usage: switchboard [--help | --version] [--json] [--rol
                      [--project <repo>] [--outcome <o>] [--pool <p>] \
                      <sky | waiting | reports | errors | budget [--refresh] | loadout | settings | \
                      ask \"<text>\" [--dry-run] [--thread <id>] | \
-                     ask_as_job <kind> \"<text>\" --unmet <need>[,<need>] [--thread <id>] | \
+                     ask_as_job <kind> \"<text>\" [--unmet <need>[,<need>]] [--thread <id>] | \
                      rate <thread> <turn> <up|down> | \
                      star <repo>#<n> | refresh | backup <repo> | backup --all | archive <repo> | \
                      restore <repo> | confirm restore <owner/name> --into <owner/new-name> | \

@@ -736,7 +736,7 @@ fn the_usage_line_names_the_front_door() {
     assert_eq!(out.status.code(), Some(0));
     for part in [
         "ask \"<text>\" [--dry-run] [--thread <id>]",
-        "ask_as_job <kind> \"<text>\" --unmet <need>[,<need>]",
+        "ask_as_job <kind> \"<text>\" [--unmet <need>[,<need>]] [--thread <id>]",
         "rate <thread> <turn> <up|down>",
     ] {
         assert!(stdout(&out).contains(part), "{}", stdout(&out));

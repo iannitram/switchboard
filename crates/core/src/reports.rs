@@ -287,6 +287,8 @@ pub fn from_thread(thread_id: &str, rows: &[JobRow]) -> Report {
 const MOVE_ROLE: &str = "move";
 /// The lane of a move row to a Claude handoff (`frontdoor::answer::CLAUDE_LANE`).
 const CLAUDE_LANE: &str = "claude";
+/// #433: the model a work-tree line shows for a Claude handoff Switchboard chose no model for.
+pub const CLAUDE_MODEL_UNCHOSEN: &str = "model not chosen by Switchboard";
 
 /// REP-2: the moves of a thread, oldest first.
 ///
@@ -296,9 +298,6 @@ const CLAUDE_LANE: &str = "claude";
 ///
 /// Any other rows (a job's attempts): one line per change of service or model between
 /// consecutive rows (implicit rows left out), with the earlier row's outcome as the `why`.
-/// #433: the model a work-tree line shows for a Claude handoff Switchboard chose no model for.
-pub const CLAUDE_MODEL_UNCHOSEN: &str = "model not chosen by Switchboard";
-
 pub fn moves(rows: &[JobRow]) -> Vec<Move> {
     if rows.iter().any(|r| r.role.is_some()) {
         let or_not = |v: Option<&str>| v.unwrap_or(NOT_RECORDED).to_string();

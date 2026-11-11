@@ -81,3 +81,42 @@ fn chat_send_as_job_runs_off_the_main_thread() {
     assert!(source[attr..at].starts_with("#[tauri::command(async)]"));
     assert!(source[at..].contains("start_filing(filing_key("));
 }
+
+#[test]
+fn a_filing_that_panics_ends_so_the_request_can_be_sent_again() {
+    let key = filing_key("web-research", "find the docs (panic test)", None);
+    let worker = key.clone();
+    let panicked = std::thread::spawn(move || {
+        let _filing = start_filing(worker).expect("the first press files");
+        panic!("the filing failed mid-send");
+    })
+    .join();
+    assert!(panicked.is_err());
+    let again = start_filing(key).expect("a panicked filing does not leave the button dead");
+    drop(again);
+}
+
+#[test]
+fn presses_at_the_same_moment_file_the_request_once() {
+    let key = filing_key("web-research", "find the docs (race test)", Some("r"));
+    let gate = std::sync::Arc::new(std::sync::Barrier::new(8));
+    let presses: Vec<_> = (0..8)
+        .map(|_| {
+            let (key, gate) = (key.clone(), gate.clone());
+            std::thread::spawn(move || {
+                gate.wait();
+                let filing = start_filing(key);
+                let won = filing.is_some();
+                gate.wait();
+                won
+            })
+        })
+        .collect();
+    let won = presses
+        .into_iter()
+        .map(|press| press.join().unwrap())
+        .filter(|won| *won)
+        .count();
+    assert_eq!(won, 1);
+    drop(start_filing(key).expect("every press has ended"));
+}
