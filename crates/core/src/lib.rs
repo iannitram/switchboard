@@ -17,6 +17,7 @@ pub mod clock;
 pub mod confirm;
 pub mod error;
 pub mod fleet;
+pub mod fleet_errors;
 pub mod frontdoor;
 pub mod github;
 pub mod it;

@@ -16,7 +16,7 @@ reuses:
 ```
 Cargo.toml                    one Rust workspace (core, cli, app/src-tauri)
 crates/core/                  switchboard-core: every rule, read and write
-  src/{settings,fleet,abilities,joblog,rules,platform,clock,error,lock}.rs
+  src/{settings,fleet,fleet_errors,abilities,joblog,rules,platform,clock,error,lock}.rs
   src/github/                 snapshot, transport, poll, queue, merge
   src/sky/                    features, layout, drift, chain, codemap, priority, labels, jobs
   src/{waiting,reports,budget,backup,it}.rs
@@ -66,6 +66,9 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 
 ### core-fleet
 `crates/core/src/fleet.rs` · CORE-1, CORE-2, AUTO-1 · present. `FleetBridge` runs `<python> <root>/tools/fleet/fleet.py <cmd> --json` (root from settings, `FLEET_ROOT` overrides) and parses it; a non-zero exit or bad JSON is a `FleetError` (command, exit code, stderr), recorded in `FleetErrorLog`, never a guessed value. Tests use `tests/fixtures/fleet-stub/` (`FLEET_STUB_EXIT`, `FLEET_STUB_BADJSON`, answers in `answers/<cmd>.json`). Used by abilities, joblog, budget, github::queue, autopilot, it. `clean_child_env(cmd)` (with the pure `clean_ld_library_path(ld, appdir)`) takes the packaged app's `PYTHONHOME`, `PYTHONPATH`, `PYTHONDONTWRITEBYTECODE` and its `APPDIR` entries in `LD_LIBRARY_PATH` out of every fleet child's environment, the bridge's and `FleetStarter::start`'s.
+
+### core-fleet-errors
+`crates/core/src/fleet_errors.rs` · CORE-2, IT-2 · present (#375). The fleet errors the app records, kept in `<data>/fleet-errors.jsonl`: one `FleetErrorRecord` per line (command, exit code, stderr, reason as `{"kind": ..}`, undo note, and the shown `message`), appended whole under `lock::FileLock`, kept to the last `FLEET_ERROR_LOG_CAP` (50) lines. `record` returns an error, never panics; `load` reads newest first, skips and counts a line that does not read (`Recorded::skipped`); no file is no errors. The app's `fleet_errors` list and the CLI's `errors` both read through `load`. Failures in the CLI or MCP themselves are not recorded.
 
 ### core-abilities
 `crates/core/src/abilities.rs` · the abilities index · present. Reads `fleet actions --json`: every action and request kind (`"request": true`) with `needs` and `first`, and per kind the model for each service (`models`, `model(kind, service)`): the `ok.<service>.model` rows, plus `ok.qwen: true` and a top-level `claudeapi: true` filled from `tools/fleet/config.json` (`FleetModels`: this machine's `qwen_model`, `ok.claude`'s tier through `claudeapi_models`; `load_with`). Read by the router (FD-1, FD-3) and FD-12.
@@ -230,7 +233,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - AUTO-2 roadmap pass (`roadmap_pass`, `pm_job` in `passes.rs`; run by `after_poll`): present.
 
 ### it
-`crates/core/src/it.rs` · IT-1 to IT-4, FD-12 · planned. The loadout from the platform's probe list, unmet `needs`, IT tickets through `fleet errors file`, `it-triage` jobs with `never_on` (waits for U9), ladder-out bugs with the star's `feature:` label.
+`crates/core/src/it.rs` · IT-1 to IT-4, FD-12 · planned. The loadout from the platform's probe list, unmet `needs`, IT tickets through `fleet errors file`, `it-triage` jobs with `never_on` (waits for U9), ladder-out bugs with the star's `feature:` label. `open_tickets(snaps)` lists the open `it`-labelled issues in the stored snapshots, for `errors` (#375).
 - IT-1 loadout read (`read_loadout`): present. `SystemProbeRunner` kills a probe after `PROBE_TIMEOUT` (5 s, `run_probe_within`); it then has no exit code (#339).
 - IT-1 loadout every minute (`read_and_store`, `latest_loadout`, `current_loadout`, the `loadout` event): present.
 - IT-2 file error tickets (`file_error_tickets`): present.
@@ -245,13 +248,14 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 `crates/cli/src/main.rs`, `cli.rs` · CLI-1, CLI-2, CLI-3 · CLI-1, CLI-2 and CLI-3 present. Text or `--json`; the same numbers as the GUI; role-flagged writes through `rules::guard`. Arguments are read with `args_os` (a non-UTF-8 word is exit 2, `utf8_args`); `--help`/`--version` answer anywhere on the line; extra words after a command are exit 2; stdout goes through `emit` (a closed pipe is a quiet exit 0, any other write error one line and exit 1, never a panic); text output escapes control characters in titles and other outside text (`terminal_safe`). A bare repo name resolves to its one `owner/name` (`resolve_repo`); one that matches two owners is an error naming both. `main.rs` routes `mcp` (`mcp_call`): `--role` before or after it, `--help`, and exit 2 for any other flag or word.
 - CLI-1 parse arguments, budget, sky, star, waiting, reports, loadout: present. `sky` and `star` read the stored snapshot in the app data folder (`SWITCHBOARD_DATA`, else the desktop app's) and never call GitHub; `star` reads its running job from the job log when a pipeline checkout is known. The pipeline checkout is `SWITCHBOARD_PIPELINE`, else `pipeline_repo` in `settings.json` (`pipeline_dir`). `budget` text shows points over or under pace, the reading's age and the stale mark (BUD-1); `reports` text shows all five REP-1 parts under each head line.
 - CLI-2 `refresh`, `backup <repo>`, `backup --all`: present. `backup` reads `settings.json` from the app config folder (`SWITCHBOARD_CONFIG`, else `SWITCHBOARD_DATA`, else the desktop app's; `config_dir`). The Refresh and Back up buttons from the CLI, one line per repo (`<repo>: refreshed | unchanged`, `<repo>: backed up to <path>`); a failed or refused repo goes to stderr and the exit is 1 after all were tried; `backup` alone exits 2.
+- `errors` (#375, read only): the fleet errors the app kept (`fleet_errors::load`), newest first, then the open IT tickets (`it::open_tickets`); `--json` is `{fleet_errors, skipped_lines, it_tickets}` (`errors_answer`), and damaged lines are named on stderr: present.
 - CLI-3 delete and restore refused to Waiting on you, `--role` merge through the guard and GH-5's merge (`CliWrites`), none inside a job worktree: present.
 - `--role budget-manager set_pool_cap <pool> <cap>` and `pool_edit <pool> [--plan] [--cap] [--reset] [--cost]` (`pool_command`, `take_pool_flags`) through `rules::guard_pool_edit` and `budget::save_pool_edit`, the same path as MCP's tools; `budget --refresh` re-reads the pools first (`budget::refresh`); `settings` prints the settings file, read only (`settings_command`): present. `refresh` and `backup` write stdout through `emit_to` too.
 
 ### mcp
-`crates/cli/src/mcp.rs` · MCP-1 to MCP-3 present. JSON-RPC over stdio; six read tools; role write tools; none inside a job worktree. Bad lines (non-UTF-8, batch, non-object) get a JSON-RPC error; tool arguments are checked against each tool's input schema.
+`crates/cli/src/mcp.rs` · MCP-1 to MCP-3 present. JSON-RPC over stdio; six read tools; role read tools (`role_read_tools`: the satellite's `errors`, #375, the CLI's `errors --json`); role write tools; neither inside a job worktree. Bad lines (non-UTF-8, batch, non-object) get a JSON-RPC error; tool arguments are checked against each tool's input schema.
 - MCP-2 write tools reach the real core (`CoreWrites`: the CLI's merge, BUD-2's save, local Waiting items): present. budget-manager has `set_pool_cap`, `pool_edit` and `budget_refresh`; a pool edit's reply states what was set. `reports` takes the CLI's `project`, `outcome` and `pool` filters (`cli::reports_answer`).
 - MCP-3 no write tools in a job worktree: present.
 
 ### shell
-`app/src-tauri/`, `app/src/App.tsx`, `app/src/core.ts`, `app/src/ErrorBanner.tsx` · SHELL-1, SHELL-2, SHELL-3 · present (empty window, wired to the core: `views`, `settings_missing`, `fleet_errors`; the error banner present); the AppImage present: `tools/build-appimage.sh` builds it inside the craft-build container). `tools/check-notices.py` (present) lists every file under `app/src/brocrew/` and fails on one without its Apache-2.0 notice. `app/src/brocrew/` holds BroCrew's lifted chat helpers (present): `composer-notice.ts`, `message-links.ts`, `message-paths.ts` and `ipc-types.ts`, all listed in `NOTICE`.
+`app/src-tauri/`, `app/src/App.tsx`, `app/src/core.ts`, `app/src/ErrorBanner.tsx` · SHELL-1, SHELL-2, SHELL-3 · present (empty window, wired to the core: `views`, `settings_missing`, `fleet_errors` (newest first, read from the errors kept in the app data folder, #375: `keep_errors_in`, `fleet_error_rows`); the error banner present); the AppImage present: `tools/build-appimage.sh` builds it inside the craft-build container). `tools/check-notices.py` (present) lists every file under `app/src/brocrew/` and fails on one without its Apache-2.0 notice. `app/src/brocrew/` holds BroCrew's lifted chat helpers (present): `composer-notice.ts`, `message-links.ts`, `message-paths.ts` and `ipc-types.ts`, all listed in `NOTICE`.

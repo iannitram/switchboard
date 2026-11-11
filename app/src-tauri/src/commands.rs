@@ -28,6 +28,8 @@ pub struct AppState {
     pub github: Mutex<()>,
     /// IT-1: the newest loadout read, for the panel and the router (FD-12); None before the first read.
     pub loadout: Mutex<Option<Loadout>>,
+    /// #375: where recorded fleet errors are kept (`fleet_errors_disk`); unset, none are.
+    pub errors_disk: ErrorsOnDisk,
 }
 
 impl AppState {
@@ -37,6 +39,7 @@ impl AppState {
             errors: Mutex::new(FleetErrorLog::default()),
             github: Mutex::new(()),
             loadout: Mutex::new(None),
+            errors_disk: ErrorsOnDisk::default(),
         }
     }
 }
@@ -181,11 +184,11 @@ pub fn settings_save(
     save_settings(&state.settings_path, &settings).map_err(|e| FaceError::new("settings_save", &e))
 }
 
-/// CORE-2: the fleet errors this session recorded, newest first.
+/// CORE-2: the recorded fleet errors, newest first: the ones kept in the app data folder
+/// (#375, the list the CLI's `errors` prints), or this session's while none can be read.
 #[tauri::command]
 pub fn fleet_errors(state: tauri::State<'_, AppState>) -> Vec<FleetErrorRow> {
-    let log = state.errors.lock().unwrap_or_else(|p| p.into_inner());
-    log.errors.iter().map(FleetErrorRow::from).collect()
+    fleet_error_rows(&state)
 }
 
 /// SKY-W: the sky the Sky view paints (`sky_at` in the app data folder, now). A ledger or
@@ -275,6 +278,7 @@ pub fn record_fleet_error(
     let copy = {
         let mut log = state.errors.lock().unwrap_or_else(|p| p.into_inner());
         log.record(e.clone());
+        keep_on_disk(state, e);
         FleetErrorLog {
             errors: log.errors.clone(),
         }
@@ -288,6 +292,72 @@ pub fn record_fleet_error(
         filed
     }))
 }
+
+// #375 (CORE-2, IT-2): recorded fleet errors kept on disk, in the app data folder, through
+// `switchboard_core::fleet_errors`, so the CLI and MCP list what the app recorded and the list
+// outlives a restart. Filing IT tickets still hands fleet this session's log.
+
+/// #375: the app data folder the errors are kept in, and whether a keep has failed.
+#[derive(Debug, Default)]
+pub struct ErrorsOnDisk {
+    dir: std::sync::OnceLock<PathBuf>,
+    /// Set once an error could not be kept, so the list reads this session's log, which has it.
+    behind: std::sync::atomic::AtomicBool,
+}
+
+impl AppState {
+    /// #375: keep recorded fleet errors in `data` from now on (the app data folder, set once at
+    /// start; a second call is ignored).
+    pub fn keep_errors_in(&self, data: PathBuf) {
+        let _ = self.errors_disk.dir.set(data);
+    }
+}
+
+/// #375: append `err` to the errors kept on disk. A failure is said on stderr and leaves the
+/// action that hit the fleet error as it was; the list then reads this session's log.
+fn keep_on_disk(state: &AppState, err: &FleetError) {
+    let Some(data) = state.errors_disk.dir.get() else {
+        return;
+    };
+    if let Err(e) = switchboard_core::fleet_errors::record(data, err) {
+        eprintln!("fleet error not kept on disk: {e}");
+        state
+            .errors_disk
+            .behind
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// #375: the rows `fleet_errors` answers, newest first: the errors kept on disk, read as the
+/// CLI reads them; this session's log while no folder is set, a keep has failed, or the file
+/// does not read.
+pub fn fleet_error_rows(state: &AppState) -> Vec<FleetErrorRow> {
+    let behind = state
+        .errors_disk
+        .behind
+        .load(std::sync::atomic::Ordering::Relaxed);
+    if let Some(data) = state.errors_disk.dir.get().filter(|_| !behind) {
+        match switchboard_core::fleet_errors::load(data) {
+            Ok(kept) => {
+                if kept.skipped > 0 {
+                    eprintln!(
+                        "fleet errors: {} line(s) of {} did not read; skipped",
+                        kept.skipped,
+                        switchboard_core::fleet_errors::FLEET_ERRORS_FILE
+                    );
+                }
+                return kept.errors.iter().map(FleetErrorRow::from).collect();
+            }
+            Err(e) => eprintln!("fleet errors: {e}; showing this session's"),
+        }
+    }
+    let log = state.errors.lock().unwrap_or_else(|p| p.into_inner());
+    log.errors.iter().rev().map(FleetErrorRow::from).collect()
+}
+
+#[cfg(test)]
+#[path = "fleet_errors_disk_tests.rs"]
+mod fleet_errors_disk_tests;
 
 /// FD-9: log a thumbs press on one answer (#179) as that turn's rating row in the chat's
 /// thread, in the thread store in the app data folder.

@@ -97,6 +97,8 @@ impl mcp::ReadCore for Core {
             }),
             "budget" => cli::budget_rows()
                 .and_then(|rows| serde_json::to_value(rows).map_err(cli::Fail::from)),
+            // #375: the satellite's read tool (`mcp::role_read_tools`).
+            "errors" => cli::errors_answer(self.data()?).map(|answer| answer.to_json()),
             other => return Err(format!("unknown tool: {other}")),
         };
         answer.map_err(|fail| fail.message)

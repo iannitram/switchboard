@@ -203,6 +203,10 @@ fn main() {
         .setup(|app| {
             let dir = app.path().app_config_dir()?;
             app.manage(commands::AppState::new(dir.join("settings.json")));
+            // #375: recorded fleet errors are kept in the app data folder.
+            if let Ok(data) = app.path().app_data_dir() {
+                app.state::<commands::AppState>().keep_errors_in(data);
+            }
             let satellite = app.handle().clone();
             std::thread::spawn(move || satellite_loop(satellite, dir));
             let handle = app.handle().clone();
