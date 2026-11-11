@@ -3,6 +3,7 @@
 use crate::CoreError;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Settings {
@@ -54,8 +55,24 @@ pub fn load(path: &Path) -> Result<Settings, CoreError> {
     serde_json::from_str(&text).map_err(|e| CoreError::Parse(format!("{}: {e}", path.display())))
 }
 
-/// Write the settings file as pretty JSON, creating its folder. The write goes to a `.tmp` file
-/// first and is renamed over the settings file, so a failure leaves the old file in place.
+/// Each save's own number, so two saves at once never share a temp file (#371).
+static SAVE_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// The temp file one save writes before its rename: `<name>.<pid>-<n>.tmp` beside the settings
+/// file, where `n` counts this process's saves. No two saves, in one process or two, share it.
+pub fn temp_path(path: &Path) -> PathBuf {
+    let n = SAVE_SEQ.fetch_add(1, Ordering::Relaxed);
+    let mut file_name = path
+        .file_name()
+        .map(|name| name.to_os_string())
+        .unwrap_or_default();
+    file_name.push(format!(".{}-{n}.tmp", std::process::id()));
+    path.with_file_name(file_name)
+}
+
+/// Write the settings file as pretty JSON, creating its folder. The write goes to a temp file of
+/// its own (`temp_path`) first and is renamed over the settings file, so a failure leaves the old
+/// file in place and two saves at once both succeed (the last rename wins).
 pub fn save(path: &Path, settings: &Settings) -> Result<(), CoreError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -63,13 +80,15 @@ pub fn save(path: &Path, settings: &Settings) -> Result<(), CoreError> {
     }
     let text =
         serde_json::to_string_pretty(settings).map_err(|e| CoreError::Parse(format!("{e}")))?;
-    let mut tmp = path.to_path_buf();
-    if let Some(name) = path.file_name() {
-        let mut file_name = name.to_os_string();
-        file_name.push(".tmp");
-        tmp.set_file_name(file_name);
-    }
-    std::fs::write(&tmp, text).map_err(|e| CoreError::Io(format!("{}: {e}", tmp.display())))?;
-    std::fs::rename(&tmp, path).map_err(|e| CoreError::Io(format!("{}: {e}", path.display())))?;
+    let tmp = temp_path(path);
+    std::fs::write(&tmp, text).map_err(|e| {
+        // A write that failed part way may have left the temp file.
+        let _ = std::fs::remove_file(&tmp);
+        CoreError::Io(format!("{}: {e}", tmp.display()))
+    })?;
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        CoreError::Io(format!("{}: {e}", path.display()))
+    })?;
     Ok(())
 }

@@ -196,24 +196,20 @@ fn paid_pick_with_no_key_is_an_error_and_stores_nothing() {
 }
 
 #[test]
-fn claude_handoff_and_wait_send_and_store_nothing() {
-    for pick in [
-        ChatPick::ClaudeHandoff {
-            reason: "needs tools".to_string(),
-        },
-        ChatPick::Wait {
-            reason: "waiting for budget".to_string(),
-        },
-    ] {
-        let dir = data_dir("handoff");
-        let (reply, seen) = run(&dir, pick.clone(), &[], Some("t-5"));
-        let reply = reply.unwrap();
-        assert_eq!(reply.route.pick, pick);
-        assert_eq!(reply.text, None);
-        assert_eq!(reply.handoff_id, None);
-        assert!(seen.lock().unwrap().is_empty());
-        assert!(ThreadStore::new(&dir).list().unwrap().is_empty());
-    }
+fn claude_handoff_sends_and_stores_nothing() {
+    // #377: this test once asserted the same for a wait; a wait now queues the ask (see
+    // fd_queued_ask.rs).
+    let pick = ChatPick::ClaudeHandoff {
+        reason: "needs tools".to_string(),
+    };
+    let dir = data_dir("handoff");
+    let (reply, seen) = run(&dir, pick.clone(), &[], Some("t-5"));
+    let reply = reply.unwrap();
+    assert_eq!(reply.route.pick, pick);
+    assert_eq!(reply.text, None);
+    assert_eq!(reply.handoff_id, None);
+    assert!(seen.lock().unwrap().is_empty());
+    assert!(ThreadStore::new(&dir).list().unwrap().is_empty());
 }
 
 #[test]

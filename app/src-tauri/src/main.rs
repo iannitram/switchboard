@@ -22,8 +22,9 @@ const TICK_EVERY: Duration = Duration::from_secs(60);
 /// AUTO-6: how often the satellite's lanes are checked. A loop that ended frees its lane.
 const SATELLITE_EVERY: Duration = Duration::from_secs(60);
 
-/// AUTO-6: the satellite thread. Each pass reads `satellite.json` (off when missing), starts
-/// the lanes `driver::tick` allows, and classes the failed cards of loops that ended (AUTO-9).
+/// AUTO-6: the satellite thread. Each pass reads `satellite.json` (off when missing), records a
+/// fleet error for each loop that ended with an error (CORE-2), classes the failed cards of
+/// loops that ended (AUTO-9), and starts the lanes `driver::tick` allows.
 fn satellite_loop(handle: tauri::AppHandle, config_dir: std::path::PathBuf) {
     let data = handle
         .path()
@@ -38,9 +39,16 @@ fn satellite_loop(handle: tauri::AppHandle, config_dir: std::path::PathBuf) {
                     let runner = runner.get_or_insert_with(|| {
                         driver::ChildRunner::new(fleet.clone(), &data.join("satellite"))
                     });
-                    for (lane, stdout) in runner.take_finished() {
+                    for end in runner.take_finished() {
+                        // CORE-2 (#383): a loop that ended with an error is a fleet error with its
+                        // exit code and stderr; the runner holds its lane for a while.
+                        if let Some(e) = end.fleet_error() {
+                            commands::record_fleet_error(&state, &e);
+                            eprintln!("satellite {}: {e}", end.lane);
+                        }
+                        let lane = end.lane;
                         let dir = data.join("satellite").join("cards").join(&lane);
-                        match driver::classify_failed(&fleet, &dir, &stdout) {
+                        match driver::classify_failed(&fleet, &dir, &end.stdout) {
                             Ok(classes) => {
                                 for (id, class) in classes {
                                     eprintln!("satellite {lane}: {id} {class:?}");
@@ -116,13 +124,20 @@ fn autopilot_after_poll(
             clock: &SystemClock,
             repos: Vec::new(),
         };
-        let merged = store.load_all().and_then(|snaps| {
-            passes::merge_pass(&snaps, &poller, &pipeline_root, &starter.dev_root)
-        });
-        match merged {
-            Ok(merged) => {
-                for (repo, prs, issues) in merged {
+        // #380: every PR is tried; each refusal lands in Waiting on you.
+        match store.load_all() {
+            Ok(snaps) => {
+                let pass = passes::merge_pass(&snaps, &poller, &pipeline_root, &starter.dev_root);
+                for (repo, prs, issues) in &pass.merged {
                     eprintln!("autopilot: merged {repo} {prs:?}, closing {issues:?}");
+                }
+                for r in &pass.refused {
+                    eprintln!("autopilot: merge {}#{} refused: {}", r.repo, r.pr, r.why);
+                }
+                if let Err(e) =
+                    passes::record_refused_merges(data, &pass.refused, SystemClock.now())
+                {
+                    eprintln!("autopilot: waiting: {e}");
                 }
             }
             Err(e) => eprintln!("autopilot: merge: {e}"),
@@ -135,6 +150,8 @@ fn autopilot_after_poll(
                         eprintln!("autopilot: started {id}");
                     }
                     if let Some(e) = &run.drift_error {
+                        // #379: a Project Manager job that died is recorded like any fleet error.
+                        commands::record_fleet_error(&state, e);
                         eprintln!("autopilot: drift clear: {e}");
                     }
                     if !run.backup.is_empty() {

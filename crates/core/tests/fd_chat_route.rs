@@ -592,7 +592,9 @@ fn the_chat_route_command_is_a_thin_call_into_route_message() {
         .map_or(commands.len(), |i| at + i);
     let body = &commands[at..body_end];
     assert!(body.contains("message: String"), "{body}");
-    assert!(body.contains("route_message("), "{body}");
+    // #378: in an open thread the chat stays on its model (FD-5), so the command routes with
+    // `route_in_thread`, which is `route_message` for a new chat.
+    assert!(body.contains("route_in_thread("), "{body}");
     assert!(body.contains("estimate_complexity(&message)"), "{body}");
     assert!(body.contains("FaceError::new(\"chat_route\""), "{body}");
     assert!(body.contains("record_fleet_error("), "{body}");

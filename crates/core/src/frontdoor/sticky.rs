@@ -2,7 +2,10 @@
 //! signals are logged as their own rows.
 
 use super::adapters::{split_handoff, Answer};
+use super::rating_log::rating_id;
+use super::thread::{is_turn, ThreadStore};
 use crate::joblog::{JobRow, RowSource};
+use crate::CoreError;
 
 /// FD-5: what moves a sticky chat.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,4 +147,77 @@ pub fn thumbs_down_counts(rows: &[JobRow]) -> (usize, usize) {
             Some(true) => (not_moved, moved + 1),
             None => (not_moved, moved),
         })
+}
+
+/// FD-5: the step a sticky chat's route shows: the chat stayed on its model.
+pub const STICKY_STEP: &str = "sticky chat";
+
+/// FD-5: the model a thread is open on: its last answer's service, model and kind, that
+/// answer's text with its `[[handoff: <reason>]]` marker put back when it had one, its turn
+/// index, and whether that answer's rating is a thumbs down.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenChat {
+    pub service: String,
+    pub model: String,
+    pub kind: Option<String>,
+    pub reply: String,
+    pub turn: u32,
+    pub thumbs_down: bool,
+}
+
+/// The `escalation_step` an answer row carries for a reply that had a handoff marker, so the
+/// next turn still sees the marker (FD-5): `handoff: <reason>`.
+pub fn handoff_step(reason: &str) -> String {
+    format!("handoff: {reason}")
+}
+
+/// FD-5: the chat `handoff_id` is open on, or None when the thread has no answer yet.
+pub fn open_chat(store: &ThreadStore, handoff_id: &str) -> Result<Option<OpenChat>, CoreError> {
+    let rows = store.read(handoff_id)?;
+    let turns: Vec<&JobRow> = rows.iter().filter(|row| is_turn(row)).collect();
+    let Some((turn, last)) = turns
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, row)| row.role.as_deref() == Some("assistant"))
+    else {
+        return Ok(None);
+    };
+    let (Some(service), Some(model)) = (last.lane.clone(), last.model.clone()) else {
+        return Ok(None);
+    };
+    let turn = turn as u32;
+    let rating = rating_id(handoff_id, turn);
+    let thumbs_down = rows.iter().any(|row| {
+        row.id.as_deref() == Some(rating.as_str()) && row.rating.as_deref() == Some("down")
+    });
+    let mut reply = last.text.clone().unwrap_or_default();
+    if let Some(reason) = last
+        .escalation_step
+        .as_deref()
+        .and_then(|step| step.strip_prefix("handoff: "))
+    {
+        reply.push_str(&format!(" [[handoff: {reason}]]"));
+    }
+    Ok(Some(OpenChat {
+        service,
+        model,
+        kind: last.kind.clone(),
+        reply,
+        turn,
+        thumbs_down,
+    }))
+}
+
+/// FD-5: the signals that move `open` for my next message, with `agents` the names that count.
+pub fn move_signals(open: &OpenChat, message: &str, agents: &[String]) -> Vec<Signal> {
+    signals(message, agents, open.thumbs_down, &open.reply)
+}
+
+/// FD-5: whether a signal means the open model must not take the next turn: a thumbs down or
+/// its own handoff marker.
+pub fn leaves_the_model(found: &[Signal]) -> bool {
+    found
+        .iter()
+        .any(|s| matches!(s, Signal::ThumbsDown | Signal::HandoffMarker(_)))
 }

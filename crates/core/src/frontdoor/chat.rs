@@ -1,5 +1,6 @@
-//! FD-1 for the Chat composer (#177): route one message and say which step picked. Routing only:
-//! no adapter is called, nothing is logged and no thread is stored.
+//! FD-1 for the Chat composer (#177): route one message and say which step picked; FD-5: in an
+//! open thread, keep the chat on its model until a signal moves it. Routing only: no adapter is
+//! called, nothing is logged and no thread is stored.
 
 use crate::abilities::{AbilitiesIndex, FleetModels};
 use crate::autopilot::may_spend;
@@ -7,9 +8,12 @@ use crate::fleet::FleetBridge;
 use crate::frontdoor::adapters::HttpChatTransport;
 use crate::frontdoor::labeller::{LlamaLabeller, SmallLabeller};
 use crate::frontdoor::router::{self, BudgetGate, Complexity, Pick, Route, Step};
+use crate::frontdoor::sticky::{leaves_the_model, move_signals, open_chat, STICKY_STEP};
+use crate::frontdoor::thread::ThreadStore;
 use crate::CoreError;
 use serde::Serialize;
 use std::cell::RefCell;
+use std::path::Path;
 
 /// The complexity a caller with no estimate routes as: a small request, the cheapest pool in
 /// budget (FD-1). The app no longer uses it: `chat_route` calls `estimate_complexity`.
@@ -233,6 +237,102 @@ pub fn route_message(
     route_message_on(
         fleet,
         machine.as_deref(),
+        message,
+        complexity,
+        |message, index, gate, complexity| {
+            router::route(
+                message,
+                index,
+                gate,
+                complexity,
+                small.as_ref().map(|s| s as &dyn SmallLabeller),
+            )
+        },
+    )
+}
+
+/// A gate that refuses one service and asks `gate` for every other (FD-5: a thumbs down or a
+/// handoff marker moves the chat off its model).
+struct Without<'a> {
+    gate: &'a dyn BudgetGate,
+    service: Option<&'a str>,
+}
+
+impl BudgetGate for Without<'_> {
+    fn allows(&self, service: &str) -> bool {
+        self.service != Some(service) && self.gate.allows(service)
+    }
+}
+
+/// FD-5 (#378): route a message in thread `handoff_id`. While the thread is open on a model
+/// (`sticky::open_chat`) and no signal moves it (`sticky::move_signals`, with the index's agents
+/// and the built-in Claude agents) and its pool is in budget, the chat stays: step
+/// `sticky chat`, the thread's kind, the same service and model, and `route` is not asked.
+/// Otherwise `route` picks as for a new chat; after a thumbs down or the model's own handoff
+/// marker it may not pick the open service. No thread, or one with no answer, is a new chat.
+#[allow(clippy::too_many_arguments)]
+pub fn route_in_thread_on(
+    fleet: &FleetBridge,
+    machine: Option<&str>,
+    data_dir: &Path,
+    handoff_id: Option<&str>,
+    message: &str,
+    complexity: Complexity,
+    route: impl Fn(&str, &AbilitiesIndex, &dyn BudgetGate, Complexity) -> Route,
+) -> Result<ChatRoute, CoreError> {
+    let open = match handoff_id {
+        Some(id) => open_chat(&ThreadStore::new(data_dir), id)?,
+        None => None,
+    };
+    let Some(open) = open else {
+        return route_message_on(fleet, machine, message, complexity, route);
+    };
+    if message.trim().is_empty() {
+        return Err(CoreError::Refused("chat: empty message".to_string()));
+    }
+    let index = AbilitiesIndex::load_with(fleet, machine)?;
+    let mut agents: Vec<String> = index.agents.keys().cloned().collect();
+    agents.extend(router::CLAUDE_AGENTS.iter().map(|a| a.to_string()));
+    let found = move_signals(&open, message, &agents);
+    let gate = FleetGate::new(fleet);
+    let chat = if found.is_empty() && gate.allows(&open.service) {
+        ChatRoute {
+            step: STICKY_STEP.to_string(),
+            kind: open.kind.clone(),
+            pick: ChatPick::Service {
+                service: open.service.clone(),
+                model: open.model.clone(),
+            },
+        }
+    } else {
+        let without = Without {
+            gate: &gate,
+            service: leaves_the_model(&found).then_some(open.service.as_str()),
+        };
+        ChatRoute::from(&route(message, &index, &without, complexity))
+    };
+    if let Some(err) = gate.into_error() {
+        return Err(err);
+    }
+    Ok(chat)
+}
+
+/// FD-5 (#378): `route_in_thread_on` with the real router and the live labeller, as
+/// `route_message` routes a new chat.
+pub fn route_in_thread(
+    fleet: &FleetBridge,
+    data_dir: &Path,
+    handoff_id: Option<&str>,
+    message: &str,
+    complexity: Complexity,
+) -> Result<ChatRoute, CoreError> {
+    let machine = FleetModels::local_machine();
+    let small = live_labeller(fleet, machine.as_deref());
+    route_in_thread_on(
+        fleet,
+        machine.as_deref(),
+        data_dir,
+        handoff_id,
         message,
         complexity,
         |message, index, gate, complexity| {

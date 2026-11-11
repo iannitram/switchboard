@@ -7,11 +7,14 @@ use super::review::{first_rung, review_job, Rung};
 use super::weekly::{roadmap_changed, weekly_due};
 use crate::abilities::FleetModels;
 use crate::clock::UnixSeconds;
-use crate::fleet::{clean_child_env, FleetBridge, FLEET_ROOT_ENV};
-use crate::github::merge::merge_passed;
+use crate::fleet::{clean_child_env, FleetBridge, FleetError, FleetErrorReason, FLEET_ROOT_ENV};
+use crate::github::merge::{
+    carried_over_by_patch_id, eligibility, merge, MergeEligibility, MergeJob,
+};
 use crate::github::poll::Poller;
-use crate::github::snapshot::{RepoSnapshot, SnapshotStore};
+use crate::github::snapshot::{PullRequest, RepoSnapshot, SnapshotStore};
 use crate::rules::{Caller, Face, Role};
+use crate::waiting::{Item, LocalItems, Source};
 use crate::CoreError;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -71,8 +74,10 @@ pub trait JobStarter {
     /// Start `job` with `brief` as its prompt. Does not wait for the job.
     fn start(&mut self, job: &Value, brief: &str) -> Result<(), CoreError>;
     /// Has the job started under `job_id` ended? `FleetStarter` says yes when the job has output,
-    /// has no job file, or its job file is older than `PM_JOB_TIMEOUT_SECS` (a launcher that died
-    /// leaves an empty output, and the queue must not wait for it forever).
+    /// has no job file, its launcher has exited 0 or 75 ("not now"), or its job file is older than
+    /// `PM_JOB_TIMEOUT_SECS`. An error means the job has ended with one: its launcher exited
+    /// non-zero with no output (CORE-2, #379); the caller frees the job's slot and passes the
+    /// error on.
     fn finished(&mut self, job_id: &str) -> Result<bool, CoreError>;
 }
 
@@ -260,13 +265,18 @@ fn pm_lane(starter: &mut dyn JobStarter) -> Result<Option<&'static str>, CoreErr
 }
 
 /// AUTO-2, AUTO-5: may a Project Manager job start? Not while the one last started has not
-/// finished; once it has, that is forgotten.
+/// finished; once it has, that is forgotten. A job that ended with an error (`finished` answers
+/// it) is forgotten too, and its error is returned, so the slot is free at the next pass (#379).
 fn pm_free(state: &mut AutopilotState, starter: &mut dyn JobStarter) -> Result<bool, CoreError> {
     if let Some(id) = state.pm_running.clone() {
-        if !starter.finished(&id)? {
-            return Ok(false);
+        match starter.finished(&id) {
+            Ok(false) => return Ok(false),
+            Ok(true) => state.pm_running = None,
+            Err(e) => {
+                state.pm_running = None;
+                return Err(e);
+            }
         }
-        state.pm_running = None;
     }
     Ok(true)
 }
@@ -482,36 +492,107 @@ pub fn autopilot_caller() -> Caller {
     }
 }
 
+/// One merge the autopilot tried and was refused (#380): the repo, the PR and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefusedMerge {
+    pub repo: String,
+    pub pr: u64,
+    pub why: String,
+}
+
+/// What one `merge_pass` did: each repo's merges, and each merge that was refused.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MergePass {
+    pub merged: Vec<Merged>,
+    pub refused: Vec<RefusedMerge>,
+}
+
 /// AUTO-4: merge every passed PR of each repo that has a clone beside the pipeline repo, in the
-/// order given. Archived repos and repos with no clone are skipped. A refused merge returns at once.
+/// order given, smallest PR first in each repo. A PASS on an older sha counts when it carries
+/// over by patch-id (`carried_over_by_patch_id`, #381). Archived repos and repos with no clone
+/// are skipped. A refused merge is recorded in `refused` and the pass goes on to the next PR, so
+/// one refusal neither hides the merges before it nor stops the ones after it (#380).
 pub fn merge_pass(
     snaps: &[RepoSnapshot],
     poller: &Poller<'_>,
     pipeline_root: &Path,
     dev_root: &Path,
-) -> Result<Vec<Merged>, CoreError> {
+) -> MergePass {
     let caller = autopilot_caller();
-    let mut out = Vec::new();
+    let mut out = MergePass::default();
     for snap in snaps.iter().filter(|s| !s.archived) {
         let name = snap.repo.rsplit('/').next().unwrap_or(&snap.repo);
         let clone = dev_root.join(name);
         if !clone.is_dir() {
             continue;
         }
-        let (merged, closed) = merge_passed(
-            &caller,
-            &clone,
-            pipeline_root,
-            &snap.repo,
-            &snap.pulls,
-            &|_| false,
-            poller,
-        )?;
+        let mut ready: Vec<(&PullRequest, bool)> = snap
+            .pulls
+            .iter()
+            .filter(|pr| pr.state == "open")
+            .map(|pr| (pr, carried_over_by_patch_id(&clone, pr)))
+            .filter(|(pr, carried)| eligibility(pr, *carried) == MergeEligibility::Eligible)
+            .collect();
+        ready.sort_by_key(|(pr, _)| pr.number);
+        let (mut merged, mut closed) = (Vec::new(), Vec::new());
+        for (pr, carried) in ready {
+            let job = MergeJob {
+                pipeline_root,
+                clone: &clone,
+                repo: &snap.repo,
+                pr,
+                carried_over: carried,
+            };
+            match merge(&caller, &job, poller) {
+                Ok(()) => {
+                    merged.push(pr.number);
+                    closed.extend(pr.closes.iter().copied());
+                }
+                Err(e) => out.refused.push(RefusedMerge {
+                    repo: snap.repo.clone(),
+                    pr: pr.number,
+                    why: match e {
+                        CoreError::Refused(why) => why,
+                        other => other.to_string(),
+                    },
+                }),
+            }
+        }
         if !merged.is_empty() {
-            out.push((snap.repo.clone(), merged, closed));
+            out.merged.push((snap.repo.clone(), merged, closed));
         }
     }
-    Ok(out)
+    out
+}
+
+/// WAIT-1, AUTO-4 (#380): the Waiting item of a refused autopilot merge. One per PR (a later
+/// refusal of the same PR replaces it); its link opens the PR.
+pub fn refused_merge_item(refused: &RefusedMerge, at: UnixSeconds) -> Item {
+    let what = format!("Merge {}#{}", refused.repo, refused.pr);
+    Item {
+        what: what.clone(),
+        why: format!(
+            "The autopilot's merge was refused: {}. Fix it, or merge it by hand.",
+            refused.why
+        ),
+        source: Source::GuardedAction { text: what },
+        link: format!("https://github.com/{}/pull/{}", refused.repo, refused.pr),
+        action: "Open PR".to_string(),
+        since: at,
+    }
+}
+
+/// Put each refused merge of a pass in Waiting on you (`<data>/waiting/local.json`).
+pub fn record_refused_merges(
+    data_dir: &Path,
+    refused: &[RefusedMerge],
+    at: UnixSeconds,
+) -> Result<(), CoreError> {
+    let local = LocalItems::new(data_dir);
+    for r in refused {
+        local.add(refused_merge_item(r, at))?;
+    }
+    Ok(())
 }
 
 /// Write `job` and its brief for `fleet run`: the brief to `<jobs_dir>/<id>.md`, the job to
@@ -563,6 +644,13 @@ pub fn job_log_files(job_path: &Path) -> Result<(std::fs::File, std::fs::File), 
         create(job_path.with_extension("out"))?,
         create(job_path.with_extension("err"))?,
     ))
+}
+
+/// The file beside a job file (`<job id>.exit`) where the app's starter writes the launcher's
+/// exit code when it ends (`signal` when it had none), so a later pass can tell a launcher that
+/// died from one still running (#379).
+pub fn job_exit_file(job_path: &Path) -> PathBuf {
+    job_path.with_extension("exit")
 }
 
 /// How long a job with no output may run before the queue stops waiting for it: 2 hours.
@@ -629,8 +717,9 @@ pub fn remove_pm_worktree(target: &PmCleanup) {
 }
 
 /// The app's starter: AUTO-1 through the bridge, and `fleet run <job file> --json` in the
-/// background. The launcher's stdout goes to `<job id>.out` and its stderr to `<job id>.err`,
-/// beside the job file, so a crash leaves its reason on disk.
+/// background. The launcher's stdout goes to `<job id>.out`, its stderr to `<job id>.err` and,
+/// when it ends, its exit code to `<job id>.exit`, beside the job file, so a crash leaves its
+/// reason on disk and frees the Project Manager's slot (#379).
 ///
 /// The lane `qwen` may also spend only when the local model server answers: `qwen_probe` is
 /// asked with the `machines.<machine>.qwen_server_url` from the fleet config.
@@ -699,8 +788,13 @@ impl JobStarter for FleetStarter {
             .stderr(Stdio::from(err))
             .spawn()
             .map_err(|e| CoreError::Io(format!("{}: {e}", command[0])))?;
+        let exit_file = job_exit_file(&path);
         std::thread::spawn(move || {
-            let _ = child.wait();
+            let code = match child.wait().map(|status| status.code()) {
+                Ok(Some(code)) => code.to_string(),
+                _ => "signal".to_string(),
+            };
+            let _ = std::fs::write(exit_file, code);
         });
         Ok(())
     }
@@ -720,6 +814,27 @@ impl JobStarter for FleetStarter {
                 remove_pm_worktree(&clean);
             }
             return Ok(true);
+        }
+        // No output: a launcher that has exited 0 or 75 is done; one that exited otherwise failed to
+        // run the job, which is a fleet error with its exit code and stderr (CORE-2).
+        // An exit file still empty is being written: asked again at the next pass.
+        if let Some(text) = std::fs::read_to_string(job_exit_file(&job_file))
+            .ok()
+            .filter(|text| !text.trim().is_empty())
+        {
+            let code = text.trim().parse::<i32>().ok();
+            // 75 is the fleet's "not now" (CORE-1): an answer, not an error.
+            if code == Some(0) || code == Some(super::driver::NOT_NOW) {
+                return Ok(true);
+            }
+            let job_arg = job_file.to_string_lossy().into_owned();
+            return Err(CoreError::Fleet(FleetError {
+                command: self.fleet.command_line(&["run", &job_arg]),
+                exit_code: code,
+                stderr: std::fs::read_to_string(job_file.with_extension("err")).unwrap_or_default(),
+                reason: FleetErrorReason::Exit,
+                undo_note: None,
+            }));
         }
         let age = std::fs::metadata(&job_file)
             .and_then(|m| m.modified())

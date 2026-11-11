@@ -110,10 +110,16 @@ export type ChatRoute = {
   service?: string;
   model?: string;
   handoff?: string | null;
+  /** FD-3: nothing was in budget, so the ask is queued in its thread (`handoff_id`); why. */
+  queued?: string;
+  /** FD-6 (#378): this turn moved the chat off another model, named `<service> <model>`. */
+  moved_from?: string;
+  /** FD-8 (#378): a Claude handoff that moved an open chat: the packet the Claude session starts from. */
+  packet?: string;
 };
 
 /** One turn in the thread: the person's message, or the answer to it. */
-export type ChatTurn = { role: "user" | "assistant"; text: string; service?: string; model?: string; step?: string; handoff?: string | null; handoff_id?: string; kind?: string | null };
+export type ChatTurn = { role: "user" | "assistant"; text: string; service?: string; model?: string; step?: string; handoff?: string | null; handoff_id?: string; kind?: string | null; unstored?: boolean };
 
 /** Sends one message to the core's router. Default: the `chat_route` command. */
 export type ChatSend = (message: string, handoffId?: string) => Promise<CoreResult<ChatRoute>>;
@@ -162,7 +168,10 @@ export function Chat({
     setRatings((current) => ({ ...current, [turnIndex]: rating }));
     const turn = turns[turnIndex];
     if (!turn || !turn.handoff_id || !turn.service || !turn.model) return;
-    const args: ChatRating = { turnIndex, rating, handoffId: turn.handoff_id, service: turn.service, model: turn.model };
+    // FD-9 (#372): the core checks the index against the turns its thread stored, and a message
+    // handed to Claude is shown here but not stored there, so those are not counted.
+    const storedIndex = turns.slice(0, turnIndex).filter((t) => !t.unstored).length;
+    const args: ChatRating = { turnIndex: storedIndex, rating, handoffId: turn.handoff_id, service: turn.service, model: turn.model };
     if (turn.kind) args.kind = turn.kind;
     const result = await rate(args);
     if ("error" in result) {
@@ -196,11 +205,16 @@ export function Chat({
     setErrors([]);
     setRoute(result.ok);
     const pick = result.ok.pick;
-    setRouted(pick && pick.to === "claude-handoff" ? { reason: pick.reason, prompt: message } : null);
+    setRouted(pick && pick.to === "claude-handoff" ? { reason: pick.reason, prompt: result.ok.packet ?? message } : null);
     const answer = result.ok;
+    // Any reply that names its thread continues it, a queued ask's too (FD-3).
+    if (answer.handoff_id) setThreadId(answer.handoff_id);
+    // A Claude handoff stores no turn in the thread (FD-8); an answer or a queued ask does.
+    if (answer.text === undefined && !answer.queued) {
+      setTurns((current) => current.map((turn) => (turn === sent ? { ...sent, unstored: true } : turn)));
+    }
     if (answer.text !== undefined) {
       const { text, service, model, step, handoff: moved, handoff_id, kind } = answer;
-      if (handoff_id) setThreadId(handoff_id);
       setTurns((current) => [
         ...current,
         { role: "assistant", text, service, model, step, handoff: moved ?? null, handoff_id, kind },
@@ -252,6 +266,7 @@ export function Chat({
       {route && (
         <p>{`Picked by: ${route.step}${route.kind ? ` (${route.kind})` : ""}`}</p>
       )}
+      {route?.queued && <p role="status">{`Queued: ${route.queued}. The ask is kept in this chat.`}</p>}
     </div>
   );
 }

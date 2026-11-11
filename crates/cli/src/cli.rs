@@ -203,7 +203,7 @@ impl CliWrites {
             clone: &clone,
             repo: snap.repo.as_str(),
             pr: pull,
-            carried_over: false,
+            carried_over: switchboard_core::github::merge::carried_over_by_patch_id(&clone, pull),
         };
         // The re-read after the push: a live transport when none was given (best effort).
         let live: Box<dyn GitHubTransport>;

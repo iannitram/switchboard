@@ -223,3 +223,88 @@ fn refusal(out: &std::process::Output, flag: &str) -> String {
         None => format!("merge_pr.py {flag} exited {:?}", out.status.code()),
     }
 }
+
+/// GH-5, R25 (#381): does the PR's latest `VERDICT: PASS`, on an older sha, carry over to its
+/// head? Yes when the PR's own change (its diff from its merge-base with main) has the same
+/// whitespace-exact patch-id (`git patch-id --verbatim`) at the PASS sha and at the head, as
+/// `merge_pr.py`'s `carried_pass` decides it, so a head that only brought the PR up to date with
+/// main keeps its PASS. Main is `origin/main` in `clone`, else `main`. No when the latest verdict
+/// is not a PASS, the PASS is already on the head, a sha is not in the clone, or either diff is
+/// empty: the safe side. Runs only local `git`; fetches nothing.
+pub fn carried_over_by_patch_id(clone: &std::path::Path, pr: &PullRequest) -> bool {
+    let pass = match pr.verdicts.last() {
+        Some(v) if v.verdict == "PASS" && !v.sha.is_empty() => &v.sha,
+        _ => return false,
+    };
+    if *pass == pr.head_sha || pr.head_sha.is_empty() {
+        return false;
+    }
+    let Some(base) = ["origin/main", "main"]
+        .into_iter()
+        .find(|b| git_out(clone, &["rev-parse", "--verify", "--quiet", b], None).is_some())
+    else {
+        return false;
+    };
+    match (
+        pr_patch_id(clone, base, pass),
+        pr_patch_id(clone, base, &pr.head_sha),
+    ) {
+        (Some(before), Some(now)) => before == now,
+        _ => false,
+    }
+}
+
+/// The patch-id of what `tip` adds on top of its merge-base with `base`, or `None` when it
+/// cannot be worked out or the change is empty (`merge_pr.py`'s `pr_patch_id`).
+fn pr_patch_id(clone: &std::path::Path, base: &str, tip: &str) -> Option<String> {
+    let mb = git_out(clone, &["merge-base", base, tip], None)?;
+    let mb = mb.trim();
+    if mb.is_empty() {
+        return None;
+    }
+    let diff = git_out(
+        clone,
+        &["diff", "--no-color", "--no-ext-diff", mb, tip],
+        None,
+    )?;
+    if diff.trim().is_empty() {
+        return None;
+    }
+    let out = git_out(clone, &["patch-id", "--verbatim"], Some(&diff))?;
+    out.split_whitespace().next().map(str::to_string)
+}
+
+/// `git -C <clone> <args>` with `input` on stdin; its stdout when it exits 0.
+fn git_out(clone: &std::path::Path, args: &[&str], input: Option<&str>) -> Option<String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(clone)
+        .args(args)
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    if let Some(text) = input {
+        let mut stdin = child.stdin.take()?;
+        let text = text.to_string();
+        // Written from a thread so a large diff cannot block on a full stdout pipe.
+        let writer = std::thread::spawn(move || stdin.write_all(text.as_bytes()));
+        let out = child.wait_with_output().ok()?;
+        writer.join().ok()?.ok()?;
+        return out
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).into_owned());
+    }
+    let out = child.wait_with_output().ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}

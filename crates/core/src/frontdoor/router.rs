@@ -176,7 +176,7 @@ pub fn learned_pick(kind: &str, rows: &[JobRow]) -> Option<(String, String)> {
 }
 
 /// The agents whose names are built in and go to Claude (FD-8).
-const CLAUDE_AGENTS: [&str; 2] = ["harmon", "therapist"];
+pub const CLAUDE_AGENTS: [&str; 2] = ["harmon", "therapist"];
 
 /// Services from cheapest to dearest: the budget rule's `Small` takes the first one in budget.
 const CHEAPEST_FIRST: [&str; 5] = ["qwen", "gemini", "chatgpt", "deepseek", "claudeapi"];

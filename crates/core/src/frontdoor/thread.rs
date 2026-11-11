@@ -6,6 +6,13 @@ use crate::joblog::JobRow;
 use crate::CoreError;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Whether a thread row is a chat turn: its role is `user` or `assistant` (not a rating, an
+/// implicit signal, a summary or a move).
+pub fn is_turn(row: &JobRow) -> bool {
+    matches!(row.role.as_deref(), Some("user") | Some("assistant"))
+}
 
 pub struct ThreadStore {
     dir: PathBuf,
@@ -51,6 +58,54 @@ impl ThreadStore {
             .open(&path)
             .map_err(io_err)?;
         file.write_all(line.as_bytes()).map_err(io_err)
+    }
+
+    /// Put `row` in the thread in place of the row with the same id, or append it when no row
+    /// has that id (or it has none). The file is rewritten through a temp file of its own beside
+    /// it and a rename, so a reader never sees half a file (#372: a second rating of one turn
+    /// replaces the first).
+    pub fn upsert(&self, handoff_id: &str, row: &JobRow) -> Result<(), CoreError> {
+        let mut rows = self.read(handoff_id)?;
+        let at = row
+            .id
+            .as_ref()
+            .and_then(|id| rows.iter().position(|old| old.id.as_ref() == Some(id)));
+        let Some(at) = at else {
+            return self.append(handoff_id, row);
+        };
+        rows[at] = row.clone();
+        let path = self.file(handoff_id);
+        let mut text = String::new();
+        for row in &rows {
+            text.push_str(
+                &serde_json::to_string(row)
+                    .map_err(|e| CoreError::Parse(format!("{}: {e}", path.display())))?,
+            );
+            text.push('\n');
+        }
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let tmp = path.with_extension(format!(
+            "{}-{}.tmp",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let io_err = |e: std::io::Error| CoreError::Io(format!("{}: {e}", path.display()));
+        std::fs::write(&tmp, text).map_err(io_err)?;
+        std::fs::rename(&tmp, &path).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            io_err(e)
+        })
+    }
+
+    /// Whether the thread has a file with at least one row.
+    pub fn exists(&self, handoff_id: &str) -> Result<bool, CoreError> {
+        Ok(!self.read(handoff_id)?.is_empty())
+    }
+
+    /// The thread's chat turns, oldest first: its rows whose role is `user` or `assistant`. A
+    /// turn's index here is the turn index a rating names (FD-9).
+    pub fn turns(&self, handoff_id: &str) -> Result<Vec<JobRow>, CoreError> {
+        Ok(self.read(handoff_id)?.into_iter().filter(is_turn).collect())
     }
 
     /// Every row of a thread, in file order; a thread with no file is empty.

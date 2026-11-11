@@ -105,6 +105,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 ### github-merge
 `crates/core/src/github/merge.rs` · GH-5 · present. `eligibility(pr, carried_over)` (PASS on head or carried by patch-id, CI green on head) and `merge` through `merge_pr.py` (dry run, then push) after `rules::guard`. Never `gh pr merge` or the merge API.
 - AUTO-4 merge passed PRs (`ready_to_merge`, `merge_passed`): present.
+- GH-5 carry-over by patch-id (`carried_over_by_patch_id`: the PR's own diff from main has the same `git patch-id --verbatim` at the PASS sha and the head; used by the merge pass and `switchboard merge`): present.
 
 ### sky-features
 `crates/core/src/sky/features.rs` · SKY-2, SKY-3, SKY-5 · present. Parses ROADMAP.md's `Updated:` and `features:` block (format in `ROADMAP.md`; `release: 1.0`, `after-1.0` or `after-2.0`).
@@ -201,12 +202,15 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - FD-11 Claude API adapter (`ClaudeApiAdapter`): present.
 - FD-9 rating and implicit rows (`rating_row`, `implicit_row`): present.
 - FD-9 implicit signal log (`implicit_from_name`, `log_implicit`, `chat_implicit`): present.
+- FD-9 rating checks (`log_rating` refuses an unknown thread or turn, a question, or a service and model that did not answer; a second rating of a turn replaces the first through `ThreadStore::upsert`; `log_implicit` refuses an unknown thread; `ThreadStore::turns`, `is_turn`): present.
 - FD-10 separate move field (`with_move`, `thumbs_down_counts`): present.
 - FD-8 Open in Claude (`as_prompt`): present.
 - FD-4 learned pick (`sample_size`, `learned_pick`): present.
 - FD-1 chat_route command (`ChatRoute`, `FleetGate`, `route_message`, `estimate_complexity`, `chat_route`): present.
 - FD-11 answer a routed turn (`answer_route`, `AnswerContext`, `ChatReply`, `qwen_base_url`, `key_var`; `chat_route` returns `ChatReply`: the route plus `text`, `service`, `model`, `handoff`, `handoff_id` when answered): present. Keys come from one environment variable per paid service: `DEEPSEEK_API_KEY` (deepseek), `OPENAI_API_KEY` (chatgpt), `GEMINI_API_KEY` (gemini), `ANTHROPIC_API_KEY` (claudeapi); qwen needs none and takes its URL from `machines.<machine>.qwen_server_url` in the fleet config. A missing key is the turn's error (`no key for <service>: set <VAR>`), never another service. A chat turn's thread row carries `role` and `text`.
+- FD-3 queued ask (`answer_route` stores a wait's ask marked `queued` and the reply's `queued` says why; `queued_asks`; the Chat view shows "Queued: <reason>"): present.
 - FD-5 sticky signals (`signals`): present.
+- FD-5, FD-6, FD-7, FD-10 sticky chat and move (#378: `route_in_thread` keeps an open thread on its model, step `sticky chat`, until `move_signals` finds a signal or its pool is braked; `answer_route` sends a move the packet and the turns since, the outgoing model's summary checked by `checked_summary`, stores the `summary` and `move` rows, marks a moving thumbs down `moved`, and a Claude handoff's reply carries the `packet` for Open in Claude): present.
 - FD-3 pick for a kind (`pick_for_kind`): present.
 - FD-1 router (`route`): present.
 - FD-1 Chat composer (`PromptComposer`): present.
@@ -228,6 +232,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - AUTO-3 review job (`review_job`): present.
 - AUTO-3 review start (`after_poll`, `review_pass` in `passes.rs`; the app's poll thread starts it): present.
 - AUTO-4 merge pass (`merge_pass` in `passes.rs`; the app's poll thread runs it after `after_poll`): present.
+- AUTO-4 refused merges (`MergePass`, `RefusedMerge`, `refused_merge_item`, `record_refused_merges`: every passed PR is tried, and each refusal is a Waiting item): present.
 - AUTO-8 drifted copies (`drifted`): present.
 - AUTO-2 roadmap_changed: present.
 - AUTO-2 roadmap pass (`roadmap_pass`, `pm_job` in `passes.rs`; run by `after_poll`): present.
