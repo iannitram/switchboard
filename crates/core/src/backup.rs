@@ -6,6 +6,7 @@
 use crate::fleet::FleetBridge;
 use crate::github::queue::{self, Create, QueueStatus, Queued};
 use crate::github::transport::{GitHubTransport, HttpTransport};
+use crate::lock::FileLock;
 use crate::renumber::{renumber_for, Now, Refs};
 use crate::rules::{self, Caller, GuardedAction, Verdict};
 use crate::settings::Settings;
@@ -735,6 +736,13 @@ fn repo_lock(folder: &Path) -> Arc<Mutex<()>> {
 /// the new folder and leaves the old one untouched. Otherwise the old folder moves to
 /// `.<name>.old-<run>`, the new one takes its place, and the old one is removed. Any error before
 /// the swap leaves the old folder as it was.
+///
+/// #431: the swap is two renames, and a run that dies between them leaves the old backup aside
+/// with no folder in its place. Each backup first `settle`s the repo's folder, which puts that
+/// old backup back (or removes one already replaced), so the folder always ends up holding
+/// either the old or the new backup whole. Settling with the last backup's read, and the swap,
+/// each run under a lock file of the repo's (`.<name>.switchboard-lock`) held only for that
+/// moment, so a backup in another process never swaps while this one settles.
 pub fn backup_repo_from(
     settings: &Settings,
     repo: &str,
@@ -747,7 +755,14 @@ pub fn backup_repo_from(
     let folder = parent.join(name);
     let lock = repo_lock(&folder);
     let _held = lock.lock().unwrap_or_else(PoisonError::into_inner);
-    let old = match last_backup(&folder)? {
+    let last = if parent.is_dir() {
+        let _swap = swap_lock(&parent, name, repo)?;
+        settle(&parent, name)?;
+        last_backup(&folder)?
+    } else {
+        last_backup(&folder)?
+    };
+    let old = match last {
         LastBackup::None => None,
         LastBackup::Good(old) => Some(old),
         LastBackup::Damaged(why) => return Ok(BackupOutcome::Refused(why)),
@@ -779,11 +794,19 @@ pub fn backup_repo_from(
         remove_dir(&staging)?;
         return Ok(BackupOutcome::Refused(reason));
     }
+    let swap = match swap_lock(&parent, name, repo) {
+        Ok(swap) => swap,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(e);
+        }
+    };
     swap_in(
         &staging,
         &folder,
         &parent.join(format!(".{name}.old-{run}")),
     )?;
+    drop(swap);
     Ok(BackupOutcome::Written(manifest))
 }
 
@@ -1013,12 +1036,32 @@ fn last_backup_now(folder: &Path) -> Result<LastBackup, CoreError> {
 /// failed move puts the old folder back. When a backup in another process took the place in
 /// between, its folder stays and this run's two folders are removed.
 fn swap_in(staging: &Path, folder: &Path, aside: &Path) -> Result<(), CoreError> {
+    swap_in_steps(staging, folder, aside, &mut |_| ())
+}
+
+/// The steps of `swap_in`, for a test to stop a swap between them as a run that died would.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SwapStep {
+    /// The old folder is aside, the new one not yet in its place.
+    OldAside,
+    /// The new folder is in its place, the old one not yet removed.
+    NewIn,
+}
+
+/// `swap_in`, calling `after` after each step.
+fn swap_in_steps(
+    staging: &Path,
+    folder: &Path,
+    aside: &Path,
+    after: &mut dyn FnMut(SwapStep),
+) -> Result<(), CoreError> {
     let had_old = folder.exists();
     if had_old {
         if let Err(e) = std::fs::rename(folder, aside) {
             let _ = std::fs::remove_dir_all(staging);
             return Err(io_error(folder, e));
         }
+        after(SwapStep::OldAside);
     }
     if let Err(e) = std::fs::rename(staging, folder) {
         let put_back = had_old && std::fs::rename(aside, folder).is_ok();
@@ -1028,10 +1071,63 @@ fn swap_in(staging: &Path, folder: &Path, aside: &Path) -> Result<(), CoreError>
         }
         return Err(io_error(staging, e));
     }
+    after(SwapStep::NewIn);
     if had_old {
         remove_dir(aside)?;
     }
     Ok(())
+}
+
+/// #431: puts right what a backup that died in its swap left in `parent` for the repo `name`.
+/// With no folder in place, the newest `.<name>.old-<run>` (the old backup a run moved aside and
+/// died before the new one took its place) goes back; with one in place, every such folder is
+/// a backup already replaced and is removed. Run only with the repo's backup lock held, so no
+/// live swap's aside is touched.
+fn settle(parent: &Path, name: &str) -> Result<(), CoreError> {
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return Ok(());
+    };
+    let prefix = format!(".{name}.old-");
+    // `.<name>.old-<run>`, the run a `run_tag` (digits and dashes): another repo's folders
+    // (`demo.old-x` is a repo name too; its aside is `.demo.old-x.old-<run>`) never match.
+    let is_aside = |file: &str| {
+        file.strip_prefix(&prefix).is_some_and(|run| {
+            !run.is_empty() && run.chars().all(|c| c.is_ascii_digit() || c == '-')
+        })
+    };
+    let mut asides: Vec<(std::time::SystemTime, PathBuf)> = entries
+        .flatten()
+        .filter(|entry| is_aside(&entry.file_name().to_string_lossy()))
+        .map(|entry| {
+            let at = entry.metadata().and_then(|m| m.modified());
+            (at.unwrap_or(std::time::UNIX_EPOCH), entry.path())
+        })
+        .collect();
+    asides.sort();
+    let folder = parent.join(name);
+    if !folder.exists() {
+        if let Some((_, newest)) = asides.pop() {
+            std::fs::rename(&newest, &folder).map_err(|e| io_error(&newest, e))?;
+        }
+    }
+    for (_, aside) in asides {
+        remove_dir(&aside)?;
+    }
+    Ok(())
+}
+
+/// How long a backup waits for another process's backup of the same repo to look at or swap
+/// its folder (#431); both hold the lock for moments, not for the whole backup.
+const SWAP_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The lock that keeps backups of one repo in different processes from settling or swapping
+/// its folder at once (#431): `<parent>/.<name>.switchboard-lock`.
+fn swap_lock(parent: &Path, name: &str, repo: &str) -> Result<FileLock, CoreError> {
+    FileLock::take_for(
+        &parent.join(format!(".{name}")),
+        SWAP_LOCK_WAIT,
+        &format!("the backup of {repo}"),
+    )
 }
 
 fn remove_dir(dir: &Path) -> Result<(), CoreError> {
@@ -2716,6 +2812,106 @@ mod tests {
         for bad in ["name", "a/b/c", "../x", "a/..", "/x", "a/", "a b/c"] {
             assert!(split_repo(bad).is_err(), "{bad}");
         }
+    }
+
+    /// A backup folder holding `what` in each of its files.
+    fn whole_backup(dir: &Path, what: &str) {
+        std::fs::create_dir_all(dir.join("wiki")).unwrap();
+        for file in [
+            "repo.bundle",
+            "issues.json",
+            "wiki/Home.md",
+            "manifest.json",
+        ] {
+            std::fs::write(dir.join(file), what).unwrap();
+        }
+    }
+
+    /// Which whole backup `dir` holds, or why it is not one.
+    fn which_backup(dir: &Path) -> Result<String, String> {
+        let mut seen = HashSet::new();
+        for file in [
+            "repo.bundle",
+            "issues.json",
+            "wiki/Home.md",
+            "manifest.json",
+        ] {
+            let text = std::fs::read_to_string(dir.join(file))
+                .map_err(|e| format!("{}: {e}", dir.join(file).display()))?;
+            seen.insert(text);
+        }
+        match seen.len() {
+            1 => Ok(seen.into_iter().next().unwrap()),
+            _ => Err(format!("a mix of backups: {seen:?}")),
+        }
+    }
+
+    /// #431: a backup that dies at any step of its swap leaves either the old or the new backup
+    /// whole in the repo's folder once the next backup has looked, never neither nor a mix, and
+    /// no old backup set aside beside it.
+    #[test]
+    fn a_swap_that_dies_between_its_steps_leaves_one_whole_backup() {
+        for (dies_after, left) in [(SwapStep::OldAside, "old"), (SwapStep::NewIn, "new")] {
+            let parent = std::env::temp_dir().join(format!("swap-dies-{}", crate::lock::run_tag()));
+            let folder = parent.join("demo");
+            let staging = parent.join(".demo.new-run");
+            whole_backup(&folder, "old");
+            whole_backup(&staging, "new");
+            let died = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                swap_in_steps(
+                    &staging,
+                    &folder,
+                    &parent.join(format!(".demo.old-{}", run_tag())),
+                    &mut |step| {
+                        if step == dies_after {
+                            panic!("the run died after {step:?}");
+                        }
+                    },
+                )
+            }));
+            assert!(died.is_err(), "{dies_after:?}");
+            settle(&parent, "demo").unwrap();
+            assert_eq!(
+                which_backup(&folder),
+                Ok(left.to_string()),
+                "died after {dies_after:?}"
+            );
+            let mut beside: Vec<String> = std::fs::read_dir(&parent)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .filter(|n| n != "demo")
+                // A dead run's staging folder is not a backup; `clear_stale` removes it after a
+                // day, as before (a younger one may be a live run's).
+                .filter(|n| !n.starts_with(".demo.new-"))
+                .collect();
+            beside.sort();
+            assert_eq!(beside, Vec::<String>::new(), "died after {dies_after:?}");
+            let _ = std::fs::remove_dir_all(&parent);
+        }
+    }
+
+    /// #431: settling one repo's folder never touches another repo's whose name starts like
+    /// its aside (`demo` and `demo.old-x`): that one's aside may be its only whole backup, in
+    /// the middle of its own swap under its own lock.
+    #[test]
+    fn settle_leaves_another_repo_s_folders_alone() {
+        let parent = std::env::temp_dir().join(format!("settle-other-{}", crate::lock::run_tag()));
+        let other_aside = parent.join(".demo.old-x.old-1-2-3");
+        whole_backup(&other_aside, "other");
+        // `demo` has no folder: nothing of its own to put back.
+        settle(&parent, "demo").unwrap();
+        assert!(
+            !parent.join("demo").exists(),
+            "another repo's backup became demo's"
+        );
+        assert_eq!(which_backup(&other_aside), Ok("other".to_string()));
+        // `demo` has a folder: only its own asides go.
+        whole_backup(&parent.join("demo"), "new");
+        whole_backup(&parent.join(".demo.old-4-5-6"), "old");
+        settle(&parent, "demo").unwrap();
+        assert!(!parent.join(".demo.old-4-5-6").exists());
+        assert_eq!(which_backup(&other_aside), Ok("other".to_string()));
+        let _ = std::fs::remove_dir_all(&parent);
     }
 
     #[test]

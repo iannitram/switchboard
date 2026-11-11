@@ -289,17 +289,34 @@ pub fn run_poll_passes(
     starter: &mut dyn JobStarter,
 ) -> Result<Vec<PassReport>, CoreError> {
     if env.dry_run {
-        return Ok(poll_passes(env, which, starter));
+        return Ok(poll_passes(env, which, starter, None));
     }
     std::fs::create_dir_all(env.data_dir)
         .map_err(|e| CoreError::Io(format!("{}: {e}", env.data_dir.display())))?;
-    let held = FileLock::take(&passes_lock_target(env.data_dir), env.lock_wait).map_err(|e| {
-        CoreError::Refused(format!("autopilot: another run holds the passes ({e})"))
-    })?;
-    Ok(held.keep_fresh(|| poll_passes(env, which, starter)))
+    let held = FileLock::take_for(
+        &passes_lock_target(env.data_dir),
+        env.lock_wait,
+        PASSES_HOLDER,
+    )
+    .map_err(|e| CoreError::Refused(format!("autopilot: another run holds the passes ({e})")))?;
+    Ok(held.keep_fresh(|| poll_passes(env, which, starter, Some(&held))))
 }
 
-fn poll_passes(env: &RunEnv<'_>, which: &[Pass], starter: &mut dyn JobStarter) -> Vec<PassReport> {
+/// What the passes lock says holds it (#431), until the weekly backup says it does.
+pub const PASSES_HOLDER: &str = "the autopilot passes";
+
+/// What the passes lock says holds it while the weekly backup runs inside it (#431).
+pub const WEEKLY_BACKUP_HOLDER: &str = "the weekly backup";
+
+/// What the satellite lock says holds it (#431).
+pub const SATELLITE_HOLDER: &str = "a satellite tick";
+
+fn poll_passes(
+    env: &RunEnv<'_>,
+    which: &[Pass],
+    starter: &mut dyn JobStarter,
+    held: Option<&FileLock>,
+) -> Vec<PassReport> {
     let mut reports = Vec::new();
     let (review, roadmap) = (
         which.contains(&Pass::Review),
@@ -351,7 +368,7 @@ fn poll_passes(env: &RunEnv<'_>, which: &[Pass], starter: &mut dyn JobStarter) -
         reports.push(merge_report(env));
     }
     if which.contains(&Pass::Weekly) {
-        reports.push(weekly_report(env, starter));
+        reports.push(weekly_report(env, starter, held));
     }
     reports
 }
@@ -403,7 +420,11 @@ fn merge_report(env: &RunEnv<'_>) -> PassReport {
 }
 
 /// AUTO-5: the weekly drift clear and the backup of the repos, once Sunday 6am local has passed.
-fn weekly_report(env: &RunEnv<'_>, starter: &mut dyn JobStarter) -> PassReport {
+fn weekly_report(
+    env: &RunEnv<'_>,
+    starter: &mut dyn JobStarter,
+    held: Option<&FileLock>,
+) -> PassReport {
     let mut report = PassReport::new(Pass::Weekly, env.dry_run);
     let Some(offset) = env.utc_offset_secs else {
         report
@@ -424,7 +445,14 @@ fn weekly_report(env: &RunEnv<'_>, starter: &mut dyn JobStarter) -> PassReport {
         Err(e) => report.fail("weekly", e),
     }
     if !env.dry_run && !report.backup.is_empty() {
+        // Another run that finds the passes held is told it is the backup that holds them.
+        if let Some(held) = held {
+            held.note(WEEKLY_BACKUP_HOLDER);
+        }
         let result = (env.backup)(&report.backup);
+        if let Some(held) = held {
+            held.note(PASSES_HOLDER);
+        }
         add_backups(&mut report, result);
     }
     report
@@ -521,7 +549,13 @@ impl SatelliteSession {
         }
         let taken = std::fs::create_dir_all(&self.data_dir)
             .map_err(|e| CoreError::Io(format!("{}: {e}", self.data_dir.display())))
-            .and_then(|()| FileLock::take(&satellite_lock_target(&self.data_dir), lock_wait));
+            .and_then(|()| {
+                FileLock::take_for(
+                    &satellite_lock_target(&self.data_dir),
+                    lock_wait,
+                    SATELLITE_HOLDER,
+                )
+            });
         let _held = match taken {
             Ok(lock) => lock,
             Err(e) => {
