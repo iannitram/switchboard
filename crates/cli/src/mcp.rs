@@ -6,6 +6,8 @@
 //! `budget_refresh` (#374), the pool edits through `rules::guard_pool_edit` and
 //! `budget::save_pool_edit`, as the CLI's commands of the same names.
 //! `reports` takes the CLI's `project`, `outcome` and `pool` filters (#358).
+//! #384: project-manager also holds the front door, `ask`, `ask_as_job` and `rate`
+//! (`mcp_frontdoor.rs`), through `rules::guard_front_door`.
 //! MCP-3: inside a job worktree, no write tool whatever the flag.
 //! #375: the satellite role also reads `errors`, the fleet errors the app recorded and the open
 //! IT tickets (IT-3: triage runs on another machine). MCP-1's six stay the list with no role.
@@ -19,6 +21,9 @@ use switchboard_core::clock::Clock;
 use switchboard_core::fleet::FleetBridge;
 use switchboard_core::rules::{self, Caller, Face, GuardedAction, Role, Verdict};
 use switchboard_core::waiting::{Item, LocalItems, Source};
+
+#[path = "mcp_frontdoor.rs"]
+pub mod frontdoor;
 
 /// The core behind the tools. `serve` passes a read tool's name and arguments here and returns
 /// the answer as text. The real core is a thin struct in main.rs.
@@ -47,6 +52,10 @@ pub trait WriteCore {
     fn budget_refresh(&self) -> Result<Value, String>;
     /// A guarded request the CLI or MCP may not run becomes a Waiting on you item.
     fn waiting(&self, text: &str) -> Result<(), String>;
+    /// #384: one front door call (`frontdoor::run` in the real core); the answer as JSON.
+    fn front_door(&self, call: &frontdoor::Call) -> Result<Value, String> {
+        Err(format!("{}: this core has no front door", call.tool()))
+    }
 }
 
 /// MCP-2: the real write core. `merge` is the CLI's merge (CLI-3, #242); `set_pool_cap` is
@@ -117,6 +126,10 @@ impl WriteCore for CoreWrites<'_> {
             .add(item)
             .map_err(|e| format!("waiting: {e}"))
     }
+
+    fn front_door(&self, call: &frontdoor::Call) -> Result<Value, String> {
+        frontdoor::run(call, self.fleet.as_ref(), self.data.as_deref())
+    }
 }
 
 /// MCP-1: the read tools, in this order.
@@ -132,7 +145,11 @@ pub const READ_TOOLS: [&str; 6] = [
 /// MCP-2: the write tools a role holds, in this order. No role, or a role with none, holds none.
 pub fn write_tools(role: &Role) -> Vec<&'static str> {
     match role {
-        Role::ProjectManager => vec!["merge"],
+        Role::ProjectManager => {
+            let mut held = vec!["merge"];
+            held.extend(frontdoor::TOOLS);
+            held
+        }
         Role::BudgetManager => vec!["set_pool_cap", "pool_edit", "budget_refresh"],
         Role::Satellite => vec![],
     }
@@ -322,6 +339,7 @@ fn tool_schema(name: &str) -> Option<Value> {
     all.into_iter()
         .chain(role_read_schemas().into_iter().map(|(_, schema)| schema))
         .chain(write_schemas().into_iter().map(|(_, schema)| schema))
+        .chain(frontdoor::schemas().into_iter().map(|(_, schema)| schema))
         .find(|tool| tool["name"] == name)
         .map(|tool| tool["inputSchema"].clone())
 }
@@ -450,6 +468,17 @@ fn write_call(
             };
             guard_pool(&caller, &edit.pool).and_then(|()| write.pool_edit(name, &edit))
         }
+        // #384: the front door, the same check the CLI makes.
+        tool if frontdoor::TOOLS.contains(&tool) => {
+            let call = match frontdoor::call_from(tool, args) {
+                Ok(call) => call,
+                Err(message) => return error(id, INVALID_PARAMS, &message),
+            };
+            match rules::guard_front_door(&caller, tool) {
+                Verdict::Allow => write.front_door(&call).map(|answer| answer.to_string()),
+                Verdict::Refuse(text) | Verdict::ToWaiting(text) => Err(text),
+            }
+        }
         // `budget_refresh`: a re-read, held by the role alone (`write_tools`).
         _ => write.budget_refresh().map(|rows| rows.to_string()),
     };
@@ -514,10 +543,9 @@ fn tools(role: Option<&Role>) -> Value {
                 .map(|(_, schema)| schema),
         );
         let held = write_tools(role);
-        let all = write_schemas();
+        let all = write_schemas().into_iter().chain(frontdoor::schemas());
         list.extend(
-            all.into_iter()
-                .filter(|(name, _)| held.iter().any(|h| h == name))
+            all.filter(|(name, _)| held.iter().any(|h| h == name))
                 .map(|(_, schema)| schema),
         );
     }

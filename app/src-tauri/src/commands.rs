@@ -596,15 +596,9 @@ pub fn chat_send_as_job(
     request: String,
     unmet: Vec<String>,
 ) -> Result<serde_json::Value, FaceError> {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_default();
-    let env_name = std::env::var("FLEET_MACHINE").ok();
-    let machine = switchboard_core::it::this_machine(env_name.as_deref(), &home);
-    let machine = machine.unwrap_or_default();
     bridge(&state.settings_path)
         .and_then(|fleet| {
-            switchboard_core::it::send_held_job(&fleet, &kind, &request, &unmet, &machine)
+            switchboard_core::frontdoor::ask::send_as_job(&fleet, &kind, &request, &unmet)
         })
         .map_err(|e| {
             record_fleet_error(&state, &e);
@@ -690,34 +684,15 @@ pub fn chat_route(
     message: String,
     handoff_id: Option<String>,
 ) -> Result<switchboard_core::frontdoor::answer::ChatReply, FaceError> {
-    use switchboard_core::frontdoor::{answer, chat};
+    use switchboard_core::frontdoor::ask;
     let data = app
         .path()
         .app_data_dir()
         .map_err(|e| CoreError::Io(format!("app data dir: {e}")));
     bridge(&state.settings_path)
         .and_then(|fleet| {
-            let data = data?;
-            let routed = chat::route_in_thread(
-                &fleet,
-                &data,
-                handoff_id.as_deref(),
-                &message,
-                chat::estimate_complexity(&message),
-            )?;
-            let machine = switchboard_core::abilities::FleetModels::local_machine();
-            let qwen = answer::qwen_base_url(&fleet, machine.as_deref());
-            let env = |name: &str| std::env::var(name).ok();
-            let transport = || -> Box<dyn switchboard_core::frontdoor::adapters::ChatTransport> {
-                Box::new(switchboard_core::frontdoor::adapters::HttpChatTransport::new())
-            };
-            let ctx = answer::AnswerContext {
-                data_dir: &data,
-                qwen_base_url: qwen.as_deref(),
-                env: &env,
-                transport: &transport,
-            };
-            answer::answer_route(routed, &message, handoff_id.as_deref(), &ctx)
+            let asked = ask::ask(&fleet, &data?, &message, handoff_id.as_deref(), false)?;
+            Ok(asked.reply)
         })
         .map_err(|e| {
             record_fleet_error(&state, &e);

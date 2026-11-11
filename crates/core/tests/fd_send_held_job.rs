@@ -283,13 +283,16 @@ fn the_command_is_a_thin_call_into_send_held_job() {
         "kind: String",
         "request: String",
         "unmet: Vec<String>",
-        "\"FLEET_MACHINE\"",
-        "this_machine(",
-        "send_held_job(",
+        // #384: the command calls the core's `ask::send_as_job`, as the CLI and MCP do.
+        "ask::send_as_job(",
         "record_fleet_error(",
         "FaceError::new(\"chat_send_as_job\"",
     ] {
         assert!(body.contains(part), "missing {part}: {body}");
+    }
+    let ask = include_str!("../src/frontdoor/ask.rs");
+    for part in ["\"FLEET_MACHINE\"", "this_machine(", "send_held_job("] {
+        assert!(ask.contains(part), "ask.rs: missing {part}");
     }
 }
 
