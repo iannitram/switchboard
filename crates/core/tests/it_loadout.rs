@@ -45,6 +45,7 @@ impl ProbeRunner for Stub {
             .unwrap_or((None, String::new()));
         ProbeResult {
             name: probe.name.to_string(),
+            timed_out: false,
             exit_code,
             stdout,
         }
@@ -255,4 +256,32 @@ fn every_probe_failing_never_fails_the_read() {
     assert!(all_missing.toolchains.is_empty());
     assert!(!all_missing.busy);
     assert!(all_missing.recent_errors.is_empty());
+}
+
+/// A runner whose `claude` probe ran out of time and whose `codex` probe exited 1.
+struct TimesOut;
+
+impl ProbeRunner for TimesOut {
+    fn run(&self, probe: &Probe) -> ProbeResult {
+        ProbeResult {
+            name: probe.name.to_string(),
+            exit_code: (probe.name != "claude").then_some(1),
+            stdout: String::new(),
+            timed_out: probe.name == "claude",
+        }
+    }
+}
+
+/// #433: a sign-in probe that timed out is listed apart from one that said "not signed in"; it
+/// still counts as not signed in for needs, and the JSON names it only when there is one.
+#[test]
+fn a_timed_out_sign_in_probe_is_its_own_state() {
+    let loadout = read_loadout(linux(), &TimesOut, NOW);
+    assert_eq!(loadout.timed_out, ["claude"]);
+    assert!(loadout.clis.contains(&("claude".to_string(), false)));
+    assert!(loadout.clis.contains(&("codex".to_string(), false)));
+    let json = serde_json::to_value(&loadout).unwrap();
+    assert_eq!(json["timed_out"], serde_json::json!(["claude"]));
+    let none = serde_json::to_value(read(&[])).unwrap();
+    assert!(none.get("timed_out").is_none(), "{none}");
 }
