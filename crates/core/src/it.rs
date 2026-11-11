@@ -15,6 +15,10 @@ pub struct Loadout {
     pub read_at: UnixSeconds,
     /// CLI name and whether it is signed in.
     pub clis: Vec<(String, bool)>,
+    /// CLIs whose sign-in probe ran out of time (#433): their `clis` entry is `false`, but they
+    /// are not known to be signed out. Left out of the JSON when none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub timed_out: Vec<String>,
     pub models_loaded: Vec<String>,
     pub toolchains: Vec<String>,
     pub busy: bool,
@@ -27,6 +31,8 @@ pub struct ProbeResult {
     pub name: String,
     pub exit_code: Option<i32>,
     pub stdout: String,
+    /// The probe was killed for running past `PROBE_TIMEOUT`.
+    pub timed_out: bool,
 }
 
 /// Runs probes (tests stub it).
@@ -46,7 +52,12 @@ pub fn read_loadout(probes: &[Probe], runner: &dyn ProbeRunner, now: UnixSeconds
         let result = runner.run(probe);
         let ok = result.exit_code == Some(0);
         match probe.name {
-            name if LOADOUT_CLIS.contains(&name) => loadout.clis.push((name.to_string(), ok)),
+            name if LOADOUT_CLIS.contains(&name) => {
+                loadout.clis.push((name.to_string(), ok));
+                if result.timed_out {
+                    loadout.timed_out.push(name.to_string());
+                }
+            }
             name if ok && LOADOUT_TOOLCHAINS.contains(&name) => {
                 loadout.toolchains.push(name.to_string());
             }
@@ -98,7 +109,8 @@ fn last_errors(out: &str) -> Vec<String> {
 }
 
 /// IT-W: how long one probe may run before it is killed (#339). A probe that runs out of time
-/// has no exit code, so the loadout shows it as not signed in, left out, or not busy.
+/// has no exit code, so the loadout leaves it out or shows it not busy; a sign-in probe that
+/// ran out of time is listed in `timed_out` ("could not check", #433), never as signed in.
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// IT-W: the real probe runner. It runs the probe's program with its args, stdin and stderr
@@ -129,10 +141,11 @@ fn kill_group(_child: &std::process::Child) {}
 
 /// IT-W: run `probe`, killing it when it is still going after `limit`.
 pub fn run_probe_within(probe: &Probe, limit: Duration) -> ProbeResult {
-    let none = || ProbeResult {
+    let none = |timed_out: bool| ProbeResult {
         name: probe.name.to_string(),
         exit_code: None,
         stdout: String::new(),
+        timed_out,
     };
     let mut command = std::process::Command::new(probe.program);
     command
@@ -145,7 +158,7 @@ pub fn run_probe_within(probe: &Probe, limit: Duration) -> ProbeResult {
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut command, 0);
     let Ok(mut child) = command.spawn() else {
-        return none();
+        return none(false);
     };
     // Read stdout on its own thread so a full pipe cannot stall the child. It is never joined
     // after a kill: a grandchild may still hold the pipe open.
@@ -168,7 +181,7 @@ pub fn run_probe_within(probe: &Probe, limit: Duration) -> ProbeResult {
                 kill_group(&child);
                 let _ = child.kill();
                 let _ = child.wait();
-                return none();
+                return none(true);
             }
         }
     };
@@ -177,6 +190,7 @@ pub fn run_probe_within(probe: &Probe, limit: Duration) -> ProbeResult {
         name: probe.name.to_string(),
         exit_code: status.code(),
         stdout: String::from_utf8_lossy(&bytes).into_owned(),
+        timed_out: false,
     }
 }
 

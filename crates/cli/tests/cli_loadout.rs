@@ -23,6 +23,7 @@ use switchboard_core::it::Loadout;
 fn full() -> Loadout {
     Loadout {
         read_at: 1_700_000_000,
+        timed_out: Vec::new(),
         clis: vec![
             ("claude".to_string(), true),
             ("codex".to_string(), false),
@@ -46,6 +47,7 @@ fn full() -> Loadout {
 fn all_failed() -> Loadout {
     Loadout {
         read_at: 1_700_000_000,
+        timed_out: Vec::new(),
         clis: ["claude", "codex", "gh"]
             .iter()
             .map(|name| (name.to_string(), false))
@@ -198,4 +200,24 @@ fn the_binary_prints_this_machines_loadout_as_text_and_exits_0() {
             "not a probe line: {line}"
         );
     }
+}
+
+/// #433: a CLI whose sign-in probe timed out reads "could not check: timed out", not "not
+/// signed in"; the JSON names it in `timed_out`.
+#[test]
+fn a_timed_out_sign_in_probe_reads_as_could_not_check() {
+    let mut loadout = full();
+    loadout.timed_out = vec!["codex".to_string()];
+    let mut out: Vec<u8> = Vec::new();
+    cli::loadout_command(&loadout, false, &mut out);
+    let text = String::from_utf8(out).unwrap();
+    assert!(
+        text.contains("codex  could not check: timed out\n"),
+        "{text}"
+    );
+    assert!(!text.contains("not signed in"), "{text}");
+    let mut out: Vec<u8> = Vec::new();
+    cli::loadout_command(&loadout, true, &mut out);
+    let printed: Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(printed["timed_out"], serde_json::json!(["codex"]));
 }

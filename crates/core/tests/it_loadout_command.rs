@@ -52,6 +52,7 @@ impl ProbeRunner for Stub {
         self.asked.lock().unwrap().push(probe.name.to_string());
         ProbeResult {
             name: probe.name.to_string(),
+            timed_out: false,
             exit_code: Some(0),
             stdout: probe.name.to_string(),
         }
@@ -120,6 +121,7 @@ fn a_missing_program_gives_no_exit_code_and_empty_stdout() {
         result,
         ProbeResult {
             name: "missing".to_string(),
+            timed_out: false,
             exit_code: None,
             stdout: String::new(),
         }
@@ -138,6 +140,7 @@ fn the_real_runner_feeds_read_loadout() {
 fn fixture() -> Loadout {
     Loadout {
         read_at: NOW,
+        timed_out: Vec::new(),
         clis: vec![("claude".to_string(), true), ("codex".to_string(), false)],
         models_loaded: vec!["qwen3.8-27b".to_string()],
         toolchains: vec!["cargo".to_string(), "node".to_string()],
@@ -181,6 +184,7 @@ fn the_loadout_serialises_field_for_field() {
 fn an_empty_loadout_serialises_with_empty_lists() {
     let empty = Loadout {
         read_at: NOW,
+        timed_out: Vec::new(),
         ..Loadout::default()
     };
     assert_eq!(
@@ -270,9 +274,11 @@ fn a_slow_probe_is_killed_at_the_time_limit() {
     assert!(start.elapsed() < Duration::from_secs(5));
     assert_eq!(result.name, "slow");
     assert_eq!(result.exit_code, None);
+    assert!(result.timed_out, "a killed probe says it timed out");
 
     let fast = run_probe_within(&CARGO_VERSION, Duration::from_secs(30));
     assert_eq!(fast.exit_code, Some(0));
+    assert!(!fast.timed_out);
     assert!(fast.stdout.contains("cargo"));
 }
 

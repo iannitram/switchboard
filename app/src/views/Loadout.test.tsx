@@ -87,6 +87,12 @@ test("each row shows its name and state", () => {
   expect(state("fleet status")).toBe("busy");
 });
 
+test("a sign-in probe that timed out reads as could not check, still marked failed (#433)", () => {
+  render(<LoadoutPanel loadout={{ ...FULL, timed_out: ["codex"] }} now={FULL.read_at} />);
+  expect(state("codex")).toBe("could not check: timed out");
+  expect(row("codex").className).toBe("failed");
+});
+
 test("a failed probe shows as failed, never a blank row", () => {
   render(<LoadoutPanel loadout={FULL} now={FULL.read_at} />);
   expect(state("codex")).toBe("not signed in");
