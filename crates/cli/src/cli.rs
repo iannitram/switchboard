@@ -70,7 +70,8 @@ pub const USAGE: &str = "usage: switchboard [--help | --version] [--json] [--rol
                      star <repo>#<n> | refresh | backup <repo> | backup --all | delete <repo> | \
                      restore <repo> | merge <repo>#<pr> | set_pool_cap <pool> <cap> | \
                      pool_edit <pool> [--plan <p>] [--cap <n>] [--reset <day time>] [--cost <n>] | \
-                     mcp>";
+                     autopilot <roadmap | review | merge | weekly | satellite> [--dry-run] | \
+                     autopilot status | mcp>";
 
 /// The writes a CLI command can reach (CLI-3). The real ones are `CliWrites`; the tests pass
 /// fakes.
@@ -308,7 +309,7 @@ impl GitHubTransport for NoGitHub {
 }
 
 /// The real transport for the re-read, or one that says why there is none (`gh auth token`).
-fn live_transport() -> Box<dyn GitHubTransport> {
+pub(crate) fn live_transport() -> Box<dyn GitHubTransport> {
     match HttpTransport::new(&GhAuthToken::default()) {
         Ok(http) => Box::new(http),
         Err(e) => Box::new(NoGitHub(e.to_string())),

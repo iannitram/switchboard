@@ -106,6 +106,25 @@ pub fn guard_pool_edit(caller: &Caller, pool: &str) -> Verdict {
     }
 }
 
+/// #385: who may run an autopilot pass (`what`, e.g. `autopilot merge`) by hand. `needs` is the
+/// role whose work the pass is: the Project Manager's for the roadmap, review, merge and weekly
+/// passes (R32), the satellite's for a satellite tick. The app may (its own threads run them);
+/// the CLI and MCP only with that role; nothing inside a job worktree. A dry run is asked the
+/// same way.
+pub fn guard_autopilot(caller: &Caller, what: &str, needs: &Role) -> Verdict {
+    if caller.in_job_worktree {
+        return Verdict::Refuse(format!("{what}: refused inside a job worktree"));
+    }
+    match (caller.face, &caller.role) {
+        (Face::Gui, _) => Verdict::Allow,
+        (Face::Cli | Face::Mcp, Some(role)) if role == needs => Verdict::Allow,
+        _ => Verdict::Refuse(format!(
+            "{what}: only the {} role may run this pass",
+            needs.flag()
+        )),
+    }
+}
+
 /// True when `dir` is inside a job worktree (the fleet's worktrees folder, or a git worktree
 /// whose `.git` file points into one).
 ///

@@ -100,6 +100,39 @@ impl FileLock {
     pub fn path(&self) -> &Path {
         &self.path
     }
+
+    /// Write the lock file again, so a holder that works longer than `STALE_LOCK` (#385: a
+    /// merge pass, a satellite loop) is not taken for a run that died.
+    pub fn refresh(&self) {
+        let _ = std::fs::write(&self.path, format!("{}\n", run_tag()));
+    }
+
+    /// Run `work` with the lock refreshed every `REFRESH_EVERY` until it ends.
+    pub fn keep_fresh<T>(&self, work: impl FnOnce() -> T) -> T {
+        let (done, wait) = std::sync::mpsc::channel::<()>();
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                while let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
+                    wait.recv_timeout(REFRESH_EVERY)
+                {
+                    self.refresh();
+                }
+            });
+            let out = work();
+            drop(done);
+            out
+        })
+    }
+}
+
+/// How often `FileLock::keep_fresh` writes the lock file again.
+pub const REFRESH_EVERY: Duration = Duration::from_secs(60);
+
+/// Is the lock on `target` held now: its lock file is there and not stale. A read; it takes
+/// nothing.
+pub fn held(target: &Path) -> bool {
+    let path = lock_path(target);
+    path.exists() && !is_stale(&path)
 }
 
 impl Drop for FileLock {

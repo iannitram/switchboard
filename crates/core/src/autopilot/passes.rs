@@ -79,6 +79,31 @@ pub trait JobStarter {
     /// non-zero with no output (CORE-2, #379); the caller frees the job's slot and passes the
     /// error on.
     fn finished(&mut self, job_id: &str) -> Result<bool, CoreError>;
+    /// `finished` for a read that must change nothing (a dry run, the status read, #385): the
+    /// same answer with nothing cleaned up. `FleetStarter` leaves a failed job's worktree alone.
+    fn peek_finished(&mut self, job_id: &str) -> Result<bool, CoreError> {
+        self.finished(job_id)
+    }
+}
+
+/// A dry run's starter (#385): it asks the real one whether a lane may spend and whether a job
+/// has ended (`peek_finished`), and starts nothing.
+pub struct DryStarter<'a> {
+    pub inner: &'a mut dyn JobStarter,
+}
+
+impl JobStarter for DryStarter<'_> {
+    fn may_spend(&mut self, lane: &str) -> Result<bool, CoreError> {
+        self.inner.may_spend(lane)
+    }
+
+    fn start(&mut self, _job: &Value, _brief: &str) -> Result<(), CoreError> {
+        Ok(())
+    }
+
+    fn finished(&mut self, job_id: &str) -> Result<bool, CoreError> {
+        self.inner.peek_finished(job_id)
+    }
 }
 
 /// The fleet's canonical machine name: trimmed, lower case, old names mapped.
@@ -428,6 +453,18 @@ pub fn weekly_run(
     utc_offset_secs: i64,
     starter: &mut dyn JobStarter,
 ) -> Result<WeeklyRun, CoreError> {
+    weekly_run_with(data_dir, now, utc_offset_secs, starter, false)
+}
+
+/// `weekly_run`, or with `dry_run` what it would do (#385): the same checks through a
+/// `DryStarter`, no job started and the state file left as it is.
+pub fn weekly_run_with(
+    data_dir: &Path,
+    now: UnixSeconds,
+    utc_offset_secs: i64,
+    starter: &mut dyn JobStarter,
+    dry_run: bool,
+) -> Result<WeeklyRun, CoreError> {
     let repos: Vec<String> = SnapshotStore::new(data_dir)
         .load_all()?
         .into_iter()
@@ -439,11 +476,18 @@ pub fn weekly_run(
     if weekly_take(now, utc_offset_secs, &repos, &mut state) {
         run.backup = repos;
     }
-    match drift_pass(now, &mut state, starter) {
+    let drift = if dry_run {
+        drift_pass(now, &mut state, &mut DryStarter { inner: starter })
+    } else {
+        drift_pass(now, &mut state, starter)
+    };
+    match drift {
         Ok(ids) => run.drift_started = ids,
         Err(e) => run.drift_error = Some(e),
     }
-    state.save(data_dir)?;
+    if !dry_run {
+        state.save(data_dir)?;
+    }
     Ok(run)
 }
 
@@ -457,26 +501,97 @@ pub struct AfterPoll<'a> {
 /// AUTO-3: the autopilot's passes after a poll. The state is saved even when a pass failed,
 /// so a review already started is not started again.
 pub fn after_poll(ctx: &mut AfterPoll<'_>) -> Result<Vec<String>, CoreError> {
-    let snaps = SnapshotStore::new(ctx.data_dir).load_all()?;
-    let mut state = AutopilotState::load(ctx.data_dir)?;
-    let result = run_passes(&snaps, ctx.machine, &mut state, &mut *ctx.starter);
-    state.save(ctx.data_dir)?;
-    result
+    let which = PollPasses {
+        review: true,
+        roadmap: true,
+        dry_run: false,
+    };
+    let out = after_poll_with(ctx, which)?;
+    match out.review_error.or(out.roadmap_error) {
+        Some(e) => Err(e),
+        None => Ok(out
+            .review_started
+            .into_iter()
+            .chain(out.roadmap_started)
+            .collect()),
+    }
 }
 
-/// Every pass, in order; later passes extend `started`.
+/// Which of `after_poll`'s passes to run (#385), and whether as a dry run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PollPasses {
+    /// AUTO-3: the review pass.
+    pub review: bool,
+    /// AUTO-2: the roadmap pass.
+    pub roadmap: bool,
+    /// Start nothing and leave the state file as it is; the ids are what would start.
+    pub dry_run: bool,
+}
+
+/// What `after_poll_with` did: each pass's job ids, and the error that stopped a pass.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PollOutcome {
+    pub review_started: Vec<String>,
+    pub roadmap_started: Vec<String>,
+    /// The review pass's error; the roadmap pass then did not run.
+    pub review_error: Option<CoreError>,
+    pub roadmap_error: Option<CoreError>,
+}
+
+/// `after_poll` for the passes `which` names (#385): the window runs both, a headless run one.
+/// The outer error is a snapshot or state file that does not read, or a state that does not
+/// save. A dry run goes through a `DryStarter` and saves nothing.
+pub fn after_poll_with(
+    ctx: &mut AfterPoll<'_>,
+    which: PollPasses,
+) -> Result<PollOutcome, CoreError> {
+    let snaps = SnapshotStore::new(ctx.data_dir).load_all()?;
+    let mut state = AutopilotState::load(ctx.data_dir)?;
+    let mut out = PollOutcome::default();
+    if which.dry_run {
+        let mut dry = DryStarter {
+            inner: &mut *ctx.starter,
+        };
+        run_passes(&snaps, ctx.machine, &mut state, &mut dry, which, &mut out);
+        return Ok(out);
+    }
+    run_passes(
+        &snaps,
+        ctx.machine,
+        &mut state,
+        &mut *ctx.starter,
+        which,
+        &mut out,
+    );
+    state.save(ctx.data_dir)?;
+    Ok(out)
+}
+
+/// The passes `which` names, in order: the review pass (only with a machine name), then the
+/// roadmap pass. A review pass that failed stops them; each error is kept in `out`.
 fn run_passes(
     snaps: &[RepoSnapshot],
     machine: Option<&str>,
     state: &mut AutopilotState,
     starter: &mut dyn JobStarter,
-) -> Result<Vec<String>, CoreError> {
-    let mut started = Vec::new();
-    if let Some(machine) = machine {
-        started.extend(review_pass(snaps, machine, state, starter)?);
+    which: PollPasses,
+    out: &mut PollOutcome,
+) {
+    if let (true, Some(machine)) = (which.review, machine) {
+        match review_pass(snaps, machine, state, starter) {
+            Ok(ids) => out.review_started = ids,
+            Err(e) => {
+                out.review_error = Some(e);
+                return;
+            }
+        }
     }
-    started.extend(roadmap_pass(snaps, state, starter)?);
-    Ok(started)
+    if which.roadmap {
+        match roadmap_pass(snaps, state, starter) {
+            Ok(ids) => out.roadmap_started = ids,
+            Err(e) => out.roadmap_error = Some(e),
+        }
+    }
 }
 
 /// One repo's merges in a `merge_pass`: the repo, the PRs merged, the issues they close.
@@ -493,7 +608,7 @@ pub fn autopilot_caller() -> Caller {
 }
 
 /// One merge the autopilot tried and was refused (#380): the repo, the PR and why.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RefusedMerge {
     pub repo: String,
     pub pr: u64,
@@ -520,20 +635,7 @@ pub fn merge_pass(
 ) -> MergePass {
     let caller = autopilot_caller();
     let mut out = MergePass::default();
-    for snap in snaps.iter().filter(|s| !s.archived) {
-        let name = snap.repo.rsplit('/').next().unwrap_or(&snap.repo);
-        let clone = dev_root.join(name);
-        if !clone.is_dir() {
-            continue;
-        }
-        let mut ready: Vec<(&PullRequest, bool)> = snap
-            .pulls
-            .iter()
-            .filter(|pr| pr.state == "open")
-            .map(|pr| (pr, carried_over_by_patch_id(&clone, pr)))
-            .filter(|(pr, carried)| eligibility(pr, *carried) == MergeEligibility::Eligible)
-            .collect();
-        ready.sort_by_key(|(pr, _)| pr.number);
+    for (snap, clone, ready) in ready_by_repo(snaps, dev_root) {
         let (mut merged, mut closed) = (Vec::new(), Vec::new());
         for (pr, carried) in ready {
             let job = MergeJob {
@@ -563,6 +665,50 @@ pub fn merge_pass(
         }
     }
     out
+}
+
+/// One repo of a `merge_pass`: its snapshot, its clone, and its PRs to try, each with its
+/// patch-id answer.
+type ReadyRepo<'a> = (&'a RepoSnapshot, PathBuf, Vec<(&'a PullRequest, bool)>);
+
+/// The PRs a `merge_pass` would try: each repo that is not archived and has a clone under
+/// `dev_root`, with its open, eligible PRs (and their patch-id answer), smallest number first.
+fn ready_by_repo<'a>(snaps: &'a [RepoSnapshot], dev_root: &Path) -> Vec<ReadyRepo<'a>> {
+    let mut out = Vec::new();
+    for snap in snaps.iter().filter(|s| !s.archived) {
+        let name = snap.repo.rsplit('/').next().unwrap_or(&snap.repo);
+        let clone = dev_root.join(name);
+        if !clone.is_dir() {
+            continue;
+        }
+        let mut ready: Vec<(&PullRequest, bool)> = snap
+            .pulls
+            .iter()
+            .filter(|pr| pr.state == "open")
+            .map(|pr| (pr, carried_over_by_patch_id(&clone, pr)))
+            .filter(|(pr, carried)| eligibility(pr, *carried) == MergeEligibility::Eligible)
+            .collect();
+        ready.sort_by_key(|(pr, _)| pr.number);
+        out.push((snap, clone, ready));
+    }
+    out
+}
+
+/// AUTO-4 as a dry run (#385): what a `merge_pass` would try to merge now, in its order, with
+/// nothing merged: each repo, its PRs and the issues they close.
+pub fn merge_would(snaps: &[RepoSnapshot], dev_root: &Path) -> Vec<Merged> {
+    ready_by_repo(snaps, dev_root)
+        .into_iter()
+        .filter(|(_, _, ready)| !ready.is_empty())
+        .map(|(snap, _, ready)| {
+            let prs = ready.iter().map(|(pr, _)| pr.number).collect();
+            let closes = ready
+                .iter()
+                .flat_map(|(pr, _)| pr.closes.iter().copied())
+                .collect();
+            (snap.repo.clone(), prs, closes)
+        })
+        .collect()
 }
 
 /// WAIT-1, AUTO-4 (#380): the Waiting item of a refused autopilot merge. One per PR (a later
@@ -789,17 +935,48 @@ impl JobStarter for FleetStarter {
             .spawn()
             .map_err(|e| CoreError::Io(format!("{}: {e}", command[0])))?;
         let exit_file = job_exit_file(&path);
-        std::thread::spawn(move || {
+        let waiter = std::thread::spawn(move || {
             let code = match child.wait().map(|status| status.code()) {
                 Ok(Some(code)) => code.to_string(),
                 _ => "signal".to_string(),
             };
             let _ = std::fs::write(exit_file, code);
         });
+        let mut launchers = LAUNCHERS.lock().unwrap_or_else(|p| p.into_inner());
+        launchers.retain(|waiter| !waiter.is_finished());
+        launchers.push(waiter);
         Ok(())
     }
 
     fn finished(&mut self, job_id: &str) -> Result<bool, CoreError> {
+        self.ended(job_id, true)
+    }
+
+    fn peek_finished(&mut self, job_id: &str) -> Result<bool, CoreError> {
+        self.ended(job_id, false)
+    }
+}
+
+/// The threads waiting for the launchers `FleetStarter::start` spawned, each to write its
+/// job's exit file (#379).
+static LAUNCHERS: std::sync::Mutex<Vec<std::thread::JoinHandle<()>>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Wait until every launcher this process started has ended and its exit file is written
+/// (#385). The window never calls it: its process lives on. A headless run does before it
+/// exits, or a launcher that died would leave no exit code and hold the Project Manager's slot
+/// until the job times out (#379).
+pub fn wait_for_launchers() {
+    let waiting = std::mem::take(&mut *LAUNCHERS.lock().unwrap_or_else(|p| p.into_inner()));
+    for waiter in waiting {
+        let _ = waiter.join();
+    }
+}
+
+impl FleetStarter {
+    /// `JobStarter::finished`; `clean_up` false leaves a failed job's worktree and branch
+    /// alone (`peek_finished`).
+    fn ended(&self, job_id: &str, clean_up: bool) -> Result<bool, CoreError> {
         let job_file = self.jobs_dir.join(format!("{job_id}.json"));
         if !job_file.exists() {
             return Ok(true);
@@ -808,6 +985,7 @@ impl JobStarter for FleetStarter {
         if std::fs::metadata(&out).is_ok_and(|m| m.len() > 0) {
             if let Some(clean) = std::fs::read_to_string(&out)
                 .ok()
+                .filter(|_| clean_up)
                 .and_then(|text| serde_json::from_str::<Value>(&text).ok())
                 .and_then(|output| pm_cleanup_target(&output))
             {

@@ -142,7 +142,8 @@ fn no_role_merge_is_an_unknown_tool() {
 fn project_manager_lists_merge_after_the_read_tools() {
     assert_eq!(
         tool_names(Some(Role::ProjectManager)),
-        with_extra(&["merge"])
+        // #385: the autopilot's status read and pass tool.
+        with_extra(&["autopilot_status", "merge", "autopilot_pass"])
     );
 }
 
@@ -217,7 +218,11 @@ fn budget_manager_set_pool_cap_reaches_the_core_once() {
 #[test]
 fn satellite_lists_no_write_tool() {
     // #375: the satellite's one extra tool is a read (`errors`), never a write.
-    assert_eq!(tool_names(Some(Role::Satellite)), with_extra(&["errors"]));
+    // #385: and the autopilot's status read and the satellite's own tick.
+    assert_eq!(
+        tool_names(Some(Role::Satellite)),
+        with_extra(&["errors", "autopilot_status", "satellite_tick"])
+    );
     let write = FakeWrite::default();
     let replies = run(
         Some(Role::Satellite),
