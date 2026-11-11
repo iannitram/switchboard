@@ -1,6 +1,6 @@
 # Roadmap: Switchboard
 
-Updated: 2026-11-09
+Updated: 2026-11-11
 
 features:
 - core: The core and the fleet bridge, with the abilities index (release: 1.0)
@@ -48,7 +48,25 @@ Each stage's first issues are `Blocked by` the stage before (written on the issu
 | 7 | **Autopilot and the rest of IT**, after `github` and `frontdoor` (routed jobs use the router). | `autopilot`, `it` | WP5 Autopilot, WP6 Errors |
 | 8 | **The design pass** (R04) on the running build, the last stage before 1.0: one shared design system across our apps; its findings are `design-pass` issues, each with the `feature:` label of the region whose view it changes (SKY-10). | all with a view | WP7 1.0 |
 
-**The live loops (added 2026-11-09).** By 2026-11-09 most of stages 1 to 7 are merged, but several of the core's parts are tested functions that nothing runs yet: the 10-minute GitHub poll and the Refresh button (GH-1), the autopilot's review start, merge pass, PM job and Sunday run (AUTO-2 to AUTO-6), the loadout timer (IT-1), automatic IT tickets (IT-2), the CLI and MCP write paths (CLI-3, MCP-2) and `switchboard loadout` (CLI-1). Each gets one wiring issue. The poll comes first: the autopilot issues that act on a fresh snapshot are `Blocked by` it, and they share one `autopilot::after_poll` hook that the review start adds. They run beside the open stage 3 to 7 issues and before the design pass.
+**The live loops (added 2026-11-09).** By 2026-11-09 most of stages 1 to 7 are merged, but several of the core's parts are tested functions that nothing runs yet: the 10-minute GitHub poll and the Refresh button (GH-1), the autopilot's review start, merge pass, PM job and Sunday run (AUTO-2 to AUTO-6), the loadout timer (IT-1), automatic IT tickets (IT-2), the CLI and MCP write paths (CLI-3, MCP-2) and `switchboard loadout` (CLI-1). Each gets one wiring issue. The poll comes first: the autopilot issues that act on a fresh snapshot are `Blocked by` it, and they share one `autopilot::after_poll` hook that the review start adds. They run beside the open stage 3 to 7 issues and before the design pass. By 2026-11-11 the wiring issues (#240 to #251) are closed.
+
+**The bug-fix run (added 2026-11-11).** On 2026-11-10 a bug hunt on the installed build filed 51 issues (#334 to #375, #377 to #385). Eleven PRs are merged and 45 of those issues are closed. What the product can now do:
+- #386: the MCP server survives a bad line, answers every line that is not a request, and checks tool arguments against their schemas.
+- #387: a fleet call has a time limit, and its error carries the exit code and stderr; a pool edit is all or nothing; a cap is checked.
+- #388: chat threads show in `reports`; a damaged file is skipped and named; each loadout probe has a time limit.
+- #389: the CLI never panics on its output or its arguments; `mcp` takes its flags; every command answers `--help`; extra words and a short name that matches two repos are refused; text output escapes control characters.
+- #390: `sky` handles a very long blocked-by chain and a damaged snapshot, shows jobs in flight and the priority copy's age; a stale copy is a Waiting on you item; `star` says when a review is on an older commit; `merge` refuses a closed PR.
+- #391: two backups of one repo no longer collide; releases are backed up; `backup --all` goes past a failed repo; a restore checks the backup first and creates only what the live repo lacks.
+- #414: pool edits (`set_pool_cap`, `pool_edit`) and a forced budget re-read from the CLI and MCP, MCP `reports` filters, and a read-only `switchboard settings`.
+- #415 and #417: a guarded delete or a restore over a live repo is confirmed in the app by typing the repo's `owner/name`; the delete archives the repo; a restore brings back closed issues and milestones and rewrites `#N` to the new numbers.
+- #418: the app saves each fleet error to disk; `switchboard errors` and the MCP `errors` tool list them with the open IT tickets; pool edits from several processes take a lock.
+- #393: a failed satellite loop or Project Manager job frees its lane; the merge pass goes on past a refusal and merges a PASS carried over by patch-id; ratings are checked; an ask with every pool braked is queued in its thread; an open chat stays on its model, and a move hands over a summary packet.
+
+In work (open): #384 the front door from the CLI and MCP; #385 the autopilot from the CLI and MCP; the leftovers of #347, #365, #377 and #378; #419 (a rating and a stored turn at the same moment can lose the turn). The #378 leftovers start after #384 merges.
+
+**Rulings, 2026-11-10.** #384 and #385: build both the CLI and the MCP path now. #347: a guarded delete is an archive, never a delete; the confirm is typing the repo's `owner/name`; a second confirm only does what the first held back. #373: settings are changed in the app only; `switchboard settings` reads them. #375: the app saves fleet errors to disk and the CLI and MCP list them; failures in the CLI or MCP themselves are not recorded. #365: a restore brings back closed state too. #374: CLI `budget --refresh` has no role (a re-read, like `refresh`); MCP keeps it behind budget-manager.
+
+**Rulings, 2026-11-11.** #377: a queued ask stays manual and is never sent again on its own; an ask whose picked pool is braked or over budget falls back to local Qwen when the Qwen lane is up, and is queued only when Qwen is down too. #378: build all four leftovers (FD-5's work-tree line, "Send as job" with the packet, FD-7's open questions in the summary, the face's `chat_implicit` callers). #347: build all four leftovers (turning a request down, CORE-3 worded "archive", a restore to a new private repo from the face, MCP tools that file a delete or restore request while the typed confirm stays with me). #365: a label already in the live repo keeps its live colour and is named in the report; renumbering also rewrites full links and `owner/name#N`, for the restored repo only. Accepted as built: a cap of at most 100000 dollars and at least one cent; lock waits of 10 s for a pool edit and 2 s for saving an error, stale after 10 min; the MCP `errors` tool for the satellite role only.
 
 After 1.0 the dark stars above get their own Specs and issues (the after-2.0 stars wait for 2.0); `platforms` turns the Mac and Windows seams on.
 
