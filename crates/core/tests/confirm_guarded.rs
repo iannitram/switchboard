@@ -1,12 +1,16 @@
 //! CORE-3, BAK-3 (#347): the confirm step in the app for a guarded request the CLI or MCP left
 //! in Waiting on you. Refused without the confirm, refused from any face but the app whatever
-//! the role, run with it, and a refusal changes nothing. The restore itself is a closure here
-//! (it is tested against a fixture GitHub in `restore_issues.rs`); no test reaches GitHub.
+//! the role, refused unless the repo's `owner/name` was typed letter for letter, run with both,
+//! and a refusal changes nothing. A delete request archives the repo; a restore that held
+//! something back is confirmed a second time for that only. The restore and the archive are
+//! closures here (they are tested against a fixture GitHub in `restore_issues.rs`,
+//! `restore_state.rs` and `gh_archive.rs`); no test reaches GitHub.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
-use switchboard_core::backup::{IssuesReport, RestoreReport};
-use switchboard_core::confirm::{confirm_with, guarded_request, Done};
+use switchboard_core::backup::{IssuesReport, Pass, RestoreReport};
+use switchboard_core::confirm::{confirm_with, guarded_request, Actions, Done, HELD_ACTION};
+use switchboard_core::github::archive::Archived;
 use switchboard_core::rules::{Caller, Face, GuardedAction, Role};
 use switchboard_core::settings::Settings;
 use switchboard_core::waiting::{guarded_item, Item, LocalItems, Source};
@@ -74,27 +78,65 @@ fn text_of(item: &Item) -> String {
     }
 }
 
-/// A restore that records who asked and for which repo, and answers `report`.
+/// A restore and an archive that record who asked, for which repo (and which pass), and answer
+/// `report` and `archived`.
 struct Restore {
     calls: RefCell<Vec<(Caller, String)>>,
-    report: Result<RestoreReport, CoreError>,
+    passes: RefCell<Vec<Pass>>,
+    archives: RefCell<Vec<(Caller, String)>>,
+    report: RefCell<Result<RestoreReport, CoreError>>,
+    archived: Result<Archived, CoreError>,
 }
 
 impl Restore {
     fn answering(report: Result<RestoreReport, CoreError>) -> Self {
         Self {
             calls: RefCell::new(Vec::new()),
-            report,
+            passes: RefCell::new(Vec::new()),
+            archives: RefCell::new(Vec::new()),
+            report: RefCell::new(report),
+            archived: Ok(Archived::Now),
         }
     }
 
+    /// Confirm `text` with the repo's name typed right.
     fn run(&self, data: &Path, text: &str, who: &Caller) -> Result<Done, CoreError> {
-        confirm_with(data, text, who, &|caller, repo| {
-            self.calls
-                .borrow_mut()
-                .push((caller.clone(), repo.to_string()));
-            self.report.clone()
-        })
+        self.run_typed(data, text, REPO, who)
+    }
+
+    fn run_typed(
+        &self,
+        data: &Path,
+        text: &str,
+        typed: &str,
+        who: &Caller,
+    ) -> Result<Done, CoreError> {
+        confirm_with(
+            data,
+            text,
+            typed,
+            who,
+            &Actions {
+                restore: &|caller, repo, pass| {
+                    self.calls
+                        .borrow_mut()
+                        .push((caller.clone(), repo.to_string()));
+                    self.passes.borrow_mut().push(pass);
+                    self.report.borrow().clone()
+                },
+                archive: &|caller, repo| {
+                    self.archives
+                        .borrow_mut()
+                        .push((caller.clone(), repo.to_string()));
+                    self.archived.clone()
+                },
+            },
+        )
+    }
+
+    /// True when neither the restore nor the archive ran.
+    fn idle(&self) -> bool {
+        self.calls.borrow().is_empty() && self.archives.borrow().is_empty()
     }
 }
 
@@ -163,7 +205,7 @@ fn without_the_confirm_the_app_is_refused_and_nothing_changes() {
         let why = refused(restore_run.run(&data, &text_of(&asked(&action)), &app));
         assert_eq!(why, want);
     }
-    assert!(restore_run.calls.borrow().is_empty(), "no restore ran");
+    assert!(restore_run.idle(), "no restore and no archive ran");
     unchanged(&data, &before);
 }
 
@@ -190,7 +232,7 @@ fn the_cli_and_mcp_cannot_confirm_whatever_the_role() {
             assert_eq!(why, "delete owner/alpha: needs a confirm in the app");
         }
     }
-    assert!(restore_run.calls.borrow().is_empty(), "no restore ran");
+    assert!(restore_run.idle(), "no restore and no archive ran");
     unchanged(&data, &before);
 }
 
@@ -204,7 +246,7 @@ fn inside_a_job_worktree_even_a_confirmed_app_is_refused() {
         why,
         "restore over owner/alpha: refused inside a job worktree"
     );
-    assert!(restore_run.calls.borrow().is_empty());
+    assert!(restore_run.idle());
     unchanged(&data, &before);
 }
 
@@ -221,7 +263,7 @@ fn a_request_that_is_not_waiting_is_refused_and_nothing_changes() {
         let why = refused(restore_run.run(&data, text, &app));
         assert!(why.contains("no such request"), "{why}");
     }
-    assert!(restore_run.calls.borrow().is_empty());
+    assert!(restore_run.idle());
     unchanged(&data, &before);
     // No Waiting file at all: refused, and none is made.
     let empty = data_dir("absent-empty");
@@ -245,7 +287,7 @@ fn a_waiting_item_that_names_no_clear_request_is_refused() {
         why.contains("does not name one repo to delete or restore over"),
         "{why}"
     );
-    assert!(restore_run.calls.borrow().is_empty());
+    assert!(restore_run.idle());
     unchanged(&data, &before);
 }
 
@@ -281,24 +323,172 @@ fn a_confirmed_restore_runs_once_for_its_repo_and_its_item_leaves_waiting() {
     assert_eq!(restore_run.calls.borrow().len(), 1);
 }
 
+/// #347, owner decision 3: a restore that held comments back keeps its request, marked as held;
+/// the second confirm runs only the held pass (no whole restore, so no ref push), and the
+/// request leaves once nothing is held back.
 #[test]
-fn a_restore_that_holds_comments_back_keeps_its_item_for_a_second_confirm() {
-    let (data, before) = seeded("held");
+fn a_second_confirm_of_a_restore_that_held_comments_back_only_runs_the_held_pass() {
+    let (data, _) = seeded("held");
     let mut held = report();
     held.issues.comments_waiting = 4;
-    let restore_run = Restore::answering(Ok(held));
+    held.issues.state_waiting = 1;
+    let restore_run = Restore::answering(Ok(held.clone()));
     let app = caller(Face::Gui, None, false, true);
-    let done = restore_run
-        .run(&data, &text_of(&asked(&restore())), &app)
-        .unwrap();
+    let text = text_of(&asked(&restore()));
+    let done = restore_run.run(&data, &text, &app).unwrap();
     assert!(!done.cleared);
+    assert_eq!(done.what, "restore over owner/alpha");
     assert!(
-        done.lines
-            .iter()
-            .any(|l| l.starts_with("4 comments wait for their issues")),
+        done.lines.contains(
+            &"4 comments and 1 closes or body changes wait: confirm again once the create \
+              queue has made the issues"
+                .to_string()
+        ),
         "{:?}",
         done.lines
     );
+    assert_eq!(*restore_run.passes.borrow(), vec![Pass::Whole]);
+    // The request stays, in its place, marked as held and saying what waits.
+    let items = LocalItems::new(&data).load().unwrap();
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0], asked(&delete()));
+    let kept = &items[1];
+    assert_eq!(kept.action, HELD_ACTION);
+    assert_eq!(
+        kept.why,
+        "The restore over owner/alpha pushed the backup's refs; 4 comments and 1 closes or \
+         body changes wait. A confirm now only queues and sends those: it pushes nothing again \
+         (CORE-3)."
+    );
+    let first = asked(&restore());
+    assert_eq!(
+        (&kept.what, &kept.source, &kept.link, kept.since),
+        (&first.what, &first.source, &first.link, first.since)
+    );
+
+    // The second confirm, still held: only the held pass, and the request stays held.
+    let done = restore_run.run(&data, &text, &app).unwrap();
+    assert!(!done.cleared);
+    assert_eq!(done.what, "restore over owner/alpha (what was held back)");
+    assert_eq!(done.lines[0], "no ref was pushed again");
+    assert!(!done.lines.iter().any(|l| l.contains("refs pushed")));
+    assert_eq!(*restore_run.passes.borrow(), vec![Pass::Whole, Pass::Held]);
+    assert_eq!(
+        LocalItems::new(&data).load().unwrap()[1].action,
+        HELD_ACTION
+    );
+
+    // The third: nothing is held back any more, so the request leaves.
+    *restore_run.report.borrow_mut() = Ok(RestoreReport {
+        issues: IssuesReport {
+            comments: 4,
+            closed: 1,
+            ..IssuesReport::default()
+        },
+        ..RestoreReport::default()
+    });
+    let done = restore_run.run(&data, &text, &app).unwrap();
+    assert!(done.cleared);
+    assert_eq!(
+        done.lines,
+        vec![
+            "no ref was pushed again".to_string(),
+            "4 comments queued".to_string(),
+            "1 issues and 0 milestones closed, as in the backup".to_string(),
+        ]
+    );
+    assert_eq!(
+        *restore_run.passes.borrow(),
+        vec![Pass::Whole, Pass::Held, Pass::Held],
+        "the whole restore ran once only"
+    );
+    assert_eq!(
+        LocalItems::new(&data).load().unwrap(),
+        vec![asked(&delete())]
+    );
+    assert!(restore_run.archives.borrow().is_empty());
+}
+
+/// A held request is still refused like any other, and stays held.
+#[test]
+fn a_refused_second_confirm_runs_nothing_and_the_request_stays_held() {
+    let (data, _) = seeded("held-refused");
+    let mut held = report();
+    held.issues.comments_waiting = 1;
+    let restore_run = Restore::answering(Ok(held));
+    let app = caller(Face::Gui, None, false, true);
+    let text = text_of(&asked(&restore()));
+    restore_run.run(&data, &text, &app).unwrap();
+    let before = std::fs::read_to_string(LocalItems::new(&data).path()).unwrap();
+    let unconfirmed = caller(Face::Gui, None, false, false);
+    refused(restore_run.run(&data, &text, &unconfirmed));
+    refused(restore_run.run(&data, &text, &caller(Face::Cli, None, false, true)));
+    refused(restore_run.run(&data, &text, &caller(Face::Gui, None, true, true)));
+    refused(restore_run.run_typed(&data, &text, "owner/alph", &app));
+    // A held pass that fails keeps the request held too.
+    *restore_run.report.borrow_mut() = Err(CoreError::GitHub("down".to_string()));
+    assert!(restore_run.run(&data, &text, &app).is_err());
+    assert_eq!(*restore_run.passes.borrow(), vec![Pass::Whole, Pass::Held]);
+    unchanged(&data, &before);
+}
+
+/// A new request from the CLI for the same repo writes the item afresh: its confirm is a whole
+/// restore again, as the confirm step then says.
+#[test]
+fn a_new_request_for_a_held_restore_is_a_whole_restore_again() {
+    let (data, _) = seeded("held-again");
+    let mut held = report();
+    held.issues.comments_waiting = 1;
+    let restore_run = Restore::answering(Ok(held));
+    let app = caller(Face::Gui, None, false, true);
+    let text = text_of(&asked(&restore()));
+    restore_run.run(&data, &text, &app).unwrap();
+    LocalItems::new(&data).add(asked(&restore())).unwrap();
+    restore_run.run(&data, &text, &app).unwrap();
+    assert_eq!(*restore_run.passes.borrow(), vec![Pass::Whole, Pass::Whole]);
+}
+
+/// #347, owner decision 2: the repo's `owner/name` must be typed, letter for letter, for the
+/// archive and for the restore (the held one too). A wrong or missing name runs nothing.
+#[test]
+fn a_confirm_without_the_repos_name_typed_right_is_refused_and_nothing_changes() {
+    let (data, before) = seeded("typed");
+    let restore_run = Restore::answering(Ok(report()));
+    let app = caller(Face::Gui, None, false, true);
+    for typed in [
+        "",
+        " ",
+        "owner/alph",
+        "owner/alphaa",
+        "Owner/Alpha",
+        "owner/alpha ",
+        " owner/alpha",
+        "alpha",
+        "owner/beta",
+        "https://github.com/owner/alpha",
+    ] {
+        let why = refused(restore_run.run_typed(&data, &text_of(&asked(&delete())), typed, &app));
+        assert_eq!(
+            why,
+            "archive owner/alpha: type owner/alpha to confirm; the name typed does not match, \
+             nothing was changed",
+            "{typed:?}"
+        );
+        let why = refused(restore_run.run_typed(&data, &text_of(&asked(&restore())), typed, &app));
+        assert_eq!(
+            why,
+            "restore over owner/alpha: type owner/alpha to confirm; the name typed does not \
+             match, nothing was changed",
+            "{typed:?}"
+        );
+    }
+    assert!(restore_run.idle(), "no restore and no archive ran");
+    unchanged(&data, &before);
+    // The guard answers before the name is looked at: the right name does not help the CLI.
+    let cli = caller(Face::Cli, Some(Role::ProjectManager), false, true);
+    let why = refused(restore_run.run(&data, &text_of(&asked(&delete())), &cli));
+    assert_eq!(why, "delete owner/alpha: needs a confirm in the app");
+    assert!(restore_run.idle());
     unchanged(&data, &before);
 }
 
@@ -313,17 +503,71 @@ fn a_restore_that_fails_keeps_its_item() {
     unchanged(&data, &before);
 }
 
+/// #347, owner decision 1: a confirmed delete request archives the repo, once, and its request
+/// leaves Waiting on you. No restore runs.
 #[test]
-fn a_confirmed_delete_is_refused_because_no_repo_delete_is_built_and_nothing_changes() {
-    let (data, before) = seeded("delete");
+fn a_confirmed_delete_request_archives_the_repo_and_its_item_leaves_waiting() {
+    let (data, _) = seeded("archive");
     let restore_run = Restore::answering(Ok(report()));
     let app = caller(Face::Gui, None, false, true);
-    let why = refused(restore_run.run(&data, &text_of(&asked(&delete())), &app));
+    let done = restore_run
+        .run(&data, &text_of(&asked(&delete())), &app)
+        .unwrap();
     assert_eq!(
-        why,
-        "delete owner/alpha: Switchboard has no repo delete yet; nothing was deleted"
+        done,
+        Done {
+            what: "archive owner/alpha".to_string(),
+            lines: vec![
+                "owner/alpha is archived on GitHub: read-only, nothing was deleted".to_string()
+            ],
+            cleared: true,
+        }
     );
-    assert!(restore_run.calls.borrow().is_empty());
+    assert_eq!(
+        *restore_run.archives.borrow(),
+        vec![(app.clone(), REPO.to_string())]
+    );
+    assert!(restore_run.calls.borrow().is_empty(), "no restore ran");
+    // WAIT-3: the delete request is gone; the restore request is still there.
+    assert_eq!(
+        LocalItems::new(&data).load().unwrap(),
+        vec![asked(&restore())]
+    );
+    // A second confirm finds no request and archives nothing.
+    let why = refused(restore_run.run(&data, &text_of(&asked(&delete())), &app));
+    assert!(why.contains("no such request"), "{why}");
+    assert_eq!(restore_run.archives.borrow().len(), 1);
+}
+
+#[test]
+fn a_repo_that_was_archived_already_says_so_and_its_item_leaves_waiting() {
+    let (data, _) = seeded("archived-already");
+    let mut restore_run = Restore::answering(Ok(report()));
+    restore_run.archived = Ok(Archived::Already);
+    let app = caller(Face::Gui, None, false, true);
+    let done = restore_run
+        .run(&data, &text_of(&asked(&delete())), &app)
+        .unwrap();
+    assert_eq!(
+        done.lines,
+        vec!["owner/alpha was archived already; nothing was changed".to_string()]
+    );
+    assert!(done.cleared);
+    assert_eq!(
+        LocalItems::new(&data).load().unwrap(),
+        vec![asked(&restore())]
+    );
+}
+
+#[test]
+fn an_archive_that_fails_keeps_its_item() {
+    let (data, before) = seeded("archive-failed");
+    let mut restore_run = Restore::answering(Ok(report()));
+    restore_run.archived = Err(CoreError::GitHub("status 403".to_string()));
+    let app = caller(Face::Gui, None, false, true);
+    let got = restore_run.run(&data, &text_of(&asked(&delete())), &app);
+    assert_eq!(got, Err(CoreError::GitHub("status 403".to_string())));
+    assert_eq!(restore_run.archives.borrow().len(), 1);
     unchanged(&data, &before);
 }
 
@@ -335,6 +579,7 @@ fn the_apps_confirm_without_a_backups_folder_stops_before_any_restore() {
         &Settings::default(),
         &data,
         &text_of(&asked(&restore())),
+        REPO,
         &app,
     );
     assert_eq!(got, Err(CoreError::MissingPath("nextcloud_backups")));
@@ -345,6 +590,7 @@ fn the_apps_confirm_without_a_backups_folder_stops_before_any_restore() {
         &Settings::default(),
         &data,
         &text_of(&asked(&restore())),
+        REPO,
         &unconfirmed,
     ));
     assert_eq!(why, "restore over owner/alpha: needs a confirm in the app");

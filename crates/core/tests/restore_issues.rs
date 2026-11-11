@@ -4,13 +4,17 @@
 //! caller confirmed. Git pushes go to a local bare repo (standing in for `https://github.com`),
 //! the API is recorded answers, and the create queue is a stub `fleet.py` that keeps its own
 //! counts. A `ratelimit` file in the stub makes its run stop with exit 75, as a rate limit does.
+//!
+//! #365: issues and milestones that were closed in the backup are closed once they are there,
+//! and a `#N` in a restored body or comment gets the number its issue has now. #347: the second
+//! confirm of a restore that held something back does only that, and pushes no ref again.
 
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use switchboard_core::backup::{
-    restore_issues, restore_over_live_from, write_json, FileSource, IssuesReport, RecordedAnswers,
-    Remote, RestoreReport,
+    restore_held_over_live_from, restore_issues, restore_over_live_from, write_json, FileSource,
+    IssuesReport, RecordedAnswers, Remote, RestoreReport,
 };
 use switchboard_core::fleet::FleetBridge;
 use switchboard_core::github::transport::{Recorded, RestAnswer};
@@ -258,8 +262,23 @@ fn listed(issues: &[(u64, &str)]) -> RestAnswer {
     )
 }
 
-const CLOSED_LEFT_OPEN: &str =
-    "1 closed issues come back open: the create queue cannot close an issue";
+/// The PATCH requests in `api`'s log, in order.
+fn patches(api: &Recorded) -> Vec<String> {
+    api.log
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|line| line.starts_with("PATCH "))
+        .cloned()
+        .collect()
+}
+
+/// The one close the fixture's backup calls for: its issue 2 ("Old") was closed.
+fn closes_old(number: u64) -> Vec<String> {
+    vec![format!(
+        r#"PATCH /repos/{NEW}/issues/{number} {{"state":"closed"}}"#
+    )]
+}
 
 #[test]
 fn every_issue_and_comment_is_queued_once_and_the_count_is_the_manifests() {
@@ -279,11 +298,13 @@ fn every_issue_and_comment_is_queued_once_and_the_count_is_the_manifests() {
         IssuesReport {
             issues: 2,
             comments: 1,
-            left_out: vec![CLOSED_LEFT_OPEN.to_string()],
+            closed: 1,
             ..IssuesReport::default()
         }
     );
     assert_eq!(queued(&f), expected_issue_queue());
+    // #365: the issue that was closed in the backup is closed once it is there.
+    assert_eq!(patches(&api), closes_old(2));
 }
 
 /// #365: a new repo numbers the issues 1, 2, 3, so the comment on the old #5 goes to #3, and a
@@ -345,10 +366,8 @@ fn a_comment_goes_to_the_number_its_issue_has_in_the_new_repo() {
         IssuesReport {
             issues: 3,
             comments: 2,
-            left_out: vec![
-                CLOSED_LEFT_OPEN.to_string(),
-                "1 comments on PRs are not restored: PRs are not".to_string(),
-            ],
+            closed: 1,
+            left_out: vec!["1 comments on PRs are not restored: PRs are not".to_string()],
             ..IssuesReport::default()
         }
     );
@@ -383,11 +402,13 @@ fn a_rate_limit_stop_leaves_the_issues_queued_and_holds_their_comments_back() {
         IssuesReport {
             issues: 2,
             comments_waiting: 1,
-            left_out: vec![CLOSED_LEFT_OPEN.to_string()],
+            state_waiting: 1,
             ..IssuesReport::default()
         }
     );
+    assert!(report.held());
     assert_eq!(queued(&f), expected_issue_queue()[..2]);
+    assert_eq!(patches(&api), Vec::<String>::new(), "no issue to close yet");
 
     // Later the queue has made them: the second call queues only the comment.
     std::fs::remove_file(f.stub.join("ratelimit")).unwrap();
@@ -401,11 +422,13 @@ fn a_rate_limit_stop_leaves_the_issues_queued_and_holds_their_comments_back() {
         IssuesReport {
             issues_there: 2,
             comments: 1,
-            left_out: vec![CLOSED_LEFT_OPEN.to_string()],
+            closed: 1,
             ..IssuesReport::default()
         }
     );
+    assert!(!report.held());
     assert_eq!(queued(&f), expected_issue_queue());
+    assert_eq!(patches(&api), closes_old(2));
 }
 
 #[test]
@@ -475,7 +498,7 @@ fn a_confirmed_restore_over_a_live_repo_pushes_every_ref_and_queues_the_rest() {
             issues: IssuesReport {
                 issues: 2,
                 comments: 1,
-                left_out: vec![CLOSED_LEFT_OPEN.to_string()],
+                closed: 1,
                 ..IssuesReport::default()
             },
             left_out: Vec::new(),
@@ -500,6 +523,7 @@ fn a_confirmed_restore_over_a_live_repo_pushes_every_ref_and_queues_the_rest() {
             format!("GET /repos/{NEW}/issues?state=all&per_page=100&page=1"),
             format!("GET /repos/{NEW}/issues?state=all&per_page=100&page=1"),
             format!("GET /repos/{NEW}/issues/comments?per_page=100&page=1"),
+            closes_old(2).remove(0),
         ]
     );
 }
@@ -515,7 +539,12 @@ fn a_restore_over_a_repo_that_has_it_all_queues_nothing() {
             answer(200, json!({"private": true})),
             answer(200, json!([{"name": "Bug"}, {"name": "size:Easy"}])),
             answer(200, json!([{"title": "1.0"}])),
-            listed(&[(2, "Old"), (1, "Bug")]),
+            // "Old" is closed there, as in the backup.
+            answer(
+                200,
+                json!([{"number": 2, "title": "Old", "state": "closed", "body": ""},
+                       {"number": 1, "title": "Bug", "state": "open", "body": "broken"}]),
+            ),
             // As the queue posts a comment: the body, then its own marker line.
             answer(
                 200,
@@ -541,11 +570,15 @@ fn a_restore_over_a_repo_that_has_it_all_queues_nothing() {
             issues: IssuesReport {
                 issues_there: 2,
                 comments_there: 1,
-                left_out: vec![CLOSED_LEFT_OPEN.to_string()],
                 ..IssuesReport::default()
             },
             ..RestoreReport::default()
         }
+    );
+    assert_eq!(
+        patches(&api),
+        Vec::<String>::new(),
+        "nothing is closed again"
     );
 }
 
@@ -604,4 +637,568 @@ fn a_restore_over_a_repo_that_is_not_there_writes_nothing() {
     ));
     assert!(!f.stub.join("calls.log").exists(), "no fleet call at all");
     assert!(refs_of(&f.target, "refs").is_empty());
+}
+
+/// Each PATCH in `api`'s log as `(path, body)`.
+fn patch_bodies(api: &Recorded) -> Vec<(String, Value)> {
+    patches(api)
+        .iter()
+        .map(|line| {
+            let rest = line.strip_prefix("PATCH ").unwrap();
+            let (path, body) = rest.split_once(' ').unwrap();
+            (path.to_string(), serde_json::from_str(body).unwrap())
+        })
+        .collect()
+}
+
+/// Rewrites one of the backup's JSON files in place.
+fn edit_json(backup: &Path, file: &str, change: impl Fn(&mut Value)) {
+    let path = backup.join(file);
+    let mut value: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    change(&mut value);
+    std::fs::write(&path, serde_json::to_string_pretty(&value).unwrap()).unwrap();
+}
+
+/// #365, owner decision 4: an issue closed in the backup is closed after it is created, with
+/// the reason it had, and a closed milestone is closed once its issues are there.
+#[test]
+fn closed_issues_and_milestones_are_closed_after_they_are_created() {
+    let f = fixture("closed");
+    edit_json(&f.backup, "issues.json", |issues| {
+        for issue in issues.as_array_mut().unwrap() {
+            if issue["number"] == 2 {
+                issue["state_reason"] = json!("not_planned");
+            }
+        }
+    });
+    std::fs::write(
+        f.backup.join("milestones.json"),
+        r#"[{"title": "1.0", "state": "closed"}]"#,
+    )
+    .unwrap();
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            listed(&[]),
+            listed(&[(1, "Bug"), (2, "Old")]),
+            answer(200, json!([])),
+            answer(200, json!([{"number": 4, "title": "1.0", "state": "open"}])),
+        ],
+    );
+    let report = restore_issues(&f.fleet, &f.backup, NEW, &remote(&f, &api)).unwrap();
+    assert_eq!(
+        report,
+        IssuesReport {
+            issues: 2,
+            comments: 1,
+            closed: 1,
+            milestones_closed: 1,
+            ..IssuesReport::default()
+        }
+    );
+    assert_eq!(
+        patch_bodies(&api),
+        vec![
+            (
+                format!("/repos/{NEW}/issues/2"),
+                json!({"state": "closed", "state_reason": "not_planned"})
+            ),
+            (
+                format!("/repos/{NEW}/milestones/4"),
+                json!({"state": "closed"})
+            ),
+        ],
+        "the open issue is not touched; the milestone is closed last"
+    );
+
+    // Again, with the repo as that left it: nothing is closed twice.
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            answer(
+                200,
+                json!([{"number": 1, "title": "Bug", "state": "open", "body": "broken"},
+                       {"number": 2, "title": "Old", "state": "closed", "body": ""}]),
+            ),
+            answer(
+                200,
+                json!([{"body": "me too",
+                        "issue_url": format!("https://api.github.com/repos/{NEW}/issues/1")}]),
+            ),
+            answer(
+                200,
+                json!([{"number": 4, "title": "1.0", "state": "closed"}]),
+            ),
+        ],
+    );
+    let report = restore_issues(&f.fleet, &f.backup, NEW, &remote(&f, &api)).unwrap();
+    assert_eq!(
+        report,
+        IssuesReport {
+            issues_there: 2,
+            comments_there: 1,
+            ..IssuesReport::default()
+        }
+    );
+    assert_eq!(patches(&api), Vec::<String>::new());
+}
+
+/// A closed milestone waits while one of the backup's issues is not there yet: the queue could
+/// still put an issue on it.
+#[test]
+fn a_closed_milestone_waits_until_every_issue_is_there() {
+    let f = fixture("milestone-waits");
+    std::fs::write(
+        f.backup.join("milestones.json"),
+        r#"[{"title": "1.0", "state": "closed"}]"#,
+    )
+    .unwrap();
+    std::fs::write(f.stub.join("ratelimit"), "").unwrap();
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            listed(&[]),
+            listed(&[]),
+            answer(200, json!([])),
+            answer(200, json!([{"number": 4, "title": "1.0", "state": "open"}])),
+        ],
+    );
+    let report = restore_issues(&f.fleet, &f.backup, NEW, &remote(&f, &api)).unwrap();
+    assert_eq!(
+        report,
+        IssuesReport {
+            issues: 2,
+            comments_waiting: 1,
+            // The closed issue and the closed milestone.
+            state_waiting: 2,
+            ..IssuesReport::default()
+        }
+    );
+    assert_eq!(patches(&api), Vec::<String>::new());
+}
+
+/// #365, owner decision 5: a `#N` in a restored comment or body names the issue's new number.
+/// A number nothing is known about (a PR, another repo's issue) and one in a code span stay.
+#[test]
+fn old_issue_numbers_in_comments_and_bodies_get_the_new_numbers() {
+    let issue = |n: u64, title: &str, body: &str, state: &str| {
+        json!({"number": n, "title": title, "body": body, "state": state,
+               "labels": [], "milestone": null})
+    };
+    let comment = |on: u64, body: &str| {
+        json!({"body": body,
+               "issue_url": format!("https://api.github.com/repos/owner/demo/issues/{on}")})
+    };
+    let first = "see #5 and `#5`, PR #4, other/repo#5";
+    let answers = RecordedAnswers {
+        repo: "owner/demo".to_string(),
+        issues: vec![
+            issue(5, "B", "after #1", "closed"),
+            issue(1, "A", first, "open"),
+        ],
+        pulls: vec![json!({"number": 4, "state": "closed", "merged_at": null, "body": ""})],
+        comments: vec![comment(1, "dup of #5"), comment(5, "see #1, #5 and #7")],
+        ..RecordedAnswers::default()
+    };
+    let f = fixture_of("numbers", &answers);
+    // The queue made the issues with the backup's bodies; it put its marker after the first.
+    let made = format!("{first}\n\n<!-- ghq:0123456789ab -->\n");
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            listed(&[]),
+            answer(
+                200,
+                json!([{"number": 2, "title": "B", "state": "open", "body": "after #1"},
+                       {"number": 1, "title": "A", "state": "open", "body": made}]),
+            ),
+            answer(200, json!([])),
+        ],
+    );
+    let report = restore_issues(&f.fleet, &f.backup, NEW, &remote(&f, &api)).unwrap();
+    let comments: Vec<Value> = queued(&f)
+        .into_iter()
+        .filter(|item| item["kind"] == "comment")
+        .collect();
+    assert_eq!(
+        comments,
+        vec![
+            json!({"kind": "comment", "repo": NEW, "number": 1, "body": "dup of #2",
+                   "marker": null}),
+            json!({"kind": "comment", "repo": NEW, "number": 2, "body": "see #1, #2 and #7",
+                   "marker": null}),
+        ]
+    );
+    // Issues are created with the backup's text (their numbers are not known yet); the body
+    // is rewritten once they are there, the queue's marker kept.
+    assert_eq!(
+        patch_bodies(&api),
+        vec![
+            (
+                format!("/repos/{NEW}/issues/1"),
+                json!({"body": "see #2 and `#5`, PR #4, other/repo#5\n\n<!-- ghq:0123456789ab -->\n"})
+            ),
+            (format!("/repos/{NEW}/issues/2"), json!({"state": "closed"})),
+        ]
+    );
+    assert_eq!(
+        report,
+        IssuesReport {
+            issues: 2,
+            comments: 2,
+            closed: 1,
+            renumbered: 1,
+            ..IssuesReport::default()
+        }
+    );
+
+    // Again, with the repo as that left it: the rewritten body no longer reads as the
+    // backup's, so it is not rewritten twice, and the comments are found as they were queued.
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            answer(
+                200,
+                json!([{"number": 2, "title": "B", "state": "closed", "body": "after #1"},
+                       {"number": 1, "title": "A", "state": "open",
+                        "body": "see #2 and `#5`, PR #4, other/repo#5\n\n<!-- ghq:0123456789ab -->\n"}]),
+            ),
+            answer(
+                200,
+                json!([{"body": "dup of #2",
+                        "issue_url": format!("https://api.github.com/repos/{NEW}/issues/1")},
+                       {"body": "see #1, #2 and #7",
+                        "issue_url": format!("https://api.github.com/repos/{NEW}/issues/2")}]),
+            ),
+        ],
+    );
+    let report = restore_issues(&f.fleet, &f.backup, NEW, &remote(&f, &api)).unwrap();
+    assert_eq!(
+        report,
+        IssuesReport {
+            issues_there: 2,
+            comments_there: 2,
+            ..IssuesReport::default()
+        }
+    );
+    assert_eq!(patches(&api), Vec::<String>::new());
+    assert_eq!(queued(&f).len(), 4, "nothing more was queued");
+}
+
+/// A body someone changed in the repo is not the backup's any more: it is left as it is.
+#[test]
+fn a_body_that_was_changed_in_the_repo_is_not_rewritten() {
+    let issue = |n: u64, title: &str, body: &str| {
+        json!({"number": n, "title": title, "body": body, "state": "open",
+               "labels": [], "milestone": null})
+    };
+    let answers = RecordedAnswers {
+        repo: "owner/demo".to_string(),
+        issues: vec![issue(5, "B", ""), issue(1, "A", "see #5")],
+        ..RecordedAnswers::default()
+    };
+    let f = fixture_of("edited", &answers);
+    let api = Recorded::new(
+        Vec::new(),
+        vec![answer(
+            200,
+            json!([{"number": 9, "title": "B", "state": "open", "body": ""},
+                   {"number": 8, "title": "A", "state": "open", "body": "see #5, as I said"}]),
+        )],
+    );
+    let report = restore_issues(&f.fleet, &f.backup, NEW, &remote(&f, &api)).unwrap();
+    assert_eq!(
+        report,
+        IssuesReport {
+            issues_there: 2,
+            ..IssuesReport::default()
+        }
+    );
+    assert_eq!(patches(&api), Vec::<String>::new());
+    assert_eq!(queued(&f), Vec::<Value>::new());
+}
+
+/// GitHub answering a close with 403 or 429 stops the closes: the rest waits and the report
+/// says so. Nothing is sent after the refused one.
+#[test]
+fn a_rate_limit_answer_to_a_close_stops_the_closes_and_the_rest_waits() {
+    let issue = |n: u64| {
+        json!({"number": n, "title": format!("issue {n}"), "body": "", "state": "closed",
+               "labels": [], "milestone": null})
+    };
+    let answers = RecordedAnswers {
+        repo: "owner/demo".to_string(),
+        issues: vec![issue(2), issue(1)],
+        milestones: vec![json!({"title": "1.0"})],
+        ..RecordedAnswers::default()
+    };
+    let f = fixture_of("patch-limit", &answers);
+    std::fs::write(
+        f.backup.join("milestones.json"),
+        r#"[{"title": "1.0", "state": "closed"}]"#,
+    )
+    .unwrap();
+    for status in [403, 429] {
+        let api = Recorded::new(
+            Vec::new(),
+            vec![
+                listed(&[(1, "issue 1"), (2, "issue 2")]),
+                answer(200, json!([{"number": 4, "title": "1.0", "state": "open"}])),
+            ],
+        );
+        api.patch
+            .lock()
+            .unwrap()
+            .push(answer(status, json!({"message": "rate limit"})));
+        let report = restore_issues(&f.fleet, &f.backup, NEW, &remote(&f, &api)).unwrap();
+        assert_eq!(
+            report,
+            IssuesReport {
+                issues_there: 2,
+                state_waiting: 3,
+                left_out: vec![
+                    "GitHub answered a close or a body change with 403 or 429 (a rate limit, \
+                     or the token may not write): the rest waits"
+                        .to_string()
+                ],
+                ..IssuesReport::default()
+            }
+        );
+        assert!(report.held());
+        assert_eq!(
+            patch_bodies(&api),
+            vec![(format!("/repos/{NEW}/issues/1"), json!({"state": "closed"}))],
+            "one request, then none"
+        );
+    }
+    // Any other answer is an error, not a silent skip.
+    let api = Recorded::new(Vec::new(), vec![listed(&[(1, "issue 1"), (2, "issue 2")])]);
+    api.patch
+        .lock()
+        .unwrap()
+        .push(answer(422, json!({"message": "Validation Failed"})));
+    assert!(matches!(
+        restore_issues(&f.fleet, &f.backup, NEW, &remote(&f, &api)),
+        Err(CoreError::GitHub(_))
+    ));
+}
+
+/// #347, owner decision 3: the second confirm of a restore that held comments back queues only
+/// those. It pushes no ref (a commit pushed since the first confirm survives) and creates no
+/// second issue, label, milestone or comment.
+#[test]
+fn a_second_confirm_only_queues_what_was_held_back_and_pushes_no_ref() {
+    let f = fixture("second");
+    std::fs::write(f.stub.join("ratelimit"), "").unwrap();
+    let app = caller(Face::Gui, false);
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            answer(200, json!({"private": true})),
+            answer(200, json!([])),
+            answer(200, json!([])),
+            listed(&[]),
+            listed(&[]),
+            answer(200, json!([])),
+        ],
+    );
+    let first =
+        restore_over_live_from(&app, &f.fleet, &f.backup, NEW, true, &remote(&f, &api)).unwrap();
+    assert_eq!(first.refs, 3);
+    assert!(first.issues.held());
+    assert_eq!(
+        (first.issues.comments_waiting, first.issues.state_waiting),
+        (1, 1)
+    );
+    let after_first = queued(&f);
+    assert_eq!(after_first.len(), 5, "2 labels, 1 milestone, 2 issues");
+
+    // Work goes on in the repo: a new commit on master, which the backup does not have.
+    std::fs::write(f.source.join("c.txt"), "c\n").unwrap();
+    git(&f.source, &["add", "c.txt"]);
+    git(&f.source, &["commit", "-q", "-m", "third"]);
+    git(
+        &f.source,
+        &["push", "-q", &f.target.to_string_lossy(), "master"],
+    );
+    let live_refs = refs_of(&f.target, "refs");
+    let calls_before = std::fs::read_to_string(f.stub.join("calls.log")).unwrap();
+
+    // The queue has made the issues; the second confirm.
+    std::fs::remove_file(f.stub.join("ratelimit")).unwrap();
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            answer(200, json!({"private": true})),
+            listed(&[(1, "Bug"), (2, "Old")]),
+            answer(200, json!([])),
+        ],
+    );
+    let second =
+        restore_held_over_live_from(&app, &f.fleet, &f.backup, NEW, true, &remote(&f, &api))
+            .unwrap();
+    assert_eq!(
+        second,
+        RestoreReport {
+            issues: IssuesReport {
+                issues_there: 2,
+                comments: 1,
+                closed: 1,
+                ..IssuesReport::default()
+            },
+            ..RestoreReport::default()
+        }
+    );
+    assert_eq!(
+        refs_of(&f.target, "refs"),
+        live_refs,
+        "no ref was pushed: the commit made since the first confirm is still there"
+    );
+    let mut expected = after_first.clone();
+    expected.push(expected_issue_queue().remove(2));
+    assert_eq!(queued(&f), expected, "only the held comment was queued");
+    assert_eq!(patches(&api), closes_old(2));
+    assert_eq!(
+        *api.log.lock().unwrap(),
+        vec![
+            format!("GET /repos/{NEW}"),
+            format!("GET /repos/{NEW}/issues?state=all&per_page=100&page=1"),
+            format!("GET /repos/{NEW}/issues/comments?per_page=100&page=1"),
+            closes_old(2).remove(0),
+        ],
+        "labels and milestones are not even read"
+    );
+    let calls = std::fs::read_to_string(f.stub.join("calls.log")).unwrap();
+    assert!(calls.len() > calls_before.len());
+
+    // A third confirm, with the repo as that left it, creates nothing at all.
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            answer(200, json!({"private": true})),
+            answer(
+                200,
+                json!([{"number": 1, "title": "Bug", "state": "open", "body": "broken"},
+                       {"number": 2, "title": "Old", "state": "closed", "body": ""}]),
+            ),
+            answer(
+                200,
+                json!([{"body": "me too\n\n<!-- ghq:0123456789ab -->\n",
+                        "issue_url": format!("https://api.github.com/repos/{NEW}/issues/1")}]),
+            ),
+        ],
+    );
+    let third =
+        restore_held_over_live_from(&app, &f.fleet, &f.backup, NEW, true, &remote(&f, &api))
+            .unwrap();
+    assert_eq!(third.issues.comments, 0);
+    assert_eq!(third.issues.comments_there, 1);
+    assert_eq!(queued(&f), expected, "no duplicate issue or comment");
+    assert_eq!(patches(&api), Vec::<String>::new());
+    assert_eq!(refs_of(&f.target, "refs"), live_refs);
+}
+
+/// The held pass never queues an issue, even one the repo lacks: that is the whole restore's.
+#[test]
+fn the_held_pass_queues_no_issue_the_repo_lacks() {
+    let f = fixture("held-lacks");
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            answer(200, json!({"private": true})),
+            listed(&[(1, "Bug")]),
+            answer(200, json!([])),
+        ],
+    );
+    let report = restore_held_over_live_from(
+        &caller(Face::Gui, false),
+        &f.fleet,
+        &f.backup,
+        NEW,
+        true,
+        &remote(&f, &api),
+    )
+    .unwrap();
+    assert_eq!(
+        report.issues,
+        IssuesReport {
+            issues_there: 1,
+            comments: 1,
+            state_waiting: 1,
+            ..IssuesReport::default()
+        }
+    );
+    assert_eq!(queued(&f), expected_issue_queue()[2..]);
+    assert!(refs_of(&f.target, "refs").is_empty());
+}
+
+/// The second confirm is guarded as the first: refused, it reads and writes nothing.
+#[test]
+fn a_refused_second_confirm_writes_nothing() {
+    let f = fixture("held-refused");
+    let api = Recorded::new(Vec::new(), Vec::new());
+    for (who, confirmed) in [
+        (caller(Face::Gui, false), false),
+        (caller(Face::Cli, false), true),
+        (caller(Face::Mcp, false), true),
+        (caller(Face::Gui, true), true),
+    ] {
+        match restore_held_over_live_from(
+            &who,
+            &f.fleet,
+            &f.backup,
+            NEW,
+            confirmed,
+            &remote(&f, &api),
+        ) {
+            Err(CoreError::Refused(why)) => assert!(why.contains(NEW), "{why}"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+    assert!(api.log.lock().unwrap().is_empty(), "no API call at all");
+    assert!(!f.stub.join("calls.log").exists(), "no fleet call at all");
+    assert!(refs_of(&f.target, "refs").is_empty());
+}
+
+/// #365: a label the live repo has with another colour is left as it is (an open decision) and
+/// the report names it instead of passing over it.
+#[test]
+fn a_label_that_is_there_with_another_colour_is_left_and_named() {
+    let f = fixture("colour");
+    std::fs::write(
+        f.backup.join("labels.json"),
+        r#"[{"name": "bug", "color": "d73a4a"}, {"name": "size:Easy", "color": "0E8A16"}]"#,
+    )
+    .unwrap();
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            answer(200, json!({"private": true})),
+            answer(
+                200,
+                json!([{"name": "Bug", "color": "ffffff"},
+                       {"name": "size:Easy", "color": "0e8a16"}]),
+            ),
+            answer(200, json!([{"title": "1.0"}])),
+            listed(&[]),
+            listed(&[(1, "Bug"), (2, "Old")]),
+            answer(200, json!([])),
+        ],
+    );
+    let report = restore_over_live_from(
+        &caller(Face::Gui, false),
+        &f.fleet,
+        &f.backup,
+        NEW,
+        true,
+        &remote(&f, &api),
+    )
+    .unwrap();
+    assert_eq!(report.labels, 0);
+    assert_eq!(
+        report.left_out,
+        ["1 labels are there with another colour and were left as they are: bug"]
+    );
+    assert_eq!(queued(&f), expected_issue_queue(), "no label was queued");
+    assert_eq!(patches(&api), closes_old(2), "and none was changed");
 }

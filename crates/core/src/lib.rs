@@ -22,6 +22,7 @@ pub mod github;
 pub mod it;
 pub mod joblog;
 pub mod platform;
+pub mod renumber;
 pub mod reports;
 pub mod rules;
 pub mod settings;

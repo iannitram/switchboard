@@ -568,7 +568,8 @@ fn what_is_not_restored_is_listed_in_the_report() {
             "the wiki (wiki.git) is not restored",
             "2 PRs (pulls.json) are not restored",
             "1 releases (releases.json, releases/) are not restored; their tags are",
-            "1 closed milestones come back open: the create queue cannot close one",
+            "1 closed milestones are open until the issues are restored: restore_issues closes \
+             them",
         ]
     );
 }

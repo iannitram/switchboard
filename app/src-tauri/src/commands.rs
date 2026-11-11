@@ -543,14 +543,17 @@ pub fn chat_send_as_job(
 }
 
 /// CORE-3, BAK-3 (#347): confirm a delete or restore request that waits in Waiting on you.
-/// `confirmed` is true only when I pressed the confirm button on that request; the argument
-/// has no default, and without it the guard refuses. `cwd` is the folder the app runs in (a
-/// job worktree refuses everything). A refusal changes nothing.
+/// `confirmed` is true only when I pressed the confirm button on that request, and `typed` is
+/// the repo's `owner/name` as I typed it there; neither argument has a default. Without the
+/// confirm the guard refuses, and a typed name that is not the request's repo is refused by
+/// the core. `cwd` is the folder the app runs in (a job worktree refuses everything). A
+/// refusal changes nothing. A delete request archives the repo; nothing is ever deleted.
 pub fn confirm_guarded_at(
     settings_path: &Path,
     data: &Path,
     text: &str,
     confirmed: bool,
+    typed: &str,
     cwd: &Path,
 ) -> Result<switchboard_core::confirm::Done, CoreError> {
     use switchboard_core::rules::{self, Caller, Face};
@@ -561,7 +564,7 @@ pub fn confirm_guarded_at(
         confirmed_in_app: confirmed,
     };
     let settings = settings::load(settings_path)?;
-    switchboard_core::confirm::confirm(&settings, data, text, &caller)
+    switchboard_core::confirm::confirm(&settings, data, text, typed, &caller)
 }
 
 /// CORE-3, BAK-3 (#347): the Waiting on you view's confirm on a guarded request. It runs off
@@ -572,6 +575,7 @@ pub fn confirm_guarded(
     state: tauri::State<'_, AppState>,
     text: String,
     confirmed: bool,
+    typed: String,
 ) -> Result<switchboard_core::confirm::Done, FaceError> {
     app.path()
         .app_data_dir()
@@ -579,7 +583,7 @@ pub fn confirm_guarded(
         .and_then(|data| {
             let cwd = std::env::current_dir()
                 .map_err(|e| CoreError::Io(format!("working folder: {e}")))?;
-            confirm_guarded_at(&state.settings_path, &data, &text, confirmed, &cwd)
+            confirm_guarded_at(&state.settings_path, &data, &text, confirmed, &typed, &cwd)
         })
         .map_err(|e| FaceError::new("confirm_guarded", &e))
 }
