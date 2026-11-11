@@ -616,7 +616,8 @@ pub fn filing_key(kind: &str, request: &str, handoff_id: Option<&str>) -> String
 /// (a second press, or the view opened again, files it once).
 pub fn start_filing(key: String) -> Option<FilingHeld> {
     let mut filing = FILING_HELD.lock().unwrap_or_else(|p| p.into_inner());
-    filing.insert(key.clone()).then_some(FilingHeld(key))
+    // Lazily: a refused press must not build (and so drop) a guard that removes the key.
+    filing.insert(key.clone()).then(|| FilingHeld(key))
 }
 
 /// FD-12: send a held Chat request as a fleet job another machine pulls (the Chat view's
