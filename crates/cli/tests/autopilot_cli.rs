@@ -597,3 +597,13 @@ fn every_other_command_is_left_to_the_command_table() {
         assert_eq!((out.as_str(), err.as_str()), ("", ""));
     }
 }
+
+/// #433: a world's folder is removed when the world is dropped, as it is when a test fails.
+#[test]
+fn a_world_removes_its_folder_when_dropped() {
+    let w = world("cleanup");
+    let base = w.base.clone();
+    assert!(base.exists());
+    drop(w);
+    assert!(!base.exists());
+}

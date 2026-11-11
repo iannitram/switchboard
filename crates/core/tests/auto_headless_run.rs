@@ -47,10 +47,18 @@ if args[:2] == ["run", "--next"]:
 /// A pipeline (stub `merge_pr.py` and `fleet.py`), a dev root with a clone of `demo`, a data
 /// folder and a config folder.
 struct World {
+    base: PathBuf,
     pipeline: PathBuf,
     dev: PathBuf,
     data: PathBuf,
     config: PathBuf,
+}
+
+/// The test's folder goes when the test ends, pass or fail (#433).
+impl Drop for World {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.base);
+    }
 }
 
 fn world(tag: &str) -> World {
@@ -65,6 +73,7 @@ fn world(tag: &str) -> World {
         dev: base.join("dev"),
         data: base.join("data"),
         config: base.join("config"),
+        base,
     };
     for (dir, name, text) in [
         ("merge-pr", "merge_pr.py", MERGE_STUB),
@@ -716,4 +725,14 @@ fn a_lock_held_across_calls_is_kept_fresh_and_gone_when_dropped() {
         "nothing writes it again"
     );
     assert!(FileLock::take(&target, Duration::ZERO).is_ok());
+}
+
+/// #433: a world's folder is removed when the world is dropped, as it is when a test fails.
+#[test]
+fn a_world_removes_its_folder_when_dropped() {
+    let w = world("cleanup");
+    let base = w.base.clone();
+    assert!(base.exists());
+    drop(w);
+    assert!(!base.exists());
 }
