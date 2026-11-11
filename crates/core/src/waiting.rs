@@ -291,12 +291,14 @@ impl LocalItems {
 
     /// Replace the item with the same `source` in place, or push it at the end.
     pub fn add(&self, item: Item) -> Result<(), CoreError> {
-        let mut items = self.load()?;
-        match items.iter().position(|old| old.source == item.source) {
-            Some(i) => items[i] = item,
-            None => items.push(item),
-        }
-        self.write(&items)
+        self.change(|items| {
+            match items.iter().position(|old| old.source == item.source) {
+                Some(i) => items[i] = item,
+                None => items.push(item),
+            }
+            true
+        })
+        .map(|_| ())
     }
 
     /// Push `item` unless one is there already for its `source`, or for the archive or restore
@@ -305,7 +307,6 @@ impl LocalItems {
     /// plain one: the next confirm of either would run the whole restore again. True when it
     /// was added.
     pub fn add_new(&self, item: Item) -> Result<bool, CoreError> {
-        let mut items = self.load()?;
         let asks = crate::confirm::guarded_request(&item);
         let there = |old: &Item| {
             old.source == item.source
@@ -314,20 +315,41 @@ impl LocalItems {
                         .is_some_and(|held| same_request(&held, new))
                 })
         };
-        if items.iter().any(there) {
-            return Ok(false);
-        }
-        items.push(item);
-        self.write(&items)?;
-        Ok(true)
+        self.change(|items| {
+            if items.iter().any(there) {
+                return false;
+            }
+            items.push(item.clone());
+            true
+        })
     }
 
     /// True when an item was removed; nothing removed writes nothing.
     pub fn remove(&self, source: &Source) -> Result<bool, CoreError> {
+        // Not there now: nothing to take, no lock, no folder made. A remove that finds it is
+        // ordered before any add that follows.
+        if !self.load()?.iter().any(|item| item.source == *source) {
+            return Ok(false);
+        }
+        self.change(|items| {
+            let before = items.len();
+            items.retain(|item| item.source != *source);
+            items.len() != before
+        })
+    }
+
+    /// Change the items under the file's lock (#431): read them, let `change` change them, and
+    /// write them back when it says it changed something (its answer, which this returns). Every
+    /// writer of `local.json` goes through here, in every face, so a writer that read the file
+    /// before another's write never writes over that write: it waits, then reads it.
+    pub fn change(&self, change: impl FnOnce(&mut Vec<Item>) -> bool) -> Result<bool, CoreError> {
+        let io = |e: std::io::Error| CoreError::Io(format!("{}: {e}", self.path.display()));
+        if let Some(dir) = self.path.parent() {
+            std::fs::create_dir_all(dir).map_err(io)?;
+        }
+        let _held = crate::lock::FileLock::take_for(&self.path, LOCAL_LOCK_WAIT, LOCAL_HOLDER)?;
         let mut items = self.load()?;
-        let before = items.len();
-        items.retain(|item| item.source != *source);
-        if items.len() == before {
+        if !change(&mut items) {
             return Ok(false);
         }
         self.write(&items)?;
@@ -335,12 +357,9 @@ impl LocalItems {
     }
 
     /// Pretty JSON to a temp file of this run's own (`local.json.tmp-<run>`, #416), then renamed
-    /// over `local.json`.
+    /// over `local.json`. Only under the lock (`change`).
     fn write(&self, items: &[Item]) -> Result<(), CoreError> {
         let io = |e: std::io::Error| CoreError::Io(format!("{}: {e}", self.path.display()));
-        if let Some(dir) = self.path.parent() {
-            std::fs::create_dir_all(dir).map_err(io)?;
-        }
         let mut text = serde_json::to_string_pretty(items)
             .map_err(|e| CoreError::Parse(format!("{}: {e}", self.path.display())))?;
         text.push('\n');
@@ -352,6 +371,13 @@ impl LocalItems {
         })
     }
 }
+
+/// How long a change to `local.json` waits for another's (#431): each is one read and one
+/// write.
+pub const LOCAL_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// What the lock on `local.json` says holds it.
+const LOCAL_HOLDER: &str = "a change to Waiting on you";
 
 /// #426: an archive request filed before the wording changed says `... to delete <owner/name>`;
 /// it is shown as `... to archive <owner/name>`. Only the shown `what` changes: the request's

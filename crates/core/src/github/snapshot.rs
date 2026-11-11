@@ -92,20 +92,16 @@ impl SnapshotStore {
         self.dir.join(format!("{}.json", repo.replace('/', "__")))
     }
 
-    /// Write one repo's snapshot, replacing the old one (write to a temp file, then rename).
+    /// Write one repo's snapshot, replacing the old one: to a temp file of this save's own,
+    /// then renamed over it (`lock::write_whole`, #431), so two processes saving one repo's
+    /// snapshot at once never share a temp file. The last rename wins; each is a whole read.
     pub fn save(&self, snap: &RepoSnapshot) -> Result<(), CoreError> {
         std::fs::create_dir_all(&self.dir)
             .map_err(|e| CoreError::Io(format!("{}: {e}", self.dir.display())))?;
         let target = self.path_for(&snap.repo);
         let text =
             serde_json::to_string_pretty(snap).map_err(|e| CoreError::Parse(e.to_string()))?;
-        let mut tmp = target.clone().into_os_string();
-        tmp.push(".tmp");
-        let tmp = PathBuf::from(tmp);
-        std::fs::write(&tmp, text).map_err(|e| CoreError::Io(format!("{}: {e}", tmp.display())))?;
-        std::fs::rename(&tmp, &target)
-            .map_err(|e| CoreError::Io(format!("{}: {e}", tmp.display())))?;
-        Ok(())
+        crate::lock::write_whole(&target, text.as_bytes())
     }
 
     /// Read one repo's snapshot; `Ok(None)` when there is none yet.

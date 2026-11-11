@@ -489,9 +489,22 @@ impl HeldRecords {
         Ok(self.load()?.remove(text))
     }
 
-    /// Keeps `made` for the request `text`, or drops its record (`None`). Pretty JSON to
-    /// `held-restores.json.tmp`, then renamed over the file; no change writes nothing.
+    /// Keeps `made` for the request `text`, or drops its record (`None`). A read, change and
+    /// write under the file's lock (#431), pretty JSON to a temp file of this run's own
+    /// (`lock::temp_path`), then renamed over the file; no change writes nothing.
     fn set(&self, text: &str, made: Option<&Made>) -> Result<(), CoreError> {
+        let io = |e: std::io::Error| CoreError::Io(format!("{}: {e}", self.path.display()));
+        if made.is_none() && !self.load()?.contains_key(text) {
+            return Ok(());
+        }
+        if let Some(dir) = self.path.parent() {
+            std::fs::create_dir_all(dir).map_err(io)?;
+        }
+        let _held = crate::lock::FileLock::take_for(
+            &self.path,
+            crate::waiting::LOCAL_LOCK_WAIT,
+            "a change to the held restores",
+        )?;
         let mut all = self.load()?;
         let changed = match made {
             Some(made) => all.insert(text.to_string(), made.clone()).as_ref() != Some(made),
@@ -500,16 +513,15 @@ impl HeldRecords {
         if !changed {
             return Ok(());
         }
-        let io = |e: std::io::Error| CoreError::Io(format!("{}: {e}", self.path.display()));
-        if let Some(dir) = self.path.parent() {
-            std::fs::create_dir_all(dir).map_err(io)?;
-        }
         let mut body = serde_json::to_string_pretty(&all)
             .map_err(|e| CoreError::Parse(format!("{}: {e}", self.path.display())))?;
         body.push('\n');
-        let tmp = self.path.with_extension("json.tmp");
+        let tmp = crate::lock::temp_path(&self.path, ".tmp");
         std::fs::write(&tmp, body).map_err(io)?;
-        std::fs::rename(&tmp, &self.path).map_err(io)
+        std::fs::rename(&tmp, &self.path).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            io(e)
+        })
     }
 }
 
@@ -622,4 +634,50 @@ pub fn confirm_into(
             restore_new: &restore_new,
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #431: held restores recorded at once, each by a store of its own as two processes
+    /// would, all keep their record. Before, every save went through one fixed
+    /// `held-restores.json.tmp` with no lock: records were lost or a save failed.
+    #[test]
+    fn held_restores_recorded_at_once_all_keep_their_record() {
+        let data = std::env::temp_dir().join(format!("sb-431-held-{}", crate::lock::run_tag()));
+        const WRITERS: usize = 6;
+        const EACH: usize = 15;
+        let start = std::sync::Arc::new(std::sync::Barrier::new(WRITERS));
+        let running: Vec<_> = (0..WRITERS)
+            .map(|w| {
+                let (data, go) = (data.clone(), start.clone());
+                std::thread::spawn(move || {
+                    let records = HeldRecords::new(&data);
+                    go.wait();
+                    for n in 0..EACH {
+                        let made = Made {
+                            into: Some(format!("owner/new-{w}-{n}")),
+                            ..Made::default()
+                        };
+                        records
+                            .set(&format!("Restore {w}-{n}"), Some(&made))
+                            .unwrap();
+                    }
+                })
+            })
+            .collect();
+        for thread in running {
+            thread.join().unwrap();
+        }
+        let all = HeldRecords::new(&data).load().unwrap();
+        assert_eq!(all.len(), WRITERS * EACH, "records lost");
+        let left: Vec<_> = std::fs::read_dir(data.join("waiting"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n != "held-restores.json")
+            .collect();
+        assert!(left.is_empty(), "{left:?}");
+        let _ = std::fs::remove_dir_all(&data);
+    }
 }
