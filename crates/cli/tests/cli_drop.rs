@@ -1,4 +1,4 @@
-//! #347, turn a request down from the CLI: `switchboard drop <delete | restore> <repo>` removes
+//! #347, turn a request down from the CLI: `switchboard drop <archive | restore> <repo>` removes
 //! the request that command left in Waiting on you (and a held restore's record) and does
 //! nothing else. `CliWrites` runs in-process through `run_with` over a temp app data folder;
 //! the transport is a `Recorded` with no answers and the pipeline folder is empty, so a drop
@@ -102,7 +102,7 @@ fn drop_removes_the_request_the_command_of_that_name_left() {
     run(&["restore", "switchboard"], &s);
     assert_eq!(waiting(&s), [ARCHIVE, RESTORE]);
 
-    let (code, err) = run(&["drop", "delete", "switchboard"], &s);
+    let (code, err) = run(&["drop", "archive", "switchboard"], &s);
     assert_eq!((code, err.as_str()), (ExitCode::SUCCESS, ""));
     assert_eq!(waiting(&s), [RESTORE], "the restore request stays");
 
@@ -117,7 +117,7 @@ fn dropping_what_is_not_waiting_is_refused_and_changes_nothing() {
     let s = setup("none");
     run(&["restore", "switchboard"], &s);
     let before = std::fs::read_to_string(LocalItems::new(&s.data).path()).unwrap();
-    let (code, err) = run(&["drop", "delete", "switchboard"], &s);
+    let (code, err) = run(&["drop", "archive", "switchboard"], &s);
     assert_eq!(code, ExitCode::from(1));
     assert_eq!(
         err,
@@ -144,7 +144,13 @@ fn drop_inside_a_job_worktree_is_refused_whatever_the_role() {
     let s = setup("worktree");
     run(&["delete", "switchboard"], &s);
     let (code, err) = run_in(
-        &["--role", "project-manager", "drop", "delete", "switchboard"],
+        &[
+            "--role",
+            "project-manager",
+            "drop",
+            "archive",
+            "switchboard",
+        ],
         &s.job,
         &s,
     );
@@ -164,13 +170,13 @@ fn drop_without_a_kind_and_one_repo_is_a_usage_error() {
         &["drop"][..],
         &["drop", "switchboard"][..],
         &["drop", "merge", "switchboard"][..],
-        &["drop", "delete"][..],
-        &["drop", "delete", "switchboard", "more"][..],
+        &["drop", "archive"][..],
+        &["drop", "archive", "switchboard", "more"][..],
     ] {
         let (code, err) = run(argv, &s);
         assert_eq!(code, ExitCode::from(2), "{argv:?}");
         assert!(
-            err.starts_with("switchboard: drop needs <delete | restore> <repo>\nusage: "),
+            err.starts_with("switchboard: drop needs <archive | restore> <repo>\nusage: "),
             "{err}"
         );
     }
@@ -216,4 +222,29 @@ fn a_restore_held_from_mcp_gets_no_second_request_from_the_cli() {
     run(&["delete", "switchboard"], &s);
     assert_eq!(waiting(&s).len(), 2);
     assert_eq!(waiting(&s)[1], ARCHIVE);
+}
+
+/// #426: `delete` is the old word for `archive`: it still files and drops the same request, and
+/// the help no longer shows it.
+#[test]
+fn delete_is_a_silent_alias_of_archive() {
+    let s = setup("alias");
+    run(&["delete", "switchboard"], &s);
+    assert_eq!(waiting(&s), [ARCHIVE]);
+    // Asking by either word keeps one item.
+    run(&["archive", "o/switchboard"], &s);
+    assert_eq!(waiting(&s), [ARCHIVE]);
+    let (code, err) = run(&["drop", "delete", "switchboard"], &s);
+    assert_eq!((code, err.as_str()), (ExitCode::SUCCESS, ""));
+    assert!(waiting(&s).is_empty());
+
+    run(&["archive", "switchboard"], &s);
+    let (code, _) = run(&["drop", "archive", "o/switchboard"], &s);
+    assert_eq!(code, ExitCode::SUCCESS);
+    assert!(waiting(&s).is_empty());
+
+    let usage = cli::USAGE;
+    assert!(usage.contains("archive <repo>"), "{usage}");
+    assert!(usage.contains("drop <archive | restore> <repo>"), "{usage}");
+    assert!(!usage.contains("delete"), "{usage}");
 }

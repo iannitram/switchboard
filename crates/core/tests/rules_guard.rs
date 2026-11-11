@@ -2,7 +2,9 @@
 //! live repo). Qwen never edits this file.
 
 use std::path::{Path, PathBuf};
-use switchboard_core::rules::{guard, is_job_worktree, Caller, Face, GuardedAction, Role, Verdict};
+use switchboard_core::rules::{
+    guard, guard_restore_new, is_job_worktree, Caller, Face, GuardedAction, Role, Verdict,
+};
 
 const FACES: [Face; 3] = [Face::Gui, Face::Cli, Face::Mcp];
 
@@ -209,4 +211,47 @@ fn the_code_map_shows_core_rules_present() {
         .nth(1)
         .unwrap();
     assert!(line.contains("· present."), "{line}");
+}
+
+/// #426: a restore into a new private repo is the app's after my confirm, or the CLI's after the
+/// repo's name was typed and with no role; never MCP, never a role, never in a job worktree.
+#[test]
+fn a_restore_into_a_new_repo_is_the_apps_or_the_clis_typed_confirm_only() {
+    let needs = "restore over owner/app: needs a confirm in the app";
+    let worktree = "restore over owner/app: refused inside a job worktree";
+    let roles = [
+        None,
+        Some(Role::ProjectManager),
+        Some(Role::BudgetManager),
+        Some(Role::Satellite),
+    ];
+    for role in roles {
+        for confirmed in [false, true] {
+            let ask = |face| {
+                guard_restore_new(&caller(face, role.clone(), false, confirmed), "owner/app")
+            };
+            // The app: only my confirm counts, whatever the role flag says.
+            assert_eq!(
+                ask(Face::Gui),
+                if confirmed {
+                    Verdict::Allow
+                } else {
+                    refuse(needs)
+                }
+            );
+            // The CLI: the typed name, and no role.
+            let cli = if confirmed && role.is_none() {
+                Verdict::Allow
+            } else {
+                refuse(needs)
+            };
+            assert_eq!(ask(Face::Cli), cli);
+            assert_eq!(ask(Face::Mcp), refuse(needs));
+            for face in FACES {
+                let got =
+                    guard_restore_new(&caller(face, role.clone(), true, confirmed), "owner/app");
+                assert_eq!(got, refuse(worktree));
+            }
+        }
+    }
 }

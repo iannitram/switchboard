@@ -415,7 +415,7 @@ fn extra_words_after_a_command_are_exit_2() {
         ),
         (
             &["delete", "alpha", "beta"],
-            "switchboard: delete takes one repo, got more: beta\n",
+            "switchboard: archive takes one repo, got more: beta\n",
         ),
         (
             &["--role", "project-manager", "merge", "alpha#1", "beta#1"],
@@ -481,7 +481,7 @@ fn delete_with_an_ambiguous_name_writes_nothing() {
     let dirs = two_alphas("amb-delete");
     let out = dirs.run(&["delete", "alpha"]);
     assert_eq!(out.status.code(), Some(1));
-    assert_eq!(stderr(&out), format!("switchboard: delete: {AMBIGUOUS}\n"));
+    assert_eq!(stderr(&out), format!("switchboard: archive: {AMBIGUOUS}\n"));
     assert!(LocalItems::new(&dirs.data()).load().unwrap().is_empty());
     // The full name is one item, linked to the repo.
     let out = dirs.run(&["delete", "owner/alpha"]);

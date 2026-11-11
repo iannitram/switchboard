@@ -417,3 +417,42 @@ fn the_code_map_marks_the_local_items_and_the_merge_present() {
     let map = std::fs::read_to_string(path).unwrap();
     assert!(map.contains("- WAIT-1 local items and the merge (`LocalItems`, `merge`): present."));
 }
+
+/// #426: an archive request filed as "to delete" is shown as "to archive"; what it was filed
+/// with, which the confirm finds it by, stays.
+#[test]
+fn an_old_delete_request_is_shown_as_an_archive_request() {
+    let old = "I was asked from the CLI to delete owner/old-thing";
+    let delete = GuardedAction::DeleteRepo {
+        repo: "owner/old-thing".to_string(),
+    };
+    let item = guarded_item(&delete, old, NOW);
+    let shown = switchboard_core::waiting::merge(vec![vec![item.clone()]]);
+    assert_eq!(
+        shown[0].what,
+        "I was asked from the CLI to archive owner/old-thing"
+    );
+    assert_eq!(
+        shown[0].source,
+        Source::GuardedAction {
+            text: old.to_string()
+        }
+    );
+    // The stored copy is not rewritten.
+    let data = std::env::temp_dir().join(format!("sb-old-delete-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&data);
+    LocalItems::new(&data).add(item.clone()).unwrap();
+    assert_eq!(LocalItems::new(&data).load().unwrap(), vec![item]);
+    // Any other item is left as it is, even one that says "to delete".
+    let task = Item {
+        what: "Ask Sam to delete owner/x".to_string(),
+        source: Source::CalDavTask {
+            uid: "u".to_string(),
+        },
+        ..shown[0].clone()
+    };
+    assert_eq!(
+        switchboard_core::waiting::merge(vec![vec![task.clone()]]),
+        vec![task]
+    );
+}

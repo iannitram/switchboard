@@ -23,7 +23,7 @@ use crate::backup_run;
 use crate::fleet::FleetBridge;
 use crate::github::archive::{self, Archived};
 use crate::github::transport::HttpTransport;
-use crate::rules::{self, Caller, GuardedAction};
+use crate::rules::{self, Caller, Face, GuardedAction};
 use crate::settings::Settings;
 use crate::waiting::{Item, LocalItems, Source};
 use crate::CoreError;
@@ -88,6 +88,31 @@ pub fn guarded_request(item: &Item) -> Option<GuardedAction> {
     } else {
         GuardedAction::RestoreOverLive { repo }
     })
+}
+
+/// #426: the text of the waiting request for `action` (an archive of, or a restore over, one
+/// repo; the repo's `owner/name` compared without case), `None` when none waits. The CLI names
+/// a request by what it asks, as `drop_requests_for` does; the confirm step finds it by this text.
+pub fn request_text_for(
+    data_dir: &Path,
+    action: &GuardedAction,
+) -> Result<Option<String>, CoreError> {
+    let same = |a: &GuardedAction, b: &GuardedAction| match (a, b) {
+        (GuardedAction::DeleteRepo { repo: a }, GuardedAction::DeleteRepo { repo: b })
+        | (
+            GuardedAction::RestoreOverLive { repo: a },
+            GuardedAction::RestoreOverLive { repo: b },
+        ) => a.eq_ignore_ascii_case(b),
+        _ => false,
+    };
+    Ok(LocalItems::new(data_dir)
+        .load()?
+        .iter()
+        .find(|item| guarded_request(item).is_some_and(|found| same(&found, action)))
+        .and_then(|item| match &item.source {
+            Source::GuardedAction { text } => Some(text.clone()),
+            _ => None,
+        }))
 }
 
 /// What the confirm does, in the words the face shows: a delete request archives.
@@ -231,7 +256,17 @@ pub fn confirm_into_with(
             "{text}: does not name one repo to archive or restore over"
         )));
     };
-    rules::guard(caller, &action).into_result()?;
+    // A restore into a new private repo (#426) has its own guard: the CLI may confirm it with
+    // the name typed, as it may finish what such a restore held back. Over the live repo, and
+    // an archive, stay the app's.
+    let to_new = matches!(action, GuardedAction::RestoreOverLive { .. })
+        && (into.is_some() || (caller.face == Face::Cli && item.action == HELD_ACTION));
+    match &action {
+        GuardedAction::RestoreOverLive { repo } if to_new => {
+            rules::guard_restore_new(caller, repo).into_result()?
+        }
+        _ => rules::guard(caller, &action).into_result()?,
+    }
     let what = worded(&action);
     match &action {
         GuardedAction::RestoreOverLive { repo } => {
@@ -247,6 +282,10 @@ pub fn confirm_into_with(
             };
             if let Some(new) = &new {
                 new_repo_ok(&what, repo, new)?;
+            } else if to_new {
+                return Err(CoreError::Refused(format!(
+                    "{what}: only the app restores over a live repo; nothing was changed"
+                )));
             }
             let pass = if held {
                 Pass::Held(kept.unwrap_or_default())
@@ -542,10 +581,20 @@ pub fn confirm_into(
         let fleet = FleetBridge::new(settings.pipeline_repo()?);
         Ok((fleet, backup_run::folder(backups, repo)))
     };
+    // #426: what a restore into a new repo made is kept here, so a retry can finish it.
+    let marks = backup::Marks::new(data_dir);
     let restore_new = |caller: &Caller, repo: &str, new: &str, pass: &Pass| {
         let (fleet, folder) = source(repo)?;
         let confirmed = caller.confirmed_in_app;
-        backup::restore_to_new(caller, &fleet, &folder, (repo, new), confirmed, pass)
+        backup::restore_to_new(
+            caller,
+            &fleet,
+            &folder,
+            (repo, new),
+            confirmed,
+            pass,
+            Some(&marks),
+        )
     };
     let restore = |caller: &Caller, repo: &str, pass: &Pass| {
         let (fleet, folder) = source(repo)?;
