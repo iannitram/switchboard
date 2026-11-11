@@ -248,3 +248,63 @@ fn delete_is_a_silent_alias_of_archive() {
     assert!(usage.contains("drop <archive | restore> <repo>"), "{usage}");
     assert!(!usage.contains("delete"), "{usage}");
 }
+
+/// #433: a request filed with the old word ("to delete") and one filed now ("to archive") are
+/// the same request: asking again adds no second item, and a drop removes the old one.
+#[test]
+fn an_old_to_delete_request_and_a_new_to_archive_request_are_the_same() {
+    use switchboard_core::rules::GuardedAction;
+    use switchboard_core::waiting::guarded_item;
+    let s = setup("old-new");
+    let action = GuardedAction::DeleteRepo {
+        repo: "o/switchboard".to_string(),
+    };
+    let old = "I was asked from the CLI to delete o/switchboard";
+    LocalItems::new(&s.data)
+        .add(guarded_item(&action, old, NOW))
+        .unwrap();
+
+    run(&["archive", "switchboard"], &s);
+    assert_eq!(waiting(&s), [old], "no second item for the same request");
+
+    let (code, err) = run(&["drop", "archive", "switchboard"], &s);
+    assert_eq!((code, err.as_str()), (ExitCode::SUCCESS, ""));
+    assert!(waiting(&s).is_empty());
+}
+
+/// #433: a request for `owner/a` is not a request for `owner/ab`, either way round, for an
+/// archive and a restore.
+#[test]
+fn a_request_for_owner_a_is_not_a_request_for_owner_ab() {
+    use switchboard_core::rules::GuardedAction;
+    use switchboard_core::waiting::guarded_item;
+    let s = setup("prefix");
+    let items = LocalItems::new(&s.data);
+    for repo in ["owner/ab", "owner/a"] {
+        let action = GuardedAction::DeleteRepo {
+            repo: repo.to_string(),
+        };
+        let text = format!("I was asked from the CLI to archive {repo}");
+        items.add(guarded_item(&action, &text, NOW)).unwrap();
+    }
+    let restore = GuardedAction::RestoreOverLive {
+        repo: "owner/ab".to_string(),
+    };
+    let restore_text = "I was asked from the CLI to restore over owner/ab";
+    items
+        .add(guarded_item(&restore, restore_text, NOW))
+        .unwrap();
+
+    let (code, err) = run(&["drop", "archive", "owner/a"], &s);
+    assert_eq!((code, err.as_str()), (ExitCode::SUCCESS, ""));
+    assert_eq!(
+        waiting(&s),
+        ["I was asked from the CLI to archive owner/ab", restore_text]
+    );
+    let (code, _) = run(&["drop", "restore", "owner/a"], &s);
+    assert_eq!(code, ExitCode::from(1), "no restore request for owner/a");
+    assert_eq!(waiting(&s).len(), 2);
+    let (code, _) = run(&["drop", "archive", "owner/ab"], &s);
+    assert_eq!(code, ExitCode::SUCCESS);
+    assert_eq!(waiting(&s), [restore_text]);
+}
