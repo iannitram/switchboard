@@ -129,16 +129,14 @@ pub fn rate_turn(
     if thumbs_from_name(rating).is_none() {
         return Err(CoreError::Refused(format!("unknown rating: {rating}")));
     }
-    let store = ThreadStore::new(data_dir);
-    let turn = answer_turn(&store, handoff_id, turn_index)?;
-    let row = rating_entry(
+    let turn = answer_turn(&ThreadStore::new(data_dir), handoff_id, turn_index)?;
+    log_rating(
+        data_dir,
         handoff_id,
         turn_index,
         rating,
         turn.lane.as_deref().unwrap_or(""),
         turn.model.as_deref().unwrap_or(""),
         turn.kind.as_deref(),
-    )?;
-    store.upsert(handoff_id, &row)?;
-    Ok(row)
+    )
 }
