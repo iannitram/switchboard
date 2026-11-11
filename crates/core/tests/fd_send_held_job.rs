@@ -270,10 +270,14 @@ fn the_command_is_a_thin_call_into_send_held_job() {
         .find("pub fn chat_send_as_job(")
         .expect("commands.rs has pub fn chat_send_as_job(");
     let before = &commands[..at];
-    let attr = before.rfind("#[tauri::command]").expect("an attribute");
+    // #429 (owner ruling 2026-11-11; this pinned `#[tauri::command]`, a blocking command): the
+    // send runs off the main thread, so the window stays usable while it is filed.
+    let attr = before
+        .rfind("#[tauri::command(async)]")
+        .expect("an async attribute");
     assert!(
         !before[attr..].contains("fn "),
-        "#[tauri::command] is not on chat_send_as_job"
+        "#[tauri::command(async)] is not on chat_send_as_job"
     );
     let body_end = commands[at..]
         .find("\n}\n")

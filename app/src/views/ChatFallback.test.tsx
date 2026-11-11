@@ -71,8 +71,11 @@ test("moveLine names where the chat went, or nothing when it did not move", () =
     moved_from: "qwen qwen-small",
     moved_why: 'I said "ask Claude"',
   };
-  expect(moveLine(handoff)).toBe('qwen/qwen-small → claude: I said "ask Claude"');
-  expect(moveLine({ ...handoff, moved_why: undefined })).toBe("qwen/qwen-small → claude: not recorded");
+  // #433 (was `→ claude`): a handoff Switchboard chose no model for says so, as the work tree does.
+  expect(moveLine(handoff)).toBe('qwen/qwen-small → claude/model not chosen by Switchboard: I said "ask Claude"');
+  expect(moveLine({ ...handoff, moved_why: undefined })).toBe(
+    "qwen/qwen-small → claude/model not chosen by Switchboard: not recorded",
+  );
   // #428: the move names the Claude model it went to.
   const withModel: ChatRoute = { ...handoff, pick: { to: "claude-handoff", reason: "ask claude", model: "sonnet" } };
   expect(moveLine(withModel)).toBe('qwen/qwen-small → claude/sonnet: I said "ask Claude"');
@@ -107,4 +110,27 @@ test("the held request's button sends the open chat's thread", async () => {
     handoffId: "t",
   });
   view.unmount();
+});
+
+// #433: a Claude handoff shows its model as the core labels it, or that Switchboard chose none.
+test("a Claude handoff shows the core's model label", async () => {
+  const handoff = (claude_label: string): CoreResult<ChatRoute> => ({
+    ok: {
+      step: "explicit ask claude",
+      kind: null,
+      pick: { to: "claude-handoff", reason: "ask claude" },
+      claude_label,
+    },
+  });
+  const send = vi
+    .fn()
+    .mockResolvedValueOnce(handoff("Claude (model not chosen by Switchboard)"))
+    .mockResolvedValueOnce(handoff("Claude opus"));
+  const { container } = render(<Chat send={send} />);
+  await ask("ask Claude about it");
+  expect(container.querySelector('[data-part="claude-model"]')?.textContent).toBe(
+    "Claude (model not chosen by Switchboard)",
+  );
+  await ask("ask Claude Opus about it");
+  expect(container.querySelector('[data-part="claude-model"]')?.textContent).toBe("Claude opus");
 });

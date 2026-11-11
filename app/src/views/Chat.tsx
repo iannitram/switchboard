@@ -18,6 +18,11 @@ import { call, type CoreError, type CoreResult } from "../core";
 // rating. Each needs a stored thread; a failed log is not shown (it is not something I did).
 // FD-3 (#377): a reply the local Qwen lane gave because the picked pool was braked says so.
 // FD-5 (#378): a turn that moved the chat shows the move's line, as the work tree does.
+// FD-12 (#429): the window hands the view the request this machine holds (`held`, from the
+// `chat_route` reply). Sending it as a fleet job does not block (owner ruling 2026-11-11): the
+// button says "sending…", the rest of the view stays usable, and the result or the error shows
+// in the chat when filing ends; a second press while it is filed sends nothing.
+// FD-5 (#433): a Claude handoff names its model, or says Switchboard chose none.
 
 /** The router's pick, as the core names it (`Pick` in `router.rs`). */
 export type Pick =
@@ -39,10 +44,12 @@ export type ChatHandoffProps = {
   openInClaude?: (prompt: string) => void;
   /** Logs an implicit signal (FD-9). The press logs `opened-in-claude`. */
   logImplicit?: (signal: "opened-in-claude") => void;
+  /** #433: the model the handoff goes to, as the core labels it (`claude_label`). */
+  label?: string;
 };
 
 /** FD-8: the button for a Claude handoff; nothing for any other pick. */
-export function ChatHandoff({ pick, prompt, openInClaude, logImplicit }: ChatHandoffProps) {
+export function ChatHandoff({ pick, prompt, openInClaude, logImplicit, label }: ChatHandoffProps) {
   if (!("ClaudeHandoff" in pick)) return null;
   const press = () => {
     if (openInClaude) {
@@ -56,6 +63,7 @@ export function ChatHandoff({ pick, prompt, openInClaude, logImplicit }: ChatHan
   return (
     <div data-part="handoff">
       <p>{pick.ClaudeHandoff}</p>
+      {label && <p data-part="claude-model">{label}</p>}
       <button type="button" onClick={press}>
         Open in Claude
       </button>
@@ -100,7 +108,7 @@ export function ChatHeld({ held, send = sendAsJob }: ChatHeldProps) {
       <p>{`Held: this machine lacks ${held.unmet.join(", ")}.`}</p>
       {!sent && (
         <button type="button" disabled={busy} onClick={() => void press()}>
-          Send as a fleet job
+          {busy ? "sending…" : "Send as a fleet job"}
         </button>
       )}
       {sent && <p role="status">Sent as a fleet job. Another machine will pull it.</p>}
@@ -134,6 +142,10 @@ export type ChatRoute = {
   fallback?: string;
   /** FD-8 (#378): a Claude handoff that moved an open chat: the packet the Claude session starts from. */
   packet?: string;
+  /** FD-5 (#433): on a Claude handoff, its model as the core labels it: `Claude <model>`, or not chosen. */
+  claude_label?: string;
+  /** FD-12 (#429): the request this machine holds for the message (`chat_route` only). */
+  held?: Held;
 };
 
 /** One turn in the thread: the person's message, or the answer to it. */
@@ -176,7 +188,9 @@ const defaultImplicit: ChatImplicit = (args) => call<null>("chat_implicit", args
 export function moveLine(route: ChatRoute): string | null {
   if (!route.moved_from) return null;
   const pick = route.pick;
-  const claude = pick?.to === "claude-handoff" ? (pick.model ? `claude/${pick.model}` : "claude") : null;
+  // #433: as the work tree writes it, a handoff Switchboard chose no model for says so.
+  const claude =
+    pick?.to === "claude-handoff" ? `claude/${pick.model ?? "model not chosen by Switchboard"}` : null;
   const to = pick?.to === "service" ? `${pick.service}/${pick.model}` : claude ?? "not recorded";
   return `${route.moved_from.replace(" ", "/")} → ${to}: ${route.moved_why ?? "not recorded"}`;
 }
@@ -200,7 +214,7 @@ export function Chat({
   const [busy, setBusy] = useState(false);
   const [route, setRoute] = useState<ChatRoute | null>(null);
   // FD-8: the handoff the last route made, with the message that made it. The `handoff` prop wins.
-  const [routed, setRouted] = useState<{ reason: string; prompt: string } | null>(null);
+  const [routed, setRouted] = useState<{ reason: string; prompt: string; label?: string } | null>(null);
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [errors, setErrors] = useState<CoreError[]>([]);
   // One rating per turn: the last press. Keyed by the turn's index in the thread.
@@ -279,7 +293,11 @@ export function Chat({
     setErrors([]);
     setRoute(result.ok);
     const pick = result.ok.pick;
-    setRouted(pick && pick.to === "claude-handoff" ? { reason: pick.reason, prompt: result.ok.packet ?? message } : null);
+    setRouted(
+      pick && pick.to === "claude-handoff"
+        ? { reason: pick.reason, prompt: result.ok.packet ?? message, label: result.ok.claude_label }
+        : null,
+    );
     const answer = result.ok;
     // Any reply that names its thread continues it, a queued ask's too (FD-3).
     if (answer.handoff_id) setThreadId(answer.handoff_id);
@@ -315,11 +333,19 @@ export function Chat({
               <ChatHandoff
                 pick={{ ClaudeHandoff: routed.reason }}
                 prompt={routed.prompt}
+                label={routed.label}
                 logImplicit={(signal) => logImplicit(signal, lastAnswer(turns), threadId)}
               />
             )
           )}
-          {held && <ChatHeld held={held} send={(job) => sendAsJob(job, threadId)} />}
+          {held && (
+            // A new held request starts its own offer (key), so one sent before does not hide it.
+            <ChatHeld
+              key={`${held.kind}\u001f${held.request}`}
+              held={held}
+              send={(job) => sendAsJob(job, threadId)}
+            />
+          )}
         </section>
       ) : turns.length === 0 ? (
         <Empty view="Chat" />

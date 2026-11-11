@@ -68,11 +68,13 @@ test("a press sends the held request once", async () => {
   expect(send).toHaveBeenCalledWith(HELD);
 });
 
-test("while the send is out the button is disabled and a second press sends nothing", async () => {
+// #429 (owner ruling 2026-11-11): the send does not block; while it is out the button says
+// "sending…" (this test found it by its old name) and a second press sends nothing.
+test("while the send is out the button says sending…, is disabled and a second press sends nothing", async () => {
   const { send, resolve } = pending();
   render(<ChatHeld held={HELD} send={send} />);
   fireEvent.click(screen.getByRole("button", BUTTON));
-  const button = screen.getByRole("button", BUTTON) as HTMLButtonElement;
+  const button = screen.getByRole("button", { name: "sending…" }) as HTMLButtonElement;
   expect(button.disabled).toBe(true);
   fireEvent.click(button);
   expect(send).toHaveBeenCalledTimes(1);
