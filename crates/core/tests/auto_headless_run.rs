@@ -12,6 +12,7 @@ use switchboard_core::autopilot::run::{
     self, passes_lock_target, run_poll_passes, satellite_dry, satellite_lock_target, Pass,
     PassReport, RunEnv, SatelliteSession,
 };
+use switchboard_core::backup::{BackupOutcome, RepoBackup};
 use switchboard_core::clock::FixedClock;
 use switchboard_core::fleet::FleetBridge;
 use switchboard_core::github::snapshot::SnapshotStore;
@@ -205,6 +206,14 @@ fn demo_world(tag: &str) -> World {
     w
 }
 
+/// The weekly backup as a stub: each repo refused, "stub".
+fn stub_backup(repos: &[String]) -> Result<Vec<RepoBackup>, CoreError> {
+    Ok(repos
+        .iter()
+        .map(|repo| (repo.clone(), Ok(BackupOutcome::Refused("stub".into()))))
+        .collect())
+}
+
 fn run_one(
     w: &World,
     pass: Pass,
@@ -223,6 +232,7 @@ fn run_one(
         transport: github,
         dry_run,
         lock_wait: Duration::ZERO,
+        backup: &stub_backup,
     };
     let mut reports = run_poll_passes(&env, &[pass], starter)?;
     assert_eq!(reports.len(), 1, "one pass, one report");
@@ -388,6 +398,52 @@ fn the_weekly_pass_starts_the_drift_clear_and_names_the_backup() {
     assert_eq!(again.text(), "autopilot weekly: nothing to do\n");
 }
 
+/// #432 (ruling 8): the weekly backup runs inside the passes lock, so no other run's passes
+/// start while it works; a dry run backs up nothing.
+#[test]
+fn the_weekly_backup_runs_inside_the_passes_lock() {
+    let w = demo_world("backup-lock");
+    let clock = FixedClock::at(SUNDAY_AFTER_SIX);
+    let github = FakeGitHub::default();
+    let seen: Mutex<Vec<(Vec<String>, bool)>> = Mutex::new(Vec::new());
+    let target = passes_lock_target(&w.data);
+    let backup = |repos: &[String]| -> Result<Vec<RepoBackup>, CoreError> {
+        let free = FileLock::take(&target, Duration::ZERO).is_ok();
+        seen.lock().unwrap().push((repos.to_vec(), !free));
+        stub_backup(repos)
+    };
+    let env = |dry_run: bool| RunEnv {
+        data_dir: &w.data,
+        pipeline_root: &w.pipeline,
+        dev_root: &w.dev,
+        machine: Some("test-box"),
+        clock: &clock,
+        utc_offset_secs: Some(PACIFIC),
+        transport: &github,
+        dry_run,
+        lock_wait: Duration::ZERO,
+        backup: &backup,
+    };
+    let mut starter = FakeStarter::default();
+    let dry = run_poll_passes(&env(true), &[Pass::Weekly], &mut starter).unwrap();
+    assert_eq!(dry[0].backup, ["iannitram/demo"]);
+    assert!(dry[0].backups.is_empty());
+    assert!(
+        seen.lock().unwrap().is_empty(),
+        "a dry run backs up nothing"
+    );
+
+    let real = run_poll_passes(&env(false), &[Pass::Weekly], &mut starter).unwrap();
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [(vec!["iannitram/demo".to_string()], true)],
+        "backed up once, with the passes lock held"
+    );
+    assert_eq!(real[0].backups.len(), 1, "{:?}", real[0]);
+    assert_eq!(real[0].backups[0].outcome, "refused");
+    assert!(!lock::held(&target));
+}
+
 #[test]
 fn the_weekly_pass_waits_when_the_utc_offset_is_not_known() {
     let w = demo_world("no-offset");
@@ -404,6 +460,7 @@ fn the_weekly_pass_waits_when_the_utc_offset_is_not_known() {
         transport: &github,
         dry_run: false,
         lock_wait: Duration::ZERO,
+        backup: &stub_backup,
     };
     let mut starter = FakeStarter::default();
     let reports = run_poll_passes(&env, &[Pass::Weekly], &mut starter).unwrap();
@@ -431,6 +488,7 @@ fn the_window_s_four_passes_come_back_in_its_order() {
         transport: &github,
         dry_run: true,
         lock_wait: Duration::ZERO,
+        backup: &stub_backup,
     };
     let mut starter = FakeStarter::default();
     let reports = run_poll_passes(&env, &Pass::AFTER_POLL, &mut starter).unwrap();

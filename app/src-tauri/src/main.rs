@@ -118,6 +118,9 @@ fn autopilot_after_poll(
         transport,
         dry_run: false,
         lock_wait: Duration::ZERO,
+        // AUTO-5, #432 (ruling 8): the weekly backup runs inside the passes lock, so no other
+        // run's passes start while it works. It holds this poll thread while it runs.
+        backup: &|repos: &[String]| switchboard_core::backup::backup_all(&settings, repos),
     };
     let reports = {
         let _held = state.github.lock().unwrap_or_else(|p| p.into_inner());
@@ -129,18 +132,6 @@ fn autopilot_after_poll(
     };
     for report in reports {
         print_report(&state, &report);
-        if !report.backup.is_empty() {
-            // AUTO-5: the weekly backup is long and holds nothing.
-            let settings = settings.clone();
-            std::thread::spawn(move || {
-                let mut done = run::PassReport::new(run::Pass::Weekly, false);
-                let result = switchboard_core::backup::backup_all(&settings, &report.backup);
-                run::add_backups(&mut done, result);
-                for line in done.lines() {
-                    eprintln!("{line}");
-                }
-            });
-        }
     }
 }
 

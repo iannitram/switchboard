@@ -258,7 +258,13 @@ pub struct RunEnv<'a> {
     /// How long to wait for another run's lock: none for the window (it comes back at the next
     /// poll), a moment for a headless run.
     pub lock_wait: Duration,
+    /// AUTO-5: the weekly backup of the repos given (`backup::backup_all` with the app's
+    /// settings, or a test's fake). #432 (ruling 8): it runs inside the passes lock.
+    pub backup: &'a BackupFn<'a>,
 }
+
+/// The weekly backup of the repos given, one outcome each.
+pub type BackupFn<'a> = dyn Fn(&[String]) -> Result<Vec<RepoBackup>, CoreError> + 'a;
 
 /// The lock target of the poll passes: `<data>/autopilot.json`.
 pub fn passes_lock_target(data_dir: &Path) -> PathBuf {
@@ -274,8 +280,9 @@ pub fn satellite_lock_target(data_dir: &Path) -> PathBuf {
 /// review, roadmap, merge, weekly. One report each. The error is another run holding the lock
 /// (the window, or a headless pass), or a data folder that cannot be made: then nothing ran.
 ///
-/// The weekly report names the repos to back up (`backup`); the caller runs the backup, which
-/// is long and needs nothing held, and adds its rows with `add_backups`.
+/// The weekly report names the repos to back up (`backup`); when the week's run is due the
+/// backup (`RunEnv::backup`) runs inside the passes lock, kept fresh while it works (#432,
+/// ruling 8), and its rows are added with `add_backups`. A dry run backs up nothing.
 pub fn run_poll_passes(
     env: &RunEnv<'_>,
     which: &[Pass],
@@ -391,7 +398,7 @@ fn merge_report(env: &RunEnv<'_>) -> PassReport {
     report
 }
 
-/// AUTO-5: the weekly drift clear and the repos to back up, once Sunday 6am local has passed.
+/// AUTO-5: the weekly drift clear and the backup of the repos, once Sunday 6am local has passed.
 fn weekly_report(env: &RunEnv<'_>, starter: &mut dyn JobStarter) -> PassReport {
     let mut report = PassReport::new(Pass::Weekly, env.dry_run);
     let Some(offset) = env.utc_offset_secs else {
@@ -411,6 +418,10 @@ fn weekly_report(env: &RunEnv<'_>, starter: &mut dyn JobStarter) -> PassReport {
             }
         }
         Err(e) => report.fail("weekly", e),
+    }
+    if !env.dry_run && !report.backup.is_empty() {
+        let result = (env.backup)(&report.backup);
+        add_backups(&mut report, result);
     }
     report
 }
