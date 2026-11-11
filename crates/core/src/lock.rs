@@ -281,6 +281,7 @@ impl FileLock {
         let path = lock_path(target);
         let started = Instant::now();
         let mut looked: Option<Instant> = None;
+        let mut last_try = false;
         loop {
             match std::fs::OpenOptions::new()
                 .write(true)
@@ -311,6 +312,14 @@ impl FileLock {
                 continue;
             }
             if started.elapsed() >= wait {
+                // A holder that ended since the last look (it let the lock go and exited while
+                // the process list was read) is not a reason to give up: take it over and try
+                // once more before saying the lock is held.
+                if !last_try && holder_gone(&path) {
+                    last_try = true;
+                    take_over(&path);
+                    continue;
+                }
                 return Err(busy(target, &path, wait));
             }
             std::thread::sleep(POLL);
@@ -473,12 +482,18 @@ fn busy(target: &Path, path: &Path, wait: Duration) -> CoreError {
     let holder = read_holder(path).unwrap_or_default();
     let what = holder.what.as_deref().unwrap_or("another run");
     let text = match holder.pid {
-        Some(pid) if holder.gone() => format!(
+        // Gone, and the file still names it: a holder that let the lock go and exited while
+        // its process was looked up is not reported as one that died holding it.
+        Some(pid)
+            if holder.gone() && read_holder(path).is_some_and(|now| now.token == holder.token) =>
+        {
+            format!(
             "{} is locked by {what}, process {pid}, which has ended (waited {waited} s for {}); \
              try again, or remove that lock file",
             target.display(),
             path.display()
-        ),
+            )
+        }
         Some(pid) => format!(
             "{} is being changed by {what}, process {pid} (waited {waited} s for {}); wait for \
              it to finish and try again, or check that process {pid} is still working",
@@ -540,6 +555,44 @@ mod tests {
         assert_eq!(Holder::parse("token=abc\npid=1234\nstart=9").start, None);
         assert!(!Holder::parse("").gone());
         assert!(!Holder::parse("tok").gone());
+    }
+
+    /// A holder that ends between two looks of a waiting taker (it let the lock go and exited,
+    /// or died) just before the wait runs out: the taker takes the lock, it does not report a
+    /// holder that has ended.
+    #[test]
+    fn a_holder_that_ends_just_before_the_wait_runs_out_is_taken_over() {
+        let Some(here) = own_place() else {
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("sb-431-last-{}", run_tag()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("state.json");
+        let path = lock_path(&target);
+        // Held by a live process (this one, another token) when the taker first looks.
+        let live = Holder::new(Some("a live run"));
+        std::fs::write(&path, live.text()).unwrap();
+        let dead = Holder {
+            token: "dead".to_string(),
+            place: Some(here),
+            pid: Some(0x7fff_fff0),
+            start: None,
+            what: None,
+        };
+        let swap = {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                // After the look at 1 s, before the wait (1.5 s) runs out; the next look would
+                // be at 2 s.
+                std::thread::sleep(Duration::from_millis(1200));
+                std::fs::write(&path, dead.text()).unwrap();
+            })
+        };
+        let taken = FileLock::take(&target, Duration::from_millis(1500));
+        swap.join().unwrap();
+        assert!(taken.is_ok(), "{:?}", taken.err());
+        drop(taken);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A process id is looked up only where it was written: a holder in a container with a
