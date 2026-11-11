@@ -4,8 +4,9 @@
 // The test crates compile this file in as a module and leave `main` and others unused.
 #![allow(dead_code)]
 
+pub mod autopilot;
 mod cli;
-mod mcp;
+pub mod mcp;
 
 use std::process::ExitCode;
 
@@ -214,7 +215,10 @@ fn main() -> ExitCode {
         }
     };
     let role = match mcp_call(&argv) {
-        None => return cli::run(&argv),
+        None => match autopilot::command(&argv) {
+            Some(code) => return code,
+            None => return cli::run(&argv),
+        },
         Some(Ok(McpCall::Help)) => return cli::emit(&format!("{MCP_USAGE}\n")),
         Some(Ok(McpCall::Version)) => return cli::emit(&format!("{}\n", cli::version_text())),
         Some(Ok(McpCall::Serve(role))) => role,
@@ -237,7 +241,17 @@ fn main() -> ExitCode {
     let core = Core {
         data: cli::data_dir(),
     };
-    match mcp::serve(stdin.lock(), std::io::stdout().lock(), &core, role, &writes) {
+    // #385: the autopilot tools, over the same folders.
+    let transport = || cli::live_transport();
+    let headless = autopilot::Headless::from_env(&SystemClock, &transport, &autopilot::real_backup);
+    let core = autopilot::McpCore {
+        reads: &core,
+        headless: &headless,
+    };
+    let served = mcp::serve(stdin.lock(), std::io::stdout().lock(), &core, role, &writes);
+    // The loops and launchers this server started are waited for before it exits (#379).
+    headless.finish();
+    match served {
         Ok(()) => ExitCode::SUCCESS,
         // #334: the client closed its end of stdout; there is no one left to answer.
         Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,

@@ -143,7 +143,15 @@ fn project_manager_lists_merge_after_the_read_tools() {
     // #384 added the three front-door tools after `merge`.
     assert_eq!(
         tool_names(Some(Role::ProjectManager)),
-        with_extra(&["merge", "ask", "ask_as_job", "rate"])
+        // #385: the autopilot's status read and pass tool.
+        with_extra(&[
+            "autopilot_status",
+            "merge",
+            "ask",
+            "ask_as_job",
+            "rate",
+            "autopilot_pass"
+        ])
     );
 }
 
@@ -216,9 +224,13 @@ fn budget_manager_set_pool_cap_reaches_the_core_once() {
 }
 
 #[test]
-fn satellite_lists_no_write_tool() {
-    // #375: the satellite's one extra tool is a read (`errors`), never a write.
-    assert_eq!(tool_names(Some(Role::Satellite)), with_extra(&["errors"]));
+fn satellite_lists_its_tick_as_its_one_write_tool() {
+    // #375: the satellite reads `errors`. #385: it also reads the autopilot's status, and its
+    // one write tool is its own tick; it holds no other role's write.
+    assert_eq!(
+        tool_names(Some(Role::Satellite)),
+        with_extra(&["errors", "autopilot_status", "satellite_tick"])
+    );
     let write = FakeWrite::default();
     let replies = run(
         Some(Role::Satellite),
