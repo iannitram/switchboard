@@ -6,7 +6,7 @@
 use crate::fleet::FleetBridge;
 use crate::github::queue::{self, Create, QueueStatus, Queued};
 use crate::github::transport::{GitHubTransport, HttpTransport};
-use crate::renumber::{renumber, Now};
+use crate::renumber::{renumber_for, Now, Refs};
 use crate::rules::{self, Caller, GuardedAction, Verdict};
 use crate::settings::Settings;
 use crate::CoreError;
@@ -1866,6 +1866,13 @@ fn restore_issues_made(
 
     let backed_up: HashSet<u64> = titles.iter().map(|(number, _)| *number).collect();
     // What a `#N` in the backup's text names now.
+    // The names the backed-up text calls its own repo by (#365).
+    let mut own_names = vec![manifest.repo.as_str()];
+    own_names.extend(manifest.resolved_repo.as_deref());
+    let refs = Refs {
+        from: &own_names,
+        to: repo,
+    };
     let number_now = |old: u64| match now.get(&old) {
         Some(&new) => Now::Is(new),
         None if backed_up.contains(&old) => Now::NotYet,
@@ -1894,7 +1901,7 @@ fn restore_issues_made(
             report.comments_waiting += 1;
             continue;
         };
-        let body = renumber(&text(comment, "body"), &number_now);
+        let body = renumber_for(&text(comment, "body"), Some(&refs), &number_now);
         if body.waiting {
             report.comments_waiting += 1;
             continue;
@@ -1925,7 +1932,7 @@ fn restore_issues_made(
     for (old, issue) in &numbered {
         let closed = has_state(issue, "closed");
         let body = text(issue, "body");
-        let renumbered = renumber(&body, &number_now);
+        let renumbered = renumber_for(&body, Some(&refs), &number_now);
         let found = now
             .get(old)
             .and_then(|number| live.iter().find(|l| l.number == *number));

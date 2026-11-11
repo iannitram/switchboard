@@ -1476,6 +1476,64 @@ fn old_issue_numbers_in_comments_and_bodies_get_the_new_numbers() {
     assert_eq!(queued(&f).len(), 4, "nothing more was queued");
 }
 
+/// #365, owner ruling of 2026-11-11: a full link and `owner/name#N` are rewritten too, only
+/// when they name the repo being restored (without case), and then name the repo the restore
+/// goes to. Another repo, another host, a code span and a number nothing maps stay.
+#[test]
+fn full_links_and_named_numbers_of_the_restored_repo_get_the_new_numbers() {
+    let issue = |n: u64, title: &str, body: &str| {
+        json!({"number": n, "title": title, "body": body, "state": "open",
+               "labels": [], "milestone": null})
+    };
+    let first = "[#5](https://github.com/Owner/Demo/issues/5), owner/demo#5, \
+                 https://github.com/other/repo/issues/5, other/repo#5, \
+                 `owner/demo#5`, owner/demo#7, https://example.invalid/owner/demo/issues/5";
+    let answers = RecordedAnswers {
+        repo: "owner/demo".to_string(),
+        issues: vec![issue(5, "B", "plain"), issue(1, "A", first)],
+        comments: vec![
+            json!({"body": "see https://github.com/owner/demo/pull/5 and OWNER/DEMO#5",
+            "issue_url": "https://api.github.com/repos/owner/demo/issues/1"}),
+        ],
+        ..RecordedAnswers::default()
+    };
+    let f = fixture_of("links", &answers);
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            listed(&[]),
+            answer(
+                200,
+                json!([{"number": 2, "title": "B", "state": "open", "body": "plain"},
+                       {"number": 1, "title": "A", "state": "open", "body": first}]),
+            ),
+            answer(200, json!([])),
+        ],
+    );
+    let report = restore_issues(&f.fleet, &f.backup, NEW, &remote(&f, &api)).unwrap();
+    let comments: Vec<Value> = queued(&f)
+        .into_iter()
+        .filter(|item| item["kind"] == "comment")
+        .collect();
+    assert_eq!(
+        comments,
+        vec![
+            json!({"kind": "comment", "repo": NEW, "number": 1, "marker": null,
+            "body": format!("see https://github.com/{NEW}/pull/2 and {NEW}#2")})
+        ]
+    );
+    let rewritten = format!(
+        "[#2](https://github.com/{NEW}/issues/2), {NEW}#2, \
+         https://github.com/other/repo/issues/5, other/repo#5, \
+         `owner/demo#5`, owner/demo#7, https://example.invalid/owner/demo/issues/5"
+    );
+    assert_eq!(
+        patch_bodies(&api),
+        vec![(format!("/repos/{NEW}/issues/1"), json!({"body": rewritten}))]
+    );
+    assert_eq!(report.renumbered, 1);
+}
+
 /// A body someone changed in the repo is not the backup's any more: it is left as it is, and
 /// the report names it.
 #[test]
