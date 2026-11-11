@@ -369,7 +369,10 @@ fn a_killed_satellite_run_leaves_its_loop_to_the_next_run() {
         std::thread::sleep(Duration::from_millis(200));
     }
     if cfg!(windows) {
-        let tl = Command::new("tasklist").args(["/FO", "CSV", "/NH"]).output().unwrap();
+        let tl = Command::new("tasklist")
+            .args(["/FO", "CSV", "/NH"])
+            .output()
+            .unwrap();
         for line in String::from_utf8_lossy(&tl.stdout).lines() {
             let l = line.to_lowercase();
             if l.contains("py") || l.contains("switchboard") {
