@@ -866,3 +866,27 @@ fn a_failed_backup_is_a_row_with_the_error_as_its_reason() {
         }
     );
 }
+
+/// #433: `HttpFiles::fetch_to` streams a file to the path asked for and returns its size; a
+/// download cut short or a 404 is an error and leaves no file behind.
+#[test]
+fn http_files_streams_to_disk_and_leaves_nothing_on_failure() {
+    let (base, server) = http_server(3);
+    let files = HttpFiles::new(&Token).unwrap();
+    let dir = scratch("stream");
+    let ok = dir.join("app.zip");
+
+    assert_eq!(files.fetch_to(&format!("{base}/app.zip"), &ok).unwrap(), 9);
+    assert_eq!(std::fs::read(&ok).unwrap(), b"zip bytes");
+    let short = dir.join("short.zip");
+    assert!(files
+        .fetch_to(&format!("{base}/short.zip"), &short)
+        .is_err());
+    assert!(!short.exists());
+    let gone = dir.join("gone.zip");
+    assert!(files.fetch_to(&format!("{base}/gone.zip"), &gone).is_err());
+    assert!(!gone.exists());
+    server.join().unwrap();
+    assert_eq!(names(&dir), ["app.zip"]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
