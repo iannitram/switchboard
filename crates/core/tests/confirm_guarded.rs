@@ -778,6 +778,9 @@ fn dropping_a_held_restore_removes_its_record_too() {
     );
     assert_eq!(run.calls.borrow().len(), 1, "the drop ran no restore");
     assert!(run.archives.borrow().is_empty());
+    // The second confirm, after the drop, finds nothing to act on.
+    assert!(run.run(&data, &text, &app).is_err());
+    assert_eq!(run.calls.borrow().len(), 1, "no confirm runs after a drop");
 }
 
 /// Dropping what is not there, or an item that is no archive or restore request, is refused

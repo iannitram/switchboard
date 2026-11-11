@@ -252,7 +252,8 @@ impl Writes for CliWrites {
             .as_deref()
             .ok_or("waiting: set SWITCHBOARD_DATA to the app data folder")?;
         LocalItems::new(data)
-            .add(item.clone())
+            .add_new(item.clone())
+            .map(|_| ())
             .map_err(|e| format!("waiting: {e}"))
     }
 

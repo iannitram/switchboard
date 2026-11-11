@@ -177,7 +177,8 @@ impl WriteCore for CoreWrites<'_> {
 
     fn request(&self, action: &GuardedAction, text: &str) -> Result<(), String> {
         LocalItems::new(self.data_dir()?)
-            .add(guarded_item(action, text, self.clock.now()))
+            .add_new(guarded_item(action, text, self.clock.now()))
+            .map(|_| ())
             .map_err(|e| format!("waiting: {e}"))
     }
 

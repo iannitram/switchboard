@@ -176,3 +176,18 @@ fn drop_without_a_kind_and_one_repo_is_a_usage_error() {
     }
     assert_eq!(waiting(&s), [ARCHIVE]);
 }
+
+/// `switchboard restore` again, while the first confirm's held pass waits, leaves that item as
+/// it is: filed afresh, the next confirm would push the refs over the live repo again.
+#[test]
+fn asking_again_leaves_a_held_restore_as_it_is() {
+    let s = setup("held-again");
+    run(&["restore", "switchboard"], &s);
+    let local = LocalItems::new(&s.data);
+    let mut held = local.load().unwrap().remove(0);
+    held.action = switchboard_core::confirm::HELD_ACTION.to_string();
+    held.since = NOW - 60;
+    local.add(held.clone()).unwrap();
+    run(&["restore", "o/switchboard"], &s);
+    assert_eq!(local.load().unwrap(), [held]);
+}

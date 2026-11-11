@@ -286,6 +286,19 @@ impl LocalItems {
         self.write(&items)
     }
 
+    /// Push `item` unless an item with its `source` is there already; that one is kept as it
+    /// is (#347: a request asked for again must not reset a held restore's item, whose next
+    /// confirm would then run the whole restore again). True when it was added.
+    pub fn add_new(&self, item: Item) -> Result<bool, CoreError> {
+        let mut items = self.load()?;
+        if items.iter().any(|old| old.source == item.source) {
+            return Ok(false);
+        }
+        items.push(item);
+        self.write(&items)?;
+        Ok(true)
+    }
+
     /// True when an item was removed; nothing removed writes nothing.
     pub fn remove(&self, source: &Source) -> Result<bool, CoreError> {
         let mut items = self.load()?;

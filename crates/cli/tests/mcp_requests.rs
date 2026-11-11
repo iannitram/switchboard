@@ -381,3 +381,34 @@ fn drop_request_takes_the_request_out_and_does_nothing_else() {
     );
     assert_eq!(waiting(&dir), [RESTORE]);
 }
+
+/// Asking again for a restore whose first confirm held something back leaves that item as it
+/// is: were it filed afresh, the next confirm would run the whole restore again (push the refs
+/// over the live repo) instead of only what was held back.
+#[test]
+fn asking_again_leaves_a_held_restore_as_it_is() {
+    let dir = data("held");
+    let pm = Some(Role::ProjectManager);
+    run(
+        pm.clone(),
+        &dir,
+        &[call(1, "request_restore", json!({ "repo": "switchboard" }))],
+    );
+    let local = LocalItems::new(&dir);
+    let mut held = items(&dir).remove(0);
+    held.action = switchboard_core::confirm::HELD_ACTION.to_string();
+    held.why = "The restore over o/switchboard pushed the backup's refs; 2 comments wait.".into();
+    held.since = NOW - 60;
+    local.add(held.clone()).unwrap();
+    let replies = run(
+        pm,
+        &dir,
+        &[call(
+            2,
+            "request_restore",
+            json!({ "repo": "o/switchboard" }),
+        )],
+    );
+    assert!(!text(&replies[0]).1);
+    assert_eq!(items(&dir), [held]);
+}
