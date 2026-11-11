@@ -57,14 +57,16 @@ impl AutopilotState {
             .map_err(|e| CoreError::Parse(format!("{}: {e}", path.display())))
     }
 
-    /// Write `<data_dir>/autopilot.json` as pretty JSON, making the folder.
+    /// Write `<data_dir>/autopilot.json` as pretty JSON, making the folder. Written whole
+    /// (`lock::write_whole`, #431): the status read, which takes no lock, finds the old state
+    /// or the new one, never half of one.
     pub fn save(&self, data_dir: &Path) -> Result<(), CoreError> {
         std::fs::create_dir_all(data_dir)
             .map_err(|e| CoreError::Io(format!("{}: {e}", data_dir.display())))?;
         let path = data_dir.join(STATE_FILE);
         let text =
             serde_json::to_string_pretty(self).map_err(|e| CoreError::Parse(e.to_string()))?;
-        std::fs::write(&path, text).map_err(|e| CoreError::Io(format!("{}: {e}", path.display())))
+        crate::lock::write_whole(&path, text.as_bytes())
     }
 }
 
@@ -739,18 +741,23 @@ pub fn record_refused_merges(
     refused: &[RefusedMerge],
     at: UnixSeconds,
 ) -> Result<(), CoreError> {
-    let local = LocalItems::new(data_dir);
     if refused.is_empty() {
         return Ok(());
     }
-    let there = local.load()?;
-    for r in refused {
-        let mut item = refused_merge_item(r, at);
-        if let Some(old) = there.iter().find(|old| old.source == item.source) {
-            item.since = old.since;
+    // One change under the file's lock (#431): the `since` kept is the one there now.
+    LocalItems::new(data_dir).change(|items| {
+        for r in refused {
+            let mut item = refused_merge_item(r, at);
+            match items.iter_mut().find(|old| old.source == item.source) {
+                Some(old) => {
+                    item.since = old.since;
+                    *old = item;
+                }
+                None => items.push(item),
+            }
         }
-        local.add(item)?;
-    }
+        true
+    })?;
     Ok(())
 }
 
@@ -762,8 +769,6 @@ pub fn clear_settled_merges(
     snaps: &[RepoSnapshot],
     merged: &[Merged],
 ) -> Result<Vec<(String, u64)>, CoreError> {
-    let local = LocalItems::new(data_dir);
-    let there = local.load()?;
     let mut settled: Vec<(String, u64)> = Vec::new();
     for snap in snaps {
         for pr in snap.pulls.iter().filter(|pr| pr.state != "open") {
@@ -776,14 +781,32 @@ pub fn clear_settled_merges(
     settled.sort();
     settled.dedup();
     let mut cleared = Vec::new();
-    for (repo, pr) in settled {
-        let source = Source::GuardedAction {
-            text: format!("Merge {repo}#{pr}"),
-        };
-        if there.iter().any(|item| item.source == source) && local.remove(&source)? {
-            cleared.push((repo, pr));
-        }
+    let local = LocalItems::new(data_dir);
+    let merge_item = |item: &Item| {
+        settled.iter().any(|(repo, pr)| {
+            item.source
+                == Source::GuardedAction {
+                    text: format!("Merge {repo}#{pr}"),
+                }
+        })
+    };
+    if !local.load()?.iter().any(merge_item) {
+        return Ok(cleared);
     }
+    // One change under the file's lock (#431); nothing cleared writes nothing.
+    local.change(|items| {
+        for (repo, pr) in settled {
+            let source = Source::GuardedAction {
+                text: format!("Merge {repo}#{pr}"),
+            };
+            let before = items.len();
+            items.retain(|item| item.source != source);
+            if items.len() != before {
+                cleared.push((repo, pr));
+            }
+        }
+        !cleared.is_empty()
+    })?;
     Ok(cleared)
 }
 
