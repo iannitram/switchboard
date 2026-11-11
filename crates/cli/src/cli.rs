@@ -253,7 +253,7 @@ impl Writes for CliWrites {
             .map_err(|why| format!("merge {repo}#{pr}: {why}"))
     }
 
-    /// WAIT-1: the item goes into the local items; asking twice keeps one (same `source`).
+    /// WAIT-1: the item goes into the local items; asking twice, from any face, keeps one.
     fn waiting(&self, item: &Item) -> Result<(), String> {
         let data = self
             .data

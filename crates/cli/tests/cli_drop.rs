@@ -191,3 +191,29 @@ fn asking_again_leaves_a_held_restore_as_it_is() {
     run(&["restore", "o/switchboard"], &s);
     assert_eq!(local.load().unwrap(), [held]);
 }
+
+/// #347, across faces: while a restore held from MCP's request waits, `switchboard restore` for
+/// that repo files no second item. A plain one beside it would confirm as a whole restore over
+/// the live repo.
+#[test]
+fn a_restore_held_from_mcp_gets_no_second_request_from_the_cli() {
+    let s = setup("held-mcp");
+    let local = LocalItems::new(&s.data);
+    let mut held = switchboard_core::waiting::guarded_item(
+        &switchboard_core::rules::GuardedAction::RestoreOverLive {
+            repo: "o/switchboard".to_string(),
+        },
+        "I was asked from MCP to restore over o/switchboard",
+        NOW - 60,
+    );
+    held.action = switchboard_core::confirm::HELD_ACTION.to_string();
+    local.add(held.clone()).unwrap();
+    for repo in ["switchboard", "o/switchboard"] {
+        run(&["restore", repo], &s);
+        assert_eq!(local.load().unwrap(), [held.clone()], "{repo}");
+    }
+    // An archive request for the same repo is another action and is filed.
+    run(&["delete", "switchboard"], &s);
+    assert_eq!(waiting(&s).len(), 2);
+    assert_eq!(waiting(&s)[1], ARCHIVE);
+}

@@ -29,8 +29,9 @@ use crate::waiting::{Item, LocalItems, Source};
 use crate::CoreError;
 
 /// The action of a restore request whose first confirm held something back. An item with this
-/// action is confirmed with `Pass::Held`. A new request from the CLI for the same repo writes
-/// the item afresh, and its confirm is a whole restore again.
+/// action is confirmed with `Pass::Held`. While it waits, no face files a second restore
+/// request for that repo (`LocalItems::add_new` keeps this item, whichever face asks). A whole
+/// restore again needs the request dropped first, then asked for anew.
 pub const HELD_ACTION: &str = "Queue what the restore held back";
 
 /// What a confirmed action did, as the face shows it.

@@ -520,10 +520,12 @@ fn a_refused_second_confirm_runs_nothing_and_the_request_stays_held() {
     unchanged(&data, &before);
 }
 
-/// A new request from the CLI for the same repo writes the item afresh: its confirm is a whole
-/// restore again, as the confirm step then says.
+/// A whole restore again takes two steps: drop the held request, then ask anew. Asking alone
+/// (from the CLI or MCP, `LocalItems::add_new`) leaves the held item, and the next confirm is
+/// still only what was held back. (#417 had a new request make the next confirm whole; #347
+/// reversed that on purpose.)
 #[test]
-fn a_new_request_for_a_held_restore_is_a_whole_restore_again() {
+fn a_held_restore_is_a_whole_restore_again_only_after_a_drop_and_a_new_request() {
     let (data, _) = seeded("held-again");
     let mut held = report();
     held.issues.comments_waiting = 1;
@@ -531,9 +533,34 @@ fn a_new_request_for_a_held_restore_is_a_whole_restore_again() {
     let app = caller(Face::Gui, None, false, true);
     let text = text_of(&asked(&restore()));
     restore_run.run(&data, &text, &app).unwrap();
-    LocalItems::new(&data).add(asked(&restore())).unwrap();
+
+    // Asked again, by either face: nothing is added, and the confirm is the held pass.
+    let local = LocalItems::new(&data);
+    let before = local.load().unwrap();
+    assert!(!local.add_new(asked(&restore())).unwrap());
+    let other_face = guarded_item(
+        &restore(),
+        "I was asked from MCP to restore over owner/alpha",
+        NOW,
+    );
+    assert!(!local.add_new(other_face).unwrap());
+    assert_eq!(local.load().unwrap(), before);
     restore_run.run(&data, &text, &app).unwrap();
-    assert_eq!(*restore_run.passes.borrow(), vec![Pass::Whole, Pass::Whole]);
+    let kinds = |run: &Restore| -> Vec<&str> {
+        let passes = run.passes.borrow();
+        let kind = |pass: &Pass| match pass {
+            Pass::Whole => "whole",
+            Pass::Held(_) => "held",
+        };
+        passes.iter().map(kind).collect()
+    };
+    assert_eq!(kinds(&restore_run), ["whole", "held"]);
+
+    // Dropped, then asked anew: the confirm is a whole restore.
+    drop_request(&data, &text, &app).unwrap();
+    assert!(local.add_new(asked(&restore())).unwrap());
+    restore_run.run(&data, &text, &app).unwrap();
+    assert_eq!(kinds(&restore_run), ["whole", "held", "whole"]);
 }
 
 /// #347, owner decision 2: the repo's `owner/name` must be typed, letter for letter, for the
