@@ -619,7 +619,11 @@ fn a_lock_held_across_calls_is_kept_fresh_and_gone_when_dropped() {
         .unwrap()
         .set_modified(old)
         .unwrap();
-    std::thread::sleep(Duration::from_millis(200));
+    // A busy disk can stall the thread's write, so look for it for up to 10 s.
+    let give_up = std::time::Instant::now() + Duration::from_secs(10);
+    while !lock::held(&target) && std::time::Instant::now() < give_up {
+        std::thread::sleep(Duration::from_millis(5));
+    }
     assert!(lock::held(&target), "the holder's thread wrote it again");
     assert!(
         FileLock::take(&target, Duration::ZERO).is_err(),

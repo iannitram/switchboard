@@ -966,9 +966,14 @@ static LAUNCHERS: std::sync::Mutex<Vec<std::thread::JoinHandle<()>>> =
 /// (#385). The window never calls it: its process lives on. A headless run does before it
 /// exits, or a launcher that died would leave no exit code and hold the Project Manager's slot
 /// until the job times out (#379).
+///
+/// The list stays locked through the joins, so a second caller waits for the first's joins
+/// and none returns while a launcher it started is still running. A waiter only waits for
+/// its child and writes one file, so it never asks for this lock; a `start` on another
+/// thread waits for the joins to end.
 pub fn wait_for_launchers() {
-    let waiting = std::mem::take(&mut *LAUNCHERS.lock().unwrap_or_else(|p| p.into_inner()));
-    for waiter in waiting {
+    let mut launchers = LAUNCHERS.lock().unwrap_or_else(|p| p.into_inner());
+    for waiter in launchers.drain(..) {
         let _ = waiter.join();
     }
 }
