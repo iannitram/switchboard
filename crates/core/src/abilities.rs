@@ -203,6 +203,9 @@ pub struct AbilitiesIndex {
     /// seeds "search the web" -> `web`, "write code" -> `code`, and "ask claude" and "open in
     /// claude" -> `claude`; `with_ask` adds one (a skill name). Phrases are tried in this order.
     pub asks: Vec<(String, String)>,
+    /// #428: per id, the Claude subscription tier `ok.claude` names (`sonnet`, `opus`), when it
+    /// is a string: the model a Claude handoff for that kind goes to.
+    pub claude_tiers: BTreeMap<String, String>,
 }
 
 impl AbilitiesIndex {
@@ -223,9 +226,17 @@ impl AbilitiesIndex {
         })?;
         let mut entries = Vec::with_capacity(map.len());
         let mut models = BTreeMap::new();
+        let mut claude_tiers = BTreeMap::new();
         for (id, entry) in map {
             entries.push(parse_entry(id, entry)?);
             models.insert(id.clone(), parse_models(id, entry, fleet)?);
+            if let Some(tier) = entry
+                .get("ok")
+                .and_then(|ok| ok.get("claude"))
+                .and_then(Value::as_str)
+            {
+                claude_tiers.insert(id.clone(), tier.to_string());
+            }
         }
         entries.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(AbilitiesIndex {
@@ -236,6 +247,7 @@ impl AbilitiesIndex {
                 .iter()
                 .map(|(phrase, need)| (phrase.to_string(), need.to_string()))
                 .collect(),
+            claude_tiers,
         })
     }
 

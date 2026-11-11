@@ -38,6 +38,13 @@ if sys.argv[1:2] == ["actions"]:
 if sys.argv[1:3] == ["budget", "allow"]:
     braked = os.environ.get("STUB_BRAKED", "").split(",")
     sys.exit(75 if sys.argv[3] in braked else 0)
+if sys.argv[1:3] == ["budget", "--json"]:
+    import json
+    braked = os.environ.get("STUB_BRAKED", "").split(",")
+    pools = ["claude", "claudeapi", "chatgpt", "deepseek", "gemini", "qwen"]
+    sys.stdout.write(json.dumps({p: {"verdict": "brake" if p in braked else "on-pace",
+                                     "reading_age_min": 5, "stale": False} for p in pools}))
+    sys.exit(0)
 sys.exit(2)
 "#;
 
@@ -394,6 +401,7 @@ fn only_a_kind_with_a_qwen_row_falls_back() {
     let handoff = ChatRoute {
         pick: ChatPick::ClaudeHandoff {
             reason: "ask claude".to_string(),
+            model: None,
         },
         ..general.clone()
     };
@@ -556,5 +564,22 @@ fn thumbs_on_fallback_answers_never_teach_routing() {
     assert_eq!(
         learned_pick("general-question", &plain),
         Some(("qwen".to_string(), "qwen3.8-27b".to_string()))
+    );
+}
+
+// --- #428: a Claude handoff carries the model it goes to ---
+
+#[test]
+fn a_claude_handoff_route_names_the_kinds_claude_tier() {
+    let w = World::new("claude-tier");
+    w.kind.set("claude-plan");
+    let asked = w.ask("", true, "plan the quarter", None, true);
+    assert_eq!(
+        asked.reply.route.pick,
+        ChatPick::ClaudeHandoff {
+            reason: "claude-plan: the Claude subscription is the kind's pick and under budget"
+                .to_string(),
+            model: Some("opus".to_string()),
+        }
     );
 }

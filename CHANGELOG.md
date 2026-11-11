@@ -3,6 +3,8 @@
 Newest first. One line per change of stage, release or decision that the next session needs.
 
 
+- 2026-11-11 Front door ruling (#430, FD-3): `switchboard ask --dry-run` routes over the budget snapshot with no `budget allow` call, so it never refreshes a paid pool's reading, and says how old a stale snapshot is.
+- 2026-11-11 Front door rulings (#428, FD-5 to FD-7): a sticky chat moved off a braked pool says so and moves back when the brake lifts; the handoff summary is cached with the chat and only new messages are summarised; a Claude handoff move stores its model and the thread keeps it; open questions match after trim, lower-case and collapsed spaces.
 - 2026-11-11 Front door ruling (#427, FD-3): only a kind with a Qwen row falls back to Qwen (a braked pool or an ask waiting for Claude's budget); a Qwen failure mid-answer holds the ask for Claude with no partial answer kept; a thumbs down on a fallback answer holds the same ask; thumbs on a fallback never teach routing.
 - 2026-11-11 Docs: machine paths in SPEC.md and docs/code-map.md replaced with placeholders (R01); repo-lint clean.
 - 2026-11-11 Front door ruling (#377, FD-3): a queued ask stays manual; an ask whose pool is braked or over budget is answered by the local Qwen lane when it is up, and the route reason says so; it is queued only when Qwen is down too.

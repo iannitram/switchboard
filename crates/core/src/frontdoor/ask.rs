@@ -21,6 +21,10 @@ pub struct Asked {
     #[serde(flatten)]
     pub reply: ChatReply,
     pub dry_run: bool,
+    /// #430: on a dry run whose budget snapshot holds a stale reading, how old:
+    /// `stale (<pool> <age> min old, ...)` (`chat::SnapshotGate::stale_line`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub budget_snapshot: Option<String>,
 }
 
 /// What an ask reads from outside the core; `ask` passes the real ones.
@@ -42,6 +46,10 @@ pub struct Seams<'a> {
 /// for budget then falls back to the local Qwen lane when it is up (`chat::qwen_fallback_on`,
 /// FD-3). Unless `dry_run`, `answer` then answers it and stores the turn; a dry run's reply is
 /// the route (and the fallback's reason) alone.
+///
+/// #430: a dry run never asks `fleet budget allow` (which may refresh a stale paid pool's
+/// reading) and writes nothing: it routes over the budget snapshot on disk
+/// (`chat::SnapshotGate`) and says how old the snapshot is when a reading in it is stale.
 pub fn ask_on(
     fleet: &FleetBridge,
     data_dir: &Path,
@@ -50,19 +58,24 @@ pub fn ask_on(
     dry_run: bool,
     seams: &Seams,
 ) -> Result<Asked, CoreError> {
-    let route = chat::route_in_thread_on(
-        fleet,
-        seams.machine,
-        data_dir,
-        handoff_id,
-        message,
-        chat::estimate_complexity(message),
-        |message, index, gate, complexity| {
-            router::route(message, index, gate, complexity, seams.small)
-        },
-    )?;
-    let fallback = chat::qwen_fallback_on(fleet, seams.machine, &route, seams.qwen_up)?;
+    let router = |message: &str, index: &_, gate: &dyn router::BudgetGate, complexity| {
+        router::route(message, index, gate, complexity, seams.small)
+    };
+    let complexity = chat::estimate_complexity(message);
     if dry_run {
+        let snapshot = chat::SnapshotGate::read(fleet)?;
+        let route = chat::route_in_thread_gated(
+            fleet,
+            seams.machine,
+            data_dir,
+            handoff_id,
+            message,
+            complexity,
+            &snapshot,
+            router,
+        )?;
+        let fallback =
+            chat::qwen_fallback_gated(fleet, seams.machine, &route, &snapshot, seams.qwen_up)?;
         let reply = match fallback {
             Some(fallback) => ChatReply {
                 fallback: Some(fallback.reason),
@@ -70,8 +83,22 @@ pub fn ask_on(
             },
             None => answer::route_alone(route),
         };
-        return Ok(Asked { reply, dry_run });
+        return Ok(Asked {
+            reply,
+            dry_run,
+            budget_snapshot: snapshot.stale_line(),
+        });
     }
+    let route = chat::route_in_thread_on(
+        fleet,
+        seams.machine,
+        data_dir,
+        handoff_id,
+        message,
+        complexity,
+        router,
+    )?;
+    let fallback = chat::qwen_fallback_on(fleet, seams.machine, &route, seams.qwen_up)?;
     let qwen = answer::qwen_base_url(fleet, seams.machine);
     let ctx = AnswerContext {
         data_dir,
@@ -83,7 +110,11 @@ pub fn ask_on(
         Some(fallback) => answer::answer_fallback(fallback, message, handoff_id, &ctx)?,
         None => answer::answer_route(route, message, handoff_id, &ctx)?,
     };
-    Ok(Asked { reply, dry_run })
+    Ok(Asked {
+        reply,
+        dry_run,
+        budget_snapshot: None,
+    })
 }
 
 /// FD-1, FD-11: route one message in thread `handoff_id` (None starts one) and answer it, as

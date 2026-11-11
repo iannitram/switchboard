@@ -195,6 +195,7 @@ fn each_signal_says_why_the_chat_moved() {
         kind: None,
         pick: ChatPick::ClaudeHandoff {
             reason: "claude: needs a Claude session with tools".to_string(),
+            model: None,
         },
     };
     let reply = chat.send(handoff, "ask Claude to refactor it");
@@ -203,7 +204,7 @@ fn each_signal_says_why_the_chat_moved() {
         moves(&chat.rows()),
         [line(
             ("qwen", "qwen-small"),
-            ("claude", "not recorded"),
+            ("claude", "sonnet"),
             "I said \"ask Claude\""
         )]
     );
@@ -463,4 +464,27 @@ fn a_question_asked_again_and_answered_is_open_no_more() {
         .last()
         .unwrap()
         .contains("Open questions"));
+}
+
+#[test]
+fn open_questions_match_after_trim_case_and_spaces() {
+    // #428: the same question with other case or spacing is one open question, and asking it
+    // again in other case or spacing and getting an answer closes it. No fuzzy matching.
+    let chat = Chat::opened("normalised");
+    let wait = ChatRoute {
+        pick: ChatPick::Wait {
+            reason: "waiting for budget: quick-lookup".to_string(),
+        },
+        ..qwen()
+    };
+    chat.send(wait.clone(), "Is a list a monad");
+    chat.send(wait.clone(), "  is a  LIST a monad ");
+    chat.send(wait, "is a list a monoid");
+    assert_eq!(
+        open_questions(&chat.rows()),
+        ["Is a list a monad", "is a list a monoid"]
+    );
+    chat.replies(&["Yes."]);
+    chat.send(qwen(), "IS A LIST\ta monad");
+    assert_eq!(open_questions(&chat.rows()), ["is a list a monoid"]);
 }

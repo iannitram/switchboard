@@ -449,6 +449,7 @@ fn a_claude_handoff_in_an_open_chat_carries_the_packet() {
         kind: None,
         pick: ChatPick::ClaudeHandoff {
             reason: "ask claude".to_string(),
+            model: None,
         },
     };
     let reply = chat.send(route, "ask Claude to refactor it", Some("t"));
@@ -470,4 +471,217 @@ fn a_claude_handoff_in_an_open_chat_carries_the_packet() {
     // Only the summary was asked of a model; no turn is stored for Claude.
     assert_eq!(chat.calls().len(), 2);
     assert_eq!(ThreadStore::new(&data).turns("t").unwrap().len(), 2);
+}
+
+// --- #428 (owner rulings 2026-11-11) ---
+
+/// A Claude handoff route with no model chosen yet.
+fn ask_claude() -> ChatRoute {
+    ChatRoute {
+        step: "explicit ask claude".to_string(),
+        kind: None,
+        pick: ChatPick::ClaudeHandoff {
+            reason: "ask claude".to_string(),
+            model: None,
+        },
+    }
+}
+
+fn deepseek() -> Pick {
+    Pick::Service {
+        service: "deepseek".to_string(),
+        model: "deepseek-chat".to_string(),
+    }
+}
+
+#[test]
+fn a_chat_moved_off_a_braked_pool_moves_back_when_the_brake_lifts() {
+    let root = root("brake-back");
+    let data = root.join("data");
+    let chat = Chat::new(&data);
+    opened(&data, &chat);
+
+    // qwen is braked: the chat is routed again and moves to deepseek, saying why.
+    let (route, asked, _) = route_in(&root, "qwen", &data, Some("t"), "and a functor", deepseek());
+    assert!(asked);
+    chat.replies(&["Monads so far.", "A functor maps."]);
+    let reply = chat.send(route, "and a functor", Some("t"));
+    assert_eq!(reply.moved_from.as_deref(), Some("qwen qwen-small"));
+    assert_eq!(
+        reply.moved_why.as_deref(),
+        Some("qwen is braked or over budget")
+    );
+
+    // While qwen stays braked the chat stays on deepseek.
+    let (route, asked, _) = route_in(&root, "qwen", &data, Some("t"), "and a monoid", handoff());
+    assert!(!asked);
+    assert_eq!(route.step, "sticky chat");
+    assert_eq!(
+        route.pick,
+        ChatPick::Service {
+            service: "deepseek".to_string(),
+            model: "deepseek-chat".to_string()
+        }
+    );
+
+    // The brake lifts: the chat moves back to qwen, and says so.
+    let (route, asked, _) = route_in(&root, "", &data, Some("t"), "and a monoid", handoff());
+    assert!(!asked, "moving back is not a new route");
+    assert_eq!(route.step, "brake lifted");
+    assert_eq!(
+        route.pick,
+        ChatPick::Service {
+            service: "qwen".to_string(),
+            model: "qwen-small".to_string()
+        }
+    );
+    chat.replies(&["Monads and functors.", "A monoid combines."]);
+    let reply = chat.send(route, "and a monoid", Some("t"));
+    assert_eq!(reply.moved_from.as_deref(), Some("deepseek deepseek-chat"));
+    assert_eq!(
+        reply.moved_why.as_deref(),
+        Some("qwen is back in budget, so the chat moved back")
+    );
+
+    // Home again: the chat stays on qwen.
+    let (route, asked, _) = route_in(&root, "", &data, Some("t"), "thanks", handoff());
+    assert!(!asked);
+    assert_eq!(route.step, "sticky chat");
+}
+
+#[test]
+fn a_move_made_by_a_signal_is_never_moved_back() {
+    let root = root("signal-stays");
+    let data = root.join("data");
+    let chat = Chat::new(&data);
+    opened(&data, &chat);
+    log_rating(&data, "t", 1, "down", "qwen", "qwen-small", None).unwrap();
+    let (route, _, _) = route_in(&root, "", &data, Some("t"), "and a functor", deepseek());
+    chat.replies(&["Monads so far.", "A functor maps."]);
+    chat.send(route, "and a functor", Some("t"));
+    let (route, asked, _) = route_in(&root, "", &data, Some("t"), "and a monoid", handoff());
+    assert!(!asked);
+    assert_eq!(route.step, "sticky chat");
+    assert_eq!(
+        route.pick,
+        ChatPick::Service {
+            service: "deepseek".to_string(),
+            model: "deepseek-chat".to_string()
+        }
+    );
+}
+
+#[test]
+fn an_unchanged_thread_makes_no_summary_call_on_a_second_handoff() {
+    let root = root("summary-cache");
+    let data = root.join("data");
+    let chat = Chat::new(&data);
+    opened(&data, &chat);
+    chat.replies(&["We talked about monads."]);
+    let first = chat.send(ask_claude(), "ask Claude to refactor it", Some("t"));
+    assert_eq!(chat.calls().len(), 2, "the answer, then one summary call");
+    let second = chat.send(ask_claude(), "ask Claude again", Some("t"));
+    assert_eq!(
+        chat.calls().len(),
+        2,
+        "no new message: the summary is reused"
+    );
+    assert!(second
+        .packet
+        .unwrap()
+        .starts_with("Summary\nWe talked about monads."));
+    assert!(first.packet.is_some());
+    let summary = ThreadStore::new(&data)
+        .read("t")
+        .unwrap()
+        .into_iter()
+        .find(|r| r.role.as_deref() == Some("summary"))
+        .unwrap();
+    assert_eq!(summary.covers_turns, Some(2));
+}
+
+#[test]
+fn new_messages_are_summarised_on_top_of_the_cached_summary() {
+    let root = root("summary-new-part");
+    let data = root.join("data");
+    let chat = Chat::new(&data);
+    opened(&data, &chat);
+    chat.replies(&["We talked about monads."]);
+    chat.send(ask_claude(), "ask Claude to refactor it", Some("t"));
+    chat.replies(&["A functor maps."]);
+    chat.send(qwen(), "and a functor", Some("t"));
+    chat.replies(&["Monads, then functors."]);
+    let before = chat.calls().len();
+    let reply = chat.send(ask_claude(), "ask Claude about both", Some("t"));
+    let calls = chat.calls()[before..].to_vec();
+    assert_eq!(calls.len(), 1, "one summary call: {calls:?}");
+    let (_, contents) = sent(&calls[0].1);
+    assert_eq!(
+        contents,
+        [
+            "and a functor",
+            "A functor maps.",
+            "The summary so far:\nWe talked about monads.\n\nWrite the new summary."
+        ],
+        "only the new part and the summary so far"
+    );
+    assert!(reply
+        .packet
+        .unwrap()
+        .starts_with("Summary\nMonads, then functors."));
+    let summary = ThreadStore::new(&data)
+        .read("t")
+        .unwrap()
+        .into_iter()
+        .find(|r| r.role.as_deref() == Some("summary"))
+        .unwrap();
+    assert_eq!(summary.covers_turns, Some(4));
+}
+
+#[test]
+fn a_claude_handoff_move_stores_its_model_and_the_thread_keeps_it() {
+    let root = root("claude-model");
+    let data = root.join("data");
+    let chat = Chat::new(&data);
+    opened(&data, &chat);
+    chat.replies(&["We talked about monads."]);
+    let reply = chat.send(ask_claude(), "ask Claude to refactor it", Some("t"));
+    assert_eq!(
+        reply.route.pick,
+        ChatPick::ClaudeHandoff {
+            reason: "ask claude".to_string(),
+            model: Some("sonnet".to_string()),
+        },
+        "no model chosen: the default tier"
+    );
+    let opus = ChatRoute {
+        pick: ChatPick::ClaudeHandoff {
+            reason: "ask claude".to_string(),
+            model: Some("opus".to_string()),
+        },
+        ..ask_claude()
+    };
+    let reply = chat.send(opus, "ask Claude again", Some("t"));
+    assert_eq!(
+        reply.route.pick,
+        ChatPick::ClaudeHandoff {
+            reason: "ask claude".to_string(),
+            model: Some("sonnet".to_string()),
+        },
+        "the thread stays on one model"
+    );
+    let moves: Vec<_> = ThreadStore::new(&data)
+        .read("t")
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.role.as_deref() == Some("move"))
+        .map(|r| (r.lane.unwrap(), r.model))
+        .collect();
+    assert_eq!(
+        moves,
+        [
+            ("claude".to_string(), Some("sonnet".to_string())),
+            ("claude".to_string(), Some("sonnet".to_string()))
+        ]
+    );
 }
