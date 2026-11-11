@@ -2,7 +2,7 @@
 //! `--json`, printing what the GUI shows. `errors` (#375) lists the fleet errors the app
 //! recorded and the open IT tickets.
 //! CLI-2: `switchboard refresh | backup <repo> | backup --all`, the GUI buttons.
-//! CLI-3: a repo delete or a restore over a live repo is refused and becomes a Waiting on you
+//! CLI-3: a repo archive (`delete <repo>`; nothing is ever deleted) or a restore over a live repo is refused and becomes a Waiting on you
 //! item; `--role <role> merge <repo>#<pr>` goes through CORE-3; inside a job worktree no role
 //! gives write actions. `--role budget-manager set_pool_cap <pool> <cap>` and `pool_edit <pool>
 //! [--plan <p>] [--cap <n>] [--reset <day time>] [--cost <n>]` edit a pool through
@@ -22,6 +22,7 @@ use switchboard_core::backup::{self, BackupOutcome};
 use switchboard_core::backup_run::{self, BackupRow};
 use switchboard_core::budget::{self, PoolEdit, PoolRow};
 use switchboard_core::clock::{Clock, SystemClock, UnixSeconds};
+use switchboard_core::confirm;
 use switchboard_core::error::CoreError;
 use switchboard_core::fleet::FleetBridge;
 use switchboard_core::fleet_errors::{self, FleetErrorRecord};
@@ -75,7 +76,7 @@ pub const USAGE: &str = "usage: switchboard [--help | --version] [--json] [--rol
                      ask_as_job <kind> \"<text>\" --unmet <need>[,<need>] | \
                      rate <thread> <turn> <up|down> | \
                      star <repo>#<n> | refresh | backup <repo> | backup --all | delete <repo> | \
-                     restore <repo> | merge <repo>#<pr> | set_pool_cap <pool> <cap> | \
+                     restore <repo> | drop <delete | restore> <repo> | merge <repo>#<pr> | set_pool_cap <pool> <cap> | \
                      pool_edit <pool> [--plan <p>] [--cap <n>] [--reset <day time>] [--cost <n>] | \
                      autopilot <roadmap | review | merge | weekly | satellite> [--dry-run] | \
                      autopilot status | mcp>";
@@ -97,6 +98,17 @@ pub trait Writes {
     fn full_repo(&self, repo: &str) -> Result<Option<String>, String> {
         self.knows_repo(repo)
             .map(|known| known.then(|| repo.to_string()))
+    }
+    /// #347: turn down every waiting request for `action` (`confirm::drop_requests_for`). `Ok`
+    /// is one line for each request dropped, an error the refusal text. The default has no
+    /// Waiting list to drop from.
+    fn drop_requests(
+        &self,
+        action: &GuardedAction,
+        caller: &Caller,
+    ) -> Result<Vec<String>, String> {
+        let _ = (action, caller);
+        Err("drop: no Waiting on you list here".to_string())
     }
 }
 
@@ -241,14 +253,15 @@ impl Writes for CliWrites {
             .map_err(|why| format!("merge {repo}#{pr}: {why}"))
     }
 
-    /// WAIT-1: the item goes into the local items; asking twice keeps one (same `source`).
+    /// WAIT-1: the item goes into the local items; asking twice, from any face, keeps one.
     fn waiting(&self, item: &Item) -> Result<(), String> {
         let data = self
             .data
             .as_deref()
             .ok_or("waiting: set SWITCHBOARD_DATA to the app data folder")?;
         LocalItems::new(data)
-            .add(item.clone())
+            .add_new(item.clone())
+            .map(|_| ())
             .map_err(|e| format!("waiting: {e}"))
     }
 
@@ -266,6 +279,23 @@ impl Writes for CliWrites {
         let snaps = readable_snapshots(&SnapshotStore::new(data), repo)?;
         resolve_repo(repo, snaps.iter().map(|snap| snap.repo.as_str()))
             .map(|full| full.map(str::to_string))
+    }
+
+    fn drop_requests(
+        &self,
+        action: &GuardedAction,
+        caller: &Caller,
+    ) -> Result<Vec<String>, String> {
+        let data = self
+            .data
+            .as_deref()
+            .ok_or("drop: set SWITCHBOARD_DATA to the app data folder")?;
+        confirm::drop_requests_for(data, action, caller)
+            .map(|dropped| dropped.lines)
+            .map_err(|e| match e {
+                CoreError::Refused(why) => why,
+                other => format!("drop: {other}"),
+            })
     }
 }
 
@@ -513,6 +543,7 @@ pub fn run_with(
             run_backup(&target)
         }
         Some("delete" | "restore" | "merge") => write_command(&args, cwd, now, writes, err),
+        Some("drop") => drop_command(&args, cwd, writes, err),
         Some("budget") => budget(args.json, pool_flags.refresh),
         Some("set_pool_cap" | "pool_edit") => {
             pool_command(&args, &pool_flags, cwd, now, err, &mut std::io::stdout())
@@ -866,6 +897,50 @@ fn write_command(
     }
 }
 
+/// #347: `drop delete <repo>` and `drop restore <repo>` turn down the request the command of
+/// that name left in Waiting on you. Its item and its held-restore record go; nothing is
+/// archived, pushed or queued. No role is needed, as none is needed to ask; inside a job
+/// worktree it is refused. A bare repo name is resolved as `delete` and `restore` resolve it;
+/// an `owner/name` Switchboard no longer knows is taken as written, so its request can still
+/// be dropped.
+fn drop_command(
+    args: &super::Args,
+    cwd: &Path,
+    writes: &dyn Writes,
+    err: &mut dyn Write,
+) -> ExitCode {
+    let words: Vec<&str> = args.command[1..].iter().map(String::as_str).collect();
+    let (kind, repo) = match words.as_slice() {
+        [kind @ ("delete" | "restore"), repo] => (*kind, *repo),
+        _ => {
+            let _ = writeln!(err, "switchboard: drop needs <delete | restore> <repo>");
+            let _ = writeln!(err, "{USAGE}");
+            return ExitCode::from(2);
+        }
+    };
+    let repo = match writes.full_repo(repo) {
+        Ok(Some(full)) => full,
+        Ok(None) if repo.contains('/') => repo.to_string(),
+        Ok(None) => {
+            let _ = writeln!(err, "switchboard: no such repo: {repo}");
+            return ExitCode::from(1);
+        }
+        Err(e) => {
+            let _ = writeln!(err, "switchboard: drop: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let action = if kind == "delete" {
+        GuardedAction::DeleteRepo { repo }
+    } else {
+        GuardedAction::RestoreOverLive { repo }
+    };
+    match writes.drop_requests(&action, &guard_for(args, cwd)) {
+        Ok(lines) => emit(&format!("{}\n", lines.join("\n"))),
+        Err(text) => refuse(err, &text),
+    }
+}
+
 /// CLI-3: who is asking. The face is the CLI; the role is the `--role` flag, already checked;
 /// a job worktree is found from `cwd`.
 fn guard_for(args: &super::Args, cwd: &Path) -> Caller {
@@ -877,11 +952,11 @@ fn guard_for(args: &super::Args, cwd: &Path) -> Caller {
     }
 }
 
-/// The action as the guard words it, e.g. `delete switchboard`.
+/// The action as the guard words it, e.g. `archive owner/switchboard`: `delete` archives.
 fn request_text(action: &GuardedAction) -> String {
     match action {
         GuardedAction::Merge { repo, pr } => format!("merge {repo}#{pr}"),
-        GuardedAction::DeleteRepo { repo } => format!("delete {repo}"),
+        GuardedAction::DeleteRepo { repo } => format!("archive {repo}"),
         GuardedAction::RestoreOverLive { repo } => format!("restore over {repo}"),
     }
 }

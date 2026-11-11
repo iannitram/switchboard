@@ -1040,6 +1040,69 @@ fn an_issue_the_queue_found_there_is_not_the_restores() {
     );
 }
 
+/// Second check of #417: what is at a recorded number is closed or rewritten only while it
+/// still has the backup's title. An issue or milestone with another title there now is left
+/// as it is and named; it does not hold the restore.
+#[test]
+fn what_is_at_a_recorded_number_with_another_title_is_left_and_named() {
+    let f = fixture("retitled");
+    std::fs::write(
+        f.backup.join("milestones.json"),
+        r#"[{"title": "1.0", "state": "closed"}]"#,
+    )
+    .unwrap();
+    edit_json(&f.backup, "issues.json", |issues| {
+        issues[0]["body"] = json!("see #2");
+    });
+    let mut made = record(&[(1, 1), (2, 2)]);
+    made.milestones.insert(
+        "1.0".to_string(),
+        Created {
+            key: "key-milestone".to_string(),
+            number: Some(3),
+        },
+    );
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            answer(200, json!({"private": true})),
+            answer(
+                200,
+                json!([{"number": 1, "title": "Not the bug", "state": "open", "body": "see #2"},
+                       {"number": 2, "title": "Someone else's", "state": "open", "body": ""}]),
+            ),
+            answer(200, json!([])),
+            answer(
+                200,
+                json!([{"number": 3, "title": "Another plan", "state": "open"}]),
+            ),
+        ],
+    );
+    let report = restore_held_over_live_from(
+        &caller(Face::Gui, false),
+        &f.fleet,
+        &f.backup,
+        NEW,
+        true,
+        &made,
+        &remote(&f, &api),
+    )
+    .unwrap();
+    assert_eq!(patches(&api), Vec::<String>::new(), "nothing was changed");
+    assert_eq!(report.issues.closed, 0);
+    assert_eq!(report.issues.milestones_closed, 0);
+    assert_eq!(report.issues.state_waiting, 0, "and nothing waits for it");
+    assert!(
+        report.issues.left_out.contains(
+            &"2 issues or milestones this restore made have another title in the repo now and \
+              were left as they are: #2, milestone Another plan"
+                .to_string()
+        ),
+        "{:?}",
+        report.issues.left_out
+    );
+}
+
 /// #365 (second check): the held pass closes a closed milestone only by the number the queue
 /// says it made for the restore; a milestone the repo had, open, stays open and is named.
 #[test]
@@ -1476,6 +1539,64 @@ fn old_issue_numbers_in_comments_and_bodies_get_the_new_numbers() {
     assert_eq!(queued(&f).len(), 4, "nothing more was queued");
 }
 
+/// #365, owner ruling of 2026-11-11: a full link and `owner/name#N` are rewritten too, only
+/// when they name the repo being restored (without case), and then name the repo the restore
+/// goes to. Another repo, another host, a code span and a number nothing maps stay.
+#[test]
+fn full_links_and_named_numbers_of_the_restored_repo_get_the_new_numbers() {
+    let issue = |n: u64, title: &str, body: &str| {
+        json!({"number": n, "title": title, "body": body, "state": "open",
+               "labels": [], "milestone": null})
+    };
+    let first = "[#5](https://github.com/Owner/Demo/issues/5), owner/demo#5, \
+                 https://github.com/other/repo/issues/5, other/repo#5, \
+                 `owner/demo#5`, owner/demo#7, https://example.invalid/owner/demo/issues/5";
+    let answers = RecordedAnswers {
+        repo: "owner/demo".to_string(),
+        issues: vec![issue(5, "B", "plain"), issue(1, "A", first)],
+        comments: vec![
+            json!({"body": "see https://github.com/owner/demo/pull/5 and OWNER/DEMO#5",
+            "issue_url": "https://api.github.com/repos/owner/demo/issues/1"}),
+        ],
+        ..RecordedAnswers::default()
+    };
+    let f = fixture_of("links", &answers);
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            listed(&[]),
+            answer(
+                200,
+                json!([{"number": 2, "title": "B", "state": "open", "body": "plain"},
+                       {"number": 1, "title": "A", "state": "open", "body": first}]),
+            ),
+            answer(200, json!([])),
+        ],
+    );
+    let report = restore_issues(&f.fleet, &f.backup, NEW, &remote(&f, &api)).unwrap();
+    let comments: Vec<Value> = queued(&f)
+        .into_iter()
+        .filter(|item| item["kind"] == "comment")
+        .collect();
+    assert_eq!(
+        comments,
+        vec![
+            json!({"kind": "comment", "repo": NEW, "number": 1, "marker": null,
+            "body": format!("see https://github.com/{NEW}/pull/2 and {NEW}#2")})
+        ]
+    );
+    let rewritten = format!(
+        "[#2](https://github.com/{NEW}/issues/2), {NEW}#2, \
+         https://github.com/other/repo/issues/5, other/repo#5, \
+         `owner/demo#5`, owner/demo#7, https://example.invalid/owner/demo/issues/5"
+    );
+    assert_eq!(
+        patch_bodies(&api),
+        vec![(format!("/repos/{NEW}/issues/1"), json!({"body": rewritten}))]
+    );
+    assert_eq!(report.renumbered, 1);
+}
+
 /// A body someone changed in the repo is not the backup's any more: it is left as it is, and
 /// the report names it.
 #[test]
@@ -1828,4 +1949,59 @@ fn a_label_that_is_there_with_another_colour_is_left_and_named() {
     );
     assert_eq!(queued(&f), expected_issue_queue(), "no label was queued");
     assert_eq!(patches(&api), closes_old(2), "and none was changed");
+}
+
+/// #365, owner ruling of 2026-11-11: a label the live repo already has keeps the live colour
+/// and description. The restore queues no create for it, sends nothing that changes it, and
+/// names it in the report.
+#[test]
+fn a_label_that_is_there_keeps_its_live_colour_and_description() {
+    let f = fixture("colour-kept");
+    made_as(&f, &[("Bug", 1), ("Old", 2)]);
+    std::fs::write(
+        f.backup.join("labels.json"),
+        r#"[{"name": "bug", "color": "d73a4a", "description": "as backed up"},
+            {"name": "size:Easy", "color": "0E8A16", "description": "as backed up"}]"#,
+    )
+    .unwrap();
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            answer(200, json!({"private": true})),
+            answer(
+                200,
+                json!([{"name": "Bug", "color": "ffffff", "description": "the live one"},
+                       {"name": "size:Easy", "color": "0e8a16", "description": "the live one"}]),
+            ),
+            answer(200, json!([{"title": "1.0"}])),
+            listed(&[]),
+            listed(&[(1, "Bug"), (2, "Old")]),
+            answer(200, json!([])),
+        ],
+    );
+    let report = restore_over_live_from(
+        &caller(Face::Gui, false),
+        &f.fleet,
+        &f.backup,
+        NEW,
+        true,
+        &remote(&f, &api),
+    )
+    .unwrap();
+    assert_eq!(report.labels, 0);
+    assert_eq!(
+        report.left_out,
+        ["1 labels are there with another colour and were left as they are: bug"]
+    );
+    assert!(
+        queued(&f).iter().all(|item| item["kind"] != "label"),
+        "no label was queued"
+    );
+    let log = api.log.lock().unwrap().clone();
+    let on_labels: Vec<&String> = log.iter().filter(|line| line.contains("/labels")).collect();
+    assert!(
+        on_labels.iter().all(|line| line.starts_with("GET ")),
+        "labels are only read: {on_labels:?}"
+    );
+    assert_eq!(patches(&api), closes_old(2), "only the old issue is closed");
 }

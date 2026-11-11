@@ -1,5 +1,5 @@
-//! CORE-3, BAK-3 (#347): the confirm step in the app. A repo delete or a restore over a live
-//! repo asked for from the CLI or MCP waits in Waiting on you; here the app confirms it. The
+//! CORE-3, BAK-3 (#347): the confirm step in the app. A repo archive (the `delete` request) or
+//! a restore over a live repo asked for from the CLI or MCP waits in Waiting on you; here the app confirms it. The
 //! request is read back from its item, `rules::guard` decides (only the app, only with my
 //! confirm, never inside a job worktree), the repo's `owner/name` I typed must be the request's,
 //! the action runs, and its item leaves the list (WAIT-3). A refusal runs nothing and leaves
@@ -29,8 +29,9 @@ use crate::waiting::{Item, LocalItems, Source};
 use crate::CoreError;
 
 /// The action of a restore request whose first confirm held something back. An item with this
-/// action is confirmed with `Pass::Held`. A new request from the CLI for the same repo writes
-/// the item afresh, and its confirm is a whole restore again.
+/// action is confirmed with `Pass::Held`. While it waits, no face files a second restore
+/// request for that repo (`LocalItems::add_new` keeps this item, whichever face asks). A whole
+/// restore again needs the request dropped first, then asked for anew.
 pub const HELD_ACTION: &str = "Queue what the restore held back";
 
 /// What a confirmed action did, as the face shows it.
@@ -46,8 +47,9 @@ pub struct Done {
 
 /// The delete or restore request a Waiting on you item holds, `None` when it holds none.
 ///
-/// The item's source must be a guarded action whose text ends in ` to delete <repo>` or
-/// ` to restore over <repo>` (what the CLI writes), `<repo>` must be one `owner/name`, and the
+/// The item's source must be a guarded action whose text ends in ` to archive <repo>` or
+/// ` to restore over <repo>` (what the CLI and MCP write; ` to delete <repo>`, the wording
+/// before #347's SPEC change, is read as the same archive request), `<repo>` must be one `owner/name`, and the
 /// item's link must be that repo's GitHub address. Anything else is no request: the app never
 /// guesses which repo was meant.
 pub fn guarded_request(item: &Item) -> Option<GuardedAction> {
@@ -57,7 +59,12 @@ pub fn guarded_request(item: &Item) -> Option<GuardedAction> {
     let (_, request) = text.rsplit_once(" to ")?;
     let (repo, delete) = match request.strip_prefix("restore over ") {
         Some(repo) => (repo, false),
-        None => (request.strip_prefix("delete ")?, true),
+        None => (
+            request
+                .strip_prefix("archive ")
+                .or_else(|| request.strip_prefix("delete "))?,
+            true,
+        ),
     };
     let mut parts = repo.split('/');
     let (owner, name) = (parts.next()?, parts.next()?);
@@ -150,12 +157,19 @@ fn held_back(report: &RestoreReport) -> String {
     )
 }
 
+/// #347: a restore of a repo's backup (first name) into a new private repo (second name).
+pub type RestoreNew<'a> =
+    dyn Fn(&Caller, &str, &str, &Pass) -> Result<RestoreReport, CoreError> + 'a;
+
 /// What a confirm runs, so tests can stand in for GitHub.
 pub struct Actions<'a> {
     /// A restore over the live repo it is given: the whole restore, or only what was held back.
     pub restore: &'a dyn Fn(&Caller, &str, &Pass) -> Result<RestoreReport, CoreError>,
     /// Archives the repo it is given on GitHub.
     pub archive: &'a dyn Fn(&Caller, &str) -> Result<Archived, CoreError>,
+    /// #347: a restore of the first repo's backup into the second, a new private repo: the
+    /// whole restore, or only what was held back. The live repo is left alone.
+    pub restore_new: &'a RestoreNew<'a>,
 }
 
 /// Confirm the guarded request whose Waiting on you text is `text`, for `caller`, who typed
@@ -175,11 +189,30 @@ pub struct Actions<'a> {
 ///   with no record gets an empty one, so nothing is closed), and leaves the list once nothing
 ///   is held back. Each time the item stays, the report's record is kept beside it.
 ///
-/// Every refusal and every failed action leaves the file untouched.
+/// The record of held restores is read before a restore runs: one that cannot be read stops
+/// the confirm there. Every refusal and every failed action leaves the file untouched.
 pub fn confirm_with(
     data_dir: &Path,
     text: &str,
     typed: &str,
+    caller: &Caller,
+    actions: &Actions<'_>,
+) -> Result<Done, CoreError> {
+    confirm_into_with(data_dir, text, typed, None, caller, actions)
+}
+
+/// `confirm_with`, and with `into` (#347) a restore request goes to that new private repo
+/// (`owner/name`, another name than the request's repo) through `actions.restore_new` instead
+/// of over the live one. The guard and the typed name are the same: the name typed is still
+/// the request's repo. A name that is not an `owner/name`, or is the repo itself, is `Refused`
+/// before anything runs. A restore that held something back keeps the new repo's name in its
+/// record, and its next confirm goes there whatever `into` says then. `into` on an archive
+/// request is `Refused`.
+pub fn confirm_into_with(
+    data_dir: &Path,
+    text: &str,
+    typed: &str,
+    into: Option<&str>,
     caller: &Caller,
     actions: &Actions<'_>,
 ) -> Result<Done, CoreError> {
@@ -195,7 +228,7 @@ pub fn confirm_with(
     };
     let Some(action) = guarded_request(&item) else {
         return Err(CoreError::Refused(format!(
-            "{text}: does not name one repo to delete or restore over"
+            "{text}: does not name one repo to archive or restore over"
         )));
     };
     rules::guard(caller, &action).into_result()?;
@@ -203,12 +236,35 @@ pub fn confirm_with(
     match &action {
         GuardedAction::RestoreOverLive { repo } => {
             typed_is(&what, repo, typed)?;
-            let pass = if item.action == HELD_ACTION {
-                Pass::Held(records.get(text)?.unwrap_or_default())
+            // Read before anything runs: a record that cannot be read refuses the confirm
+            // here, not after the restore pushed and its record could not be kept.
+            let kept = records.get(text)?;
+            let held = item.action == HELD_ACTION;
+            let new = if held {
+                kept.as_ref().and_then(|made| made.into.clone())
+            } else {
+                into.map(str::to_string)
+            };
+            if let Some(new) = &new {
+                new_repo_ok(&what, repo, new)?;
+            }
+            let pass = if held {
+                Pass::Held(kept.unwrap_or_default())
             } else {
                 Pass::Whole
             };
-            let report = (actions.restore)(caller, repo, &pass)?;
+            let mut report = match &new {
+                Some(new) => (actions.restore_new)(caller, repo, new, &pass)?,
+                None => (actions.restore)(caller, repo, &pass)?,
+            };
+            report.made.into = new.clone();
+            let (what, target) = match &new {
+                Some(new) => (
+                    format!("restore {repo} into the new private repo {new}"),
+                    format!("restore of {repo} into {new}"),
+                ),
+                None => (what, format!("restore over {repo}")),
+            };
             let cleared = !report.issues.held();
             if cleared {
                 local.remove(&source)?;
@@ -217,7 +273,7 @@ pub fn confirm_with(
                 records.set(text, Some(&report.made))?;
                 local.add(Item {
                     why: format!(
-                        "The restore over {repo} pushed the backup's refs; {}. A confirm now \
+                        "The {target} pushed the backup's refs; {}. A confirm now \
                          only queues and sends those: it pushes nothing again (CORE-3).",
                         held_back(&report)
                     ),
@@ -225,16 +281,28 @@ pub fn confirm_with(
                     ..item
                 })?;
             }
+            let mut lines = lines_of(&report, &pass);
+            if let (Some(new), Pass::Whole) = (&new, &pass) {
+                lines.insert(
+                    0,
+                    format!("{new} was created as a private repo; {repo} was left as it is"),
+                );
+            }
             Ok(Done {
                 what: match pass {
                     Pass::Whole => what,
                     Pass::Held(_) => format!("{what} (what was held back)"),
                 },
-                lines: lines_of(&report, &pass),
+                lines,
                 cleared,
             })
         }
         GuardedAction::DeleteRepo { repo } => {
+            if into.is_some() {
+                return Err(CoreError::Refused(format!(
+                    "{what}: an archive has no new repo to go to; nothing was changed"
+                )));
+            }
             typed_is(&what, repo, typed)?;
             let line = match (actions.archive)(caller, repo)? {
                 Archived::Now => {
@@ -252,6 +320,106 @@ pub fn confirm_with(
         // `guarded_request` never answers a merge.
         GuardedAction::Merge { .. } => Err(CoreError::Refused(what)),
     }
+}
+
+/// What turning a request down did, as the face shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Dropped {
+    /// What the dropped request asked for, e.g. `archive owner/name`.
+    pub what: String,
+    /// One plain line for each request that left Waiting on you.
+    pub lines: Vec<String>,
+}
+
+/// #347, turn a request down: the archive or restore request whose Waiting on you text is
+/// `text` leaves the list, and the record a held restore kept beside it goes with it. Nothing
+/// else happens: no archive, no push, nothing queued.
+///
+/// `Refused` when no such request is waiting, when the item is not an archive or restore
+/// request (`guarded_request`), or inside a job worktree. A refusal changes nothing.
+pub fn drop_request(data_dir: &Path, text: &str, caller: &Caller) -> Result<Dropped, CoreError> {
+    let source = Source::GuardedAction {
+        text: text.to_string(),
+    };
+    let items = LocalItems::new(data_dir).load()?;
+    let Some(item) = items.iter().find(|i| i.source == source) else {
+        return Err(CoreError::Refused(format!(
+            "{text}: no such request is waiting on you; nothing was dropped"
+        )));
+    };
+    let Some(action) = guarded_request(item) else {
+        return Err(CoreError::Refused(format!(
+            "{text}: is not an archive or restore request; nothing was dropped"
+        )));
+    };
+    drop_items(data_dir, &action, &[item], caller)
+}
+
+/// `drop_request` for the CLI and MCP, which name the request by what it asks: every waiting
+/// request for `action` (an archive of, or a restore over, one repo) leaves the list, whoever
+/// filed it. `Refused` when none is waiting.
+pub fn drop_requests_for(
+    data_dir: &Path,
+    action: &GuardedAction,
+    caller: &Caller,
+) -> Result<Dropped, CoreError> {
+    let what = worded(action);
+    if matches!(action, GuardedAction::Merge { .. }) {
+        return Err(CoreError::Refused(format!(
+            "{what}: is not an archive or restore request; nothing was dropped"
+        )));
+    }
+    if caller.in_job_worktree {
+        return Err(in_worktree(&what));
+    }
+    let items = LocalItems::new(data_dir).load()?;
+    let asked: Vec<&Item> = items
+        .iter()
+        .filter(|item| guarded_request(item).as_ref() == Some(action))
+        .collect();
+    if asked.is_empty() {
+        return Err(CoreError::Refused(format!(
+            "{what}: no such request is waiting on you; nothing was dropped"
+        )));
+    }
+    drop_items(data_dir, action, &asked, caller)
+}
+
+fn in_worktree(what: &str) -> CoreError {
+    CoreError::Refused(format!(
+        "drop the request to {what}: refused inside a job worktree"
+    ))
+}
+
+/// Removes `items`, each a waiting request for `action`, and their held-restore records. The
+/// records are read first, so a file that cannot be read stops the drop before anything goes.
+fn drop_items(
+    data_dir: &Path,
+    action: &GuardedAction,
+    items: &[&Item],
+    caller: &Caller,
+) -> Result<Dropped, CoreError> {
+    let what = worded(action);
+    if caller.in_job_worktree {
+        return Err(in_worktree(&what));
+    }
+    let local = LocalItems::new(data_dir);
+    let records = HeldRecords::new(data_dir);
+    records.load()?;
+    let mut lines = Vec::new();
+    for item in items {
+        local.remove(&item.source)?;
+        if let Source::GuardedAction { text } = &item.source {
+            records.set(text, None)?;
+        }
+        lines.push(format!(
+            "the request to {what} was dropped; nothing was archived, pushed or queued"
+        ));
+        if item.action == HELD_ACTION {
+            lines.push("what the restore held back stays undone".to_string());
+        }
+    }
+    Ok(Dropped { what, lines })
 }
 
 /// What each held restore made (`RestoreReport::made`), by its request's text, in
@@ -316,6 +484,31 @@ fn typed_is(what: &str, repo: &str, typed: &str) -> Result<(), CoreError> {
     )))
 }
 
+/// #347: `new` can be the new private repo of a restore of `repo`: an `owner/name` of GitHub's
+/// letters, and another name than `repo`.
+fn new_repo_ok(what: &str, repo: &str, new: &str) -> Result<(), CoreError> {
+    let part = |p: &str| {
+        !p.is_empty()
+            && p != "."
+            && p != ".."
+            && p.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
+    };
+    let named = matches!(new.split_once('/'), Some((owner, name)) if part(owner) && part(name));
+    if !named {
+        return Err(CoreError::Refused(format!(
+            "{what}: {new} is not an owner/name for the new private repo; nothing was changed"
+        )));
+    }
+    if new.eq_ignore_ascii_case(repo) {
+        return Err(CoreError::Refused(format!(
+            "{what}: {new} is the repo itself; a restore to a new private repo needs another \
+             name; nothing was changed"
+        )));
+    }
+    Ok(())
+}
+
 /// `confirm_with` as the app runs it: a restore reads the repo's backup in
 /// `<nextcloud_backups>/github/<owner>/<name>/` and goes to GitHub through
 /// `backup::restore_over_live` (or `backup::restore_held_over_live` for what was held back),
@@ -328,13 +521,34 @@ pub fn confirm(
     typed: &str,
     caller: &Caller,
 ) -> Result<Done, CoreError> {
-    let restore = |caller: &Caller, repo: &str, pass: &Pass| {
+    confirm_into(settings, data_dir, text, typed, None, caller)
+}
+
+/// `confirm`, and with `into` (#347) a restore goes to that new private repo through
+/// `backup::restore_to_new` (`confirm_into_with`).
+pub fn confirm_into(
+    settings: &Settings,
+    data_dir: &Path,
+    text: &str,
+    typed: &str,
+    into: Option<&str>,
+    caller: &Caller,
+) -> Result<Done, CoreError> {
+    let source = |repo: &str| {
         let backups = match settings.nextcloud_backups.as_deref() {
             Some(path) if !path.as_os_str().is_empty() => path,
             _ => return Err(CoreError::MissingPath("nextcloud_backups")),
         };
         let fleet = FleetBridge::new(settings.pipeline_repo()?);
-        let folder = backup_run::folder(backups, repo);
+        Ok((fleet, backup_run::folder(backups, repo)))
+    };
+    let restore_new = |caller: &Caller, repo: &str, new: &str, pass: &Pass| {
+        let (fleet, folder) = source(repo)?;
+        let confirmed = caller.confirmed_in_app;
+        backup::restore_to_new(caller, &fleet, &folder, (repo, new), confirmed, pass)
+    };
+    let restore = |caller: &Caller, repo: &str, pass: &Pass| {
+        let (fleet, folder) = source(repo)?;
         let confirmed = caller.confirmed_in_app;
         match pass {
             Pass::Whole => backup::restore_over_live(caller, &fleet, &folder, repo, confirmed),
@@ -347,14 +561,16 @@ pub fn confirm(
         let tokens = crate::platform::GhAuthToken::default();
         archive::archive_repo(caller, &HttpTransport::new(&tokens)?, repo)
     };
-    confirm_with(
+    confirm_into_with(
         data_dir,
         text,
         typed,
+        into,
         caller,
         &Actions {
             restore: &restore,
             archive: &archive,
+            restore_new: &restore_new,
         },
     )
 }

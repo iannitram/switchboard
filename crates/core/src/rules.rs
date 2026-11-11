@@ -50,7 +50,7 @@ pub struct Caller {
 pub enum Verdict {
     /// Go ahead.
     Allow,
-    /// Not from here: becomes a Waiting on you item with this text (repo delete and restore
+    /// Not from here: becomes a Waiting on you item with this text (repo archive and restore
     /// over a live repo asked from the CLI or MCP).
     ToWaiting(String),
     /// Refused, with the refusal text every face shows.
@@ -61,12 +61,13 @@ pub enum Verdict {
 /// `Allow`; this decides who may ask.
 ///
 /// Inside a job worktree everything is refused. A merge is mine from the app and the
-/// project-manager role's from the CLI or MCP. Deleting a repo and restoring over a live one
-/// need my confirm in the app; from the CLI or MCP they become a Waiting on you item.
+/// project-manager role's from the CLI or MCP. Archiving a repo (the `delete` request; nothing
+/// is ever deleted) and restoring over a live one need my confirm in the app; from the CLI or MCP they become a Waiting on you item.
 pub fn guard(caller: &Caller, action: &GuardedAction) -> Verdict {
     let what = match action {
         GuardedAction::Merge { repo, pr } => format!("merge {repo}#{pr}"),
-        GuardedAction::DeleteRepo { repo } => format!("delete {repo}"),
+        // Switchboard never deletes a repo: the request archives it (#347).
+        GuardedAction::DeleteRepo { repo } => format!("archive {repo}"),
         GuardedAction::RestoreOverLive { repo } => format!("restore over {repo}"),
     };
     if caller.in_job_worktree {

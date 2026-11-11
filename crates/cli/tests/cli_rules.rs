@@ -83,13 +83,13 @@ fn delete_over_a_live_repo_is_refused_and_adds_one_waiting_item() {
     let fake = Fake::default();
     let (code, err) = run(&["delete", "switchboard"], &folder("delete", false), &fake);
     assert_eq!(code, ExitCode::from(1));
-    assert_eq!(err, "delete switchboard: needs a confirm in the app\n");
+    assert_eq!(err, "archive switchboard: needs a confirm in the app\n");
     let waiting = fake.waiting.borrow();
     assert_eq!(waiting.len(), 1);
     assert_eq!(
         waiting[0].source,
         Source::GuardedAction {
-            text: "I was asked from the CLI to delete switchboard".to_string()
+            text: "I was asked from the CLI to archive switchboard".to_string()
         }
     );
     assert!(fake.merged.borrow().is_empty());
@@ -217,7 +217,7 @@ fn delete_inside_a_job_worktree_is_refused_and_adds_no_waiting_item() {
         &fake,
     );
     assert_eq!(code, ExitCode::from(1));
-    assert_eq!(err, "delete switchboard: refused inside a job worktree\n");
+    assert_eq!(err, "archive switchboard: refused inside a job worktree\n");
     assert!(fake.waiting.borrow().is_empty());
 }
 
