@@ -1649,6 +1649,10 @@ pub struct Created {
 pub struct Made {
     pub issues: BTreeMap<u64, Created>,
     pub milestones: BTreeMap<String, Created>,
+    /// #347: the new private repo (`owner/name`) a restore went into, when it did not go over
+    /// the live one (`restore_to_new_from`). What it held back is done there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub into: Option<String>,
 }
 
 /// Which part of a restore of issues runs.
@@ -2235,6 +2239,21 @@ fn live_backup(
     confirmed: bool,
     remote: &Remote<'_>,
 ) -> Result<Backup, CoreError> {
+    confirmed_restore(caller, repo, confirmed)?;
+    let backup = read_backup(backup_dir)?;
+    let path = format!("/repos/{repo}");
+    match remote.api.rest_get(&path, None)?.status {
+        200 => Ok(backup),
+        404 => Err(CoreError::GitHub(format!(
+            "{repo}: no such repo to restore over"
+        ))),
+        other => Err(CoreError::GitHub(format!("GET {path}: status {other}"))),
+    }
+}
+
+/// The guarded confirm of a restore of `repo`'s backup: `rules::guard` allows `RestoreOverLive`
+/// for `caller`, `confirmed` is set and `repo` is an `owner/name`. Nothing is read or written.
+fn confirmed_restore(caller: &Caller, repo: &str, confirmed: bool) -> Result<(), CoreError> {
     match rules::guard(
         caller,
         &GuardedAction::RestoreOverLive {
@@ -2249,16 +2268,63 @@ fn live_backup(
             "restore over {repo}: needs a confirm in the app"
         )));
     }
-    split_repo(repo)?;
-    let backup = read_backup(backup_dir)?;
-    let path = format!("/repos/{repo}");
-    match remote.api.rest_get(&path, None)?.status {
-        200 => Ok(backup),
-        404 => Err(CoreError::GitHub(format!(
-            "{repo}: no such repo to restore over"
-        ))),
-        other => Err(CoreError::GitHub(format!("GET {path}: status {other}"))),
+    split_repo(repo).map(|_| ())
+}
+
+/// BAK-3 (#347): restore `repo`'s backup in `backup_dir` to the new private repo `new_repo`, as
+/// `restore_to_new_from` does, against GitHub.
+pub fn restore_to_new(
+    caller: &Caller,
+    fleet: &FleetBridge,
+    backup_dir: &Path,
+    names: (&str, &str),
+    confirmed: bool,
+    pass: &Pass,
+) -> Result<RestoreReport, CoreError> {
+    with_github(|remote| {
+        restore_to_new_from(caller, fleet, backup_dir, names, confirmed, pass, remote)
+    })
+}
+
+/// `restore_to_new` against `remote`; `names` is `(repo, new_repo)`, each `owner/name`. It
+/// needs the same guarded confirm as a restore over the live repo (`rules::guard` allows
+/// `RestoreOverLive` on `repo` for `caller`, and `confirmed` is set), and `new_repo` must be
+/// another name than `repo`. Then `Pass::Whole` is `restore_history_from` (the repo is created
+/// private through the create queue; a name that is there already is `Refused` before anything
+/// is queued or pushed) followed by `restore_issues` on the new repo. `Pass::Held` is
+/// `restore_issues` alone, for what the first pass held back: no repo is created and no ref
+/// pushed. The live repo `repo` is never read or written. The report's `made.into` names the
+/// new repo.
+pub fn restore_to_new_from(
+    caller: &Caller,
+    fleet: &FleetBridge,
+    backup_dir: &Path,
+    names: (&str, &str),
+    confirmed: bool,
+    pass: &Pass,
+    remote: &Remote<'_>,
+) -> Result<RestoreReport, CoreError> {
+    let (repo, new_repo) = names;
+    confirmed_restore(caller, repo, confirmed)?;
+    split_repo(new_repo)?;
+    if new_repo.eq_ignore_ascii_case(repo) {
+        return Err(CoreError::Refused(format!(
+            "{new_repo} is the repo itself; a restore to a new private repo needs another name"
+        )));
     }
+    let mut report = match pass {
+        Pass::Whole => restore_history_from(fleet, backup_dir, new_repo, remote)?,
+        Pass::Held(_) => RestoreReport::default(),
+    };
+    report.issues =
+        restore_issues(fleet, backup_dir, new_repo, remote).map_err(|e| match pass {
+            Pass::Whole => CoreError::GitHub(format!(
+            "{new_repo} was created and the history pushed, but its issues were not restored: {e}"
+        )),
+            Pass::Held(_) => e,
+        })?;
+    report.made.into = Some(new_repo.to_string());
+    Ok(report)
 }
 
 /// BAK-3 (#347): what a restore over the live repo `repo` held back, as

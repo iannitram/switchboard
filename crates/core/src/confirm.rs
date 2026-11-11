@@ -156,12 +156,19 @@ fn held_back(report: &RestoreReport) -> String {
     )
 }
 
+/// #347: a restore of a repo's backup (first name) into a new private repo (second name).
+pub type RestoreNew<'a> =
+    dyn Fn(&Caller, &str, &str, &Pass) -> Result<RestoreReport, CoreError> + 'a;
+
 /// What a confirm runs, so tests can stand in for GitHub.
 pub struct Actions<'a> {
     /// A restore over the live repo it is given: the whole restore, or only what was held back.
     pub restore: &'a dyn Fn(&Caller, &str, &Pass) -> Result<RestoreReport, CoreError>,
     /// Archives the repo it is given on GitHub.
     pub archive: &'a dyn Fn(&Caller, &str) -> Result<Archived, CoreError>,
+    /// #347: a restore of the first repo's backup into the second, a new private repo: the
+    /// whole restore, or only what was held back. The live repo is left alone.
+    pub restore_new: &'a RestoreNew<'a>,
 }
 
 /// Confirm the guarded request whose Waiting on you text is `text`, for `caller`, who typed
@@ -190,6 +197,24 @@ pub fn confirm_with(
     caller: &Caller,
     actions: &Actions<'_>,
 ) -> Result<Done, CoreError> {
+    confirm_into_with(data_dir, text, typed, None, caller, actions)
+}
+
+/// `confirm_with`, and with `into` (#347) a restore request goes to that new private repo
+/// (`owner/name`, another name than the request's repo) through `actions.restore_new` instead
+/// of over the live one. The guard and the typed name are the same: the name typed is still
+/// the request's repo. A name that is not an `owner/name`, or is the repo itself, is `Refused`
+/// before anything runs. A restore that held something back keeps the new repo's name in its
+/// record, and its next confirm goes there whatever `into` says then. `into` on an archive
+/// request is `Refused`.
+pub fn confirm_into_with(
+    data_dir: &Path,
+    text: &str,
+    typed: &str,
+    into: Option<&str>,
+    caller: &Caller,
+    actions: &Actions<'_>,
+) -> Result<Done, CoreError> {
     let local = LocalItems::new(data_dir);
     let records = HeldRecords::new(data_dir);
     let source = Source::GuardedAction {
@@ -213,12 +238,32 @@ pub fn confirm_with(
             // Read before anything runs: a record that cannot be read refuses the confirm
             // here, not after the restore pushed and its record could not be kept.
             let kept = records.get(text)?;
-            let pass = if item.action == HELD_ACTION {
+            let held = item.action == HELD_ACTION;
+            let new = if held {
+                kept.as_ref().and_then(|made| made.into.clone())
+            } else {
+                into.map(str::to_string)
+            };
+            if let Some(new) = &new {
+                new_repo_ok(&what, repo, new)?;
+            }
+            let pass = if held {
                 Pass::Held(kept.unwrap_or_default())
             } else {
                 Pass::Whole
             };
-            let report = (actions.restore)(caller, repo, &pass)?;
+            let mut report = match &new {
+                Some(new) => (actions.restore_new)(caller, repo, new, &pass)?,
+                None => (actions.restore)(caller, repo, &pass)?,
+            };
+            report.made.into = new.clone();
+            let (what, target) = match &new {
+                Some(new) => (
+                    format!("restore {repo} into the new private repo {new}"),
+                    format!("restore of {repo} into {new}"),
+                ),
+                None => (what, format!("restore over {repo}")),
+            };
             let cleared = !report.issues.held();
             if cleared {
                 local.remove(&source)?;
@@ -227,7 +272,7 @@ pub fn confirm_with(
                 records.set(text, Some(&report.made))?;
                 local.add(Item {
                     why: format!(
-                        "The restore over {repo} pushed the backup's refs; {}. A confirm now \
+                        "The {target} pushed the backup's refs; {}. A confirm now \
                          only queues and sends those: it pushes nothing again (CORE-3).",
                         held_back(&report)
                     ),
@@ -235,16 +280,28 @@ pub fn confirm_with(
                     ..item
                 })?;
             }
+            let mut lines = lines_of(&report, &pass);
+            if let (Some(new), Pass::Whole) = (&new, &pass) {
+                lines.insert(
+                    0,
+                    format!("{new} was created as a private repo; {repo} was left as it is"),
+                );
+            }
             Ok(Done {
                 what: match pass {
                     Pass::Whole => what,
                     Pass::Held(_) => format!("{what} (what was held back)"),
                 },
-                lines: lines_of(&report, &pass),
+                lines,
                 cleared,
             })
         }
         GuardedAction::DeleteRepo { repo } => {
+            if into.is_some() {
+                return Err(CoreError::Refused(format!(
+                    "{what}: an archive has no new repo to go to; nothing was changed"
+                )));
+            }
             typed_is(&what, repo, typed)?;
             let line = match (actions.archive)(caller, repo)? {
                 Archived::Now => {
@@ -426,6 +483,31 @@ fn typed_is(what: &str, repo: &str, typed: &str) -> Result<(), CoreError> {
     )))
 }
 
+/// #347: `new` can be the new private repo of a restore of `repo`: an `owner/name` of GitHub's
+/// letters, and another name than `repo`.
+fn new_repo_ok(what: &str, repo: &str, new: &str) -> Result<(), CoreError> {
+    let part = |p: &str| {
+        !p.is_empty()
+            && p != "."
+            && p != ".."
+            && p.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
+    };
+    let named = matches!(new.split_once('/'), Some((owner, name)) if part(owner) && part(name));
+    if !named {
+        return Err(CoreError::Refused(format!(
+            "{what}: {new} is not an owner/name for the new private repo; nothing was changed"
+        )));
+    }
+    if new.eq_ignore_ascii_case(repo) {
+        return Err(CoreError::Refused(format!(
+            "{what}: {new} is the repo itself; a restore to a new private repo needs another \
+             name; nothing was changed"
+        )));
+    }
+    Ok(())
+}
+
 /// `confirm_with` as the app runs it: a restore reads the repo's backup in
 /// `<nextcloud_backups>/github/<owner>/<name>/` and goes to GitHub through
 /// `backup::restore_over_live` (or `backup::restore_held_over_live` for what was held back),
@@ -438,13 +520,34 @@ pub fn confirm(
     typed: &str,
     caller: &Caller,
 ) -> Result<Done, CoreError> {
-    let restore = |caller: &Caller, repo: &str, pass: &Pass| {
+    confirm_into(settings, data_dir, text, typed, None, caller)
+}
+
+/// `confirm`, and with `into` (#347) a restore goes to that new private repo through
+/// `backup::restore_to_new` (`confirm_into_with`).
+pub fn confirm_into(
+    settings: &Settings,
+    data_dir: &Path,
+    text: &str,
+    typed: &str,
+    into: Option<&str>,
+    caller: &Caller,
+) -> Result<Done, CoreError> {
+    let source = |repo: &str| {
         let backups = match settings.nextcloud_backups.as_deref() {
             Some(path) if !path.as_os_str().is_empty() => path,
             _ => return Err(CoreError::MissingPath("nextcloud_backups")),
         };
         let fleet = FleetBridge::new(settings.pipeline_repo()?);
-        let folder = backup_run::folder(backups, repo);
+        Ok((fleet, backup_run::folder(backups, repo)))
+    };
+    let restore_new = |caller: &Caller, repo: &str, new: &str, pass: &Pass| {
+        let (fleet, folder) = source(repo)?;
+        let confirmed = caller.confirmed_in_app;
+        backup::restore_to_new(caller, &fleet, &folder, (repo, new), confirmed, pass)
+    };
+    let restore = |caller: &Caller, repo: &str, pass: &Pass| {
+        let (fleet, folder) = source(repo)?;
         let confirmed = caller.confirmed_in_app;
         match pass {
             Pass::Whole => backup::restore_over_live(caller, &fleet, &folder, repo, confirmed),
@@ -457,14 +560,16 @@ pub fn confirm(
         let tokens = crate::platform::GhAuthToken::default();
         archive::archive_repo(caller, &HttpTransport::new(&tokens)?, repo)
     };
-    confirm_with(
+    confirm_into_with(
         data_dir,
         text,
         typed,
+        into,
         caller,
         &Actions {
             restore: &restore,
             archive: &archive,
+            restore_new: &restore_new,
         },
     )
 }

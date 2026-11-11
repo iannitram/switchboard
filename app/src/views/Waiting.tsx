@@ -58,8 +58,18 @@ export function guardedRequest(item: WaitingItemData): GuardedRequest | null {
   return { kind, repo: found[2] };
 }
 
-// What Confirm does, in the confirm step.
-export function confirmLine(request: GuardedRequest): string {
+// #347: whether `name` can be the new private repo of a restore of `repo`: an `owner/name`, and
+// another name than the repo's (the core checks again, confirm.rs `new_repo_ok`).
+export function newRepoOk(name: string, repo: string): boolean {
+  return /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(name) && !/\/\.\.?$|^\.\.?\//.test(name) && name.toLowerCase() !== repo.toLowerCase();
+}
+
+// What Confirm does, in the confirm step. `into` is the new private repo a restore goes to
+// instead of over the live one (#347).
+export function confirmLine(request: GuardedRequest, into?: string): string {
+  if (request.kind === "restore" && into !== undefined) {
+    return `Confirm creates the new private repo ${into} on GitHub and restores the backup of ${request.repo} into it. ${request.repo} itself is left as it is.`;
+  }
   switch (request.kind) {
     case "archive":
       return `Confirm archives ${request.repo} on GitHub: it becomes read-only. Nothing is deleted.`;
@@ -76,12 +86,16 @@ export function confirmLine(request: GuardedRequest): string {
 // enabled only while the box holds the repo's `owner/name`, letter for letter; only it sends
 // `confirmed: true`, with the name typed, and the core checks the name again. Cancel sends
 // nothing. "Drop the request" turns the request down: it only takes the item out of the list,
-// needs no name typed and archives, pushes and queues nothing (CORE-3, #347).
+// needs no name typed and archives, pushes and queues nothing (CORE-3, #347). A restore request
+// can go to a new private repo instead (off unless I tick it): Confirm then also sends `into`,
+// the new repo's name, and needs the same name typed.
 export function Waiting() {
   const [items, setItems] = useState<WaitingItemData[]>([]);
   const [error, setError] = useState<CoreError | null>(null);
   const [asking, setAsking] = useState<WaitingItemData | null>(null);
   const [typed, setTyped] = useState("");
+  const [toNew, setToNew] = useState(false);
+  const [newName, setNewName] = useState("");
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState<ConfirmDone | null>(null);
   const [refused, setRefused] = useState<CoreError | null>(null);
@@ -116,17 +130,20 @@ export function Waiting() {
     setDropped(null);
     setRefused(null);
     setTyped("");
+    setToNew(false);
+    setNewName(`${guardedRequest(item)?.repo}-restored`);
     setAsking(item);
   };
 
   const request = asking && guardedRequest(asking);
-  const matches = !!request && typed === request.repo;
+  const into = request?.kind === "restore" && toNew ? newName : undefined;
+  const matches = !!request && typed === request.repo && (into === undefined || newRepoOk(into, request.repo));
 
   const confirm = async () => {
     const text = asking && guardedText(asking);
     if (!text || busy || !matches) return;
     setBusy(true);
-    const res = await call<ConfirmDone>("confirm_guarded", { text, confirmed: true, typed });
+    const res = await call<ConfirmDone>("confirm_guarded", into === undefined ? { text, confirmed: true, typed } : { text, confirmed: true, typed, into });
     if (!live.current) return;
     setBusy(false);
     setAsking(null);
@@ -171,7 +188,26 @@ export function Waiting() {
       {asking && request && (
         <section role="group" aria-label="Confirm">
           <p data-part="request">{asking.what}</p>
-          <p data-part="does">{confirmLine(request)}</p>
+          <p data-part="does">{confirmLine(request, into)}</p>
+          {request.kind === "restore" && (
+            <label>
+              <input type="checkbox" checked={toNew} disabled={busy} onChange={(e) => setToNew(e.target.checked)} />
+              Restore to a new private repo instead
+            </label>
+          )}
+          {into !== undefined && (
+            <label>
+              New private repo
+              <input
+                type="text"
+                value={newName}
+                disabled={busy}
+                autoComplete="off"
+                spellCheck={false}
+                onChange={(e) => setNewName(e.target.value)}
+              />
+            </label>
+          )}
           <p>Cancel leaves the request waiting. Drop the request takes it out of this list and does nothing else.</p>
           <label>
             Type {request.repo} to confirm

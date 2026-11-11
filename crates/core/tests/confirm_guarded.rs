@@ -10,7 +10,7 @@ use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use switchboard_core::backup::{Created, IssuesReport, Made, Pass, RestoreReport};
 use switchboard_core::confirm::{
-    confirm_with, drop_request, drop_requests_for, guarded_request, Actions, Done, Dropped,
+    confirm_into_with, drop_request, drop_requests_for, guarded_request, Actions, Done, Dropped,
     HeldRecords, HELD_ACTION,
 };
 use switchboard_core::github::archive::Archived;
@@ -113,6 +113,8 @@ struct Restore {
     calls: RefCell<Vec<(Caller, String)>>,
     passes: RefCell<Vec<Pass>>,
     archives: RefCell<Vec<(Caller, String)>>,
+    /// #347: each restore into a new private repo: the repo, the new repo and the pass.
+    news: RefCell<Vec<(String, String, Pass)>>,
     report: RefCell<Result<RestoreReport, CoreError>>,
     archived: Result<Archived, CoreError>,
 }
@@ -123,6 +125,7 @@ impl Restore {
             calls: RefCell::new(Vec::new()),
             passes: RefCell::new(Vec::new()),
             archives: RefCell::new(Vec::new()),
+            news: RefCell::new(Vec::new()),
             report: RefCell::new(report),
             archived: Ok(Archived::Now),
         }
@@ -140,12 +143,31 @@ impl Restore {
         typed: &str,
         who: &Caller,
     ) -> Result<Done, CoreError> {
-        confirm_with(
+        self.run_into(data, text, typed, None, who)
+    }
+
+    /// Confirm `text` as a restore into the new private repo `into` (#347).
+    fn run_into(
+        &self,
+        data: &Path,
+        text: &str,
+        typed: &str,
+        into: Option<&str>,
+        who: &Caller,
+    ) -> Result<Done, CoreError> {
+        confirm_into_with(
             data,
             text,
             typed,
+            into,
             who,
             &Actions {
+                restore_new: &|_, repo, new, pass| {
+                    self.news
+                        .borrow_mut()
+                        .push((repo.to_string(), new.to_string(), pass.clone()));
+                    self.report.borrow().clone()
+                },
                 restore: &|caller, repo, pass| {
                     self.calls
                         .borrow_mut()
@@ -163,9 +185,11 @@ impl Restore {
         )
     }
 
-    /// True when neither the restore nor the archive ran.
+    /// True when no restore (over the live repo or into a new one) and no archive ran.
     fn idle(&self) -> bool {
-        self.calls.borrow().is_empty() && self.archives.borrow().is_empty()
+        self.calls.borrow().is_empty()
+            && self.archives.borrow().is_empty()
+            && self.news.borrow().is_empty()
     }
 }
 
@@ -850,4 +874,133 @@ fn an_unreadable_record_stops_the_drop() {
     let got = drop_requests_for(&data, &restore(), &app);
     assert!(matches!(got, Err(CoreError::Parse(_))), "{got:?}");
     unchanged(&data, &before);
+}
+
+const NEW: &str = "owner/alpha-restored";
+
+/// #347: a confirmed restore with a new repo's name goes there, never over the live repo, and
+/// needs the same typed name as a restore over it.
+#[test]
+fn a_confirmed_restore_into_a_new_repo_runs_that_and_leaves_the_live_repo_alone() {
+    let (data, _) = seeded("new-repo");
+    let run = Restore::answering(Ok(report()));
+    let app = caller(Face::Gui, None, false, true);
+    let text = text_of(&asked(&restore()));
+    let done = run.run_into(&data, &text, REPO, Some(NEW), &app).unwrap();
+    assert_eq!(
+        *run.news.borrow(),
+        vec![(REPO.to_string(), NEW.to_string(), Pass::Whole)]
+    );
+    assert!(run.calls.borrow().is_empty(), "nothing over the live repo");
+    assert!(run.archives.borrow().is_empty());
+    assert_eq!(
+        done.what,
+        "restore owner/alpha into the new private repo owner/alpha-restored"
+    );
+    assert_eq!(
+        done.lines[..2],
+        [
+            "owner/alpha-restored was created as a private repo; owner/alpha was left as it is"
+                .to_string(),
+            "3 refs pushed".to_string(),
+        ]
+    );
+    assert!(done.cleared);
+    assert_eq!(
+        LocalItems::new(&data).load().unwrap(),
+        vec![asked(&delete())]
+    );
+}
+
+/// The same guard and the same typed name as a restore over the live repo; a name that cannot
+/// be a new repo is refused too. Every refusal runs nothing and changes nothing.
+#[test]
+fn a_restore_into_a_new_repo_is_refused_like_a_restore_and_for_a_bad_name() {
+    let (data, before) = seeded("new-repo-refused");
+    let run = Restore::answering(Ok(report()));
+    let text = text_of(&asked(&restore()));
+    let app = caller(Face::Gui, None, false, true);
+    for who in [
+        caller(Face::Gui, None, false, false),
+        caller(Face::Gui, None, true, true),
+        caller(Face::Cli, Some(Role::ProjectManager), false, true),
+        caller(Face::Mcp, Some(Role::ProjectManager), false, true),
+    ] {
+        refused(run.run_into(&data, &text, REPO, Some(NEW), &who));
+    }
+    for typed in ["", NEW, "owner/alph", "Owner/Alpha"] {
+        let why = refused(run.run_into(&data, &text, typed, Some(NEW), &app));
+        assert!(why.contains("type owner/alpha to confirm"), "{why}");
+    }
+    for bad in [
+        "",
+        "alpha",
+        "owner/",
+        "/alpha",
+        "a/b/c",
+        "owner/..",
+        "owner/a b",
+    ] {
+        let why = refused(run.run_into(&data, &text, REPO, Some(bad), &app));
+        assert!(why.contains("is not an owner/name"), "{bad}: {why}");
+    }
+    for itself in [REPO, "Owner/Alpha"] {
+        let why = refused(run.run_into(&data, &text, REPO, Some(itself), &app));
+        assert!(why.contains("is the repo itself"), "{why}");
+    }
+    // An archive has no new repo.
+    let why = refused(run.run_into(&data, &text_of(&asked(&delete())), REPO, Some(NEW), &app));
+    assert!(why.contains("an archive has no new repo"), "{why}");
+    assert!(run.idle());
+    unchanged(&data, &before);
+}
+
+/// A restore into a new repo that held something back remembers the new repo: the next
+/// confirm does what was held back there, whatever is asked then.
+#[test]
+fn what_a_restore_into_a_new_repo_held_back_is_done_in_that_repo() {
+    let (data, _) = seeded("new-repo-held");
+    let mut held = report();
+    held.issues.comments_waiting = 2;
+    let run = Restore::answering(Ok(held));
+    let app = caller(Face::Gui, None, false, true);
+    let text = text_of(&asked(&restore()));
+    let done = run.run_into(&data, &text, REPO, Some(NEW), &app).unwrap();
+    assert!(!done.cleared);
+    let record = Made {
+        into: Some(NEW.to_string()),
+        ..Made::default()
+    };
+    assert_eq!(
+        HeldRecords::new(&data).get(&text).unwrap(),
+        Some(record.clone())
+    );
+    let kept = LocalItems::new(&data).load().unwrap()[1].clone();
+    assert_eq!(kept.action, HELD_ACTION);
+    assert!(
+        kept.why
+            .starts_with("The restore of owner/alpha into owner/alpha-restored pushed"),
+        "{}",
+        kept.why
+    );
+
+    // The next confirm names no new repo (the held step has no box for one): it still goes
+    // to the new repo, as the held pass, and never over the live one.
+    *run.report.borrow_mut() = Ok(RestoreReport::default());
+    let done = run.run(&data, &text, &app).unwrap();
+    assert!(done.cleared);
+    assert_eq!(
+        done.what,
+        "restore owner/alpha into the new private repo owner/alpha-restored (what was held back)"
+    );
+    assert_eq!(done.lines[0], "no ref was pushed again");
+    assert_eq!(
+        *run.news.borrow(),
+        vec![
+            (REPO.to_string(), NEW.to_string(), Pass::Whole),
+            (REPO.to_string(), NEW.to_string(), Pass::Held(record)),
+        ]
+    );
+    assert!(run.calls.borrow().is_empty(), "nothing over the live repo");
+    assert_eq!(HeldRecords::new(&data).get(&text).unwrap(), None);
 }

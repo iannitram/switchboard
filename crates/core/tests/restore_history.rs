@@ -6,10 +6,12 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use switchboard_core::backup::{
-    restore_history_from, write_json, FileSource, RecordedAnswers, Remote, RestoreReport,
+    restore_history_from, restore_to_new_from, write_json, FileSource, Made, Pass, RecordedAnswers,
+    Remote, RestoreReport,
 };
 use switchboard_core::fleet::FleetBridge;
 use switchboard_core::github::transport::{Recorded, RestAnswer};
+use switchboard_core::rules::{Caller, Face, Role};
 use switchboard_core::CoreError;
 
 const NEW: &str = "owner/restored";
@@ -571,5 +573,188 @@ fn what_is_not_restored_is_listed_in_the_report() {
             "1 closed milestones are open until the issues are restored: restore_issues closes \
              them",
         ]
+    );
+}
+
+fn who(face: Face, in_job_worktree: bool) -> Caller {
+    Caller {
+        face,
+        role: Some(Role::ProjectManager),
+        in_job_worktree,
+        confirmed_in_app: true,
+    }
+}
+
+/// #347: a restore to a new private repo, as the app's confirm step runs it: the repo is asked
+/// for through the create queue as private, the refs go to it, and the backed-up repo
+/// (`owner/demo`) is never asked about or written.
+#[test]
+fn a_restore_to_a_new_repo_asks_the_queue_for_a_private_repo_and_never_touches_the_live_one() {
+    let f = fixture("to-new");
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            answer(404, json!({"message": "Not Found"})),
+            answer(200, json!({"full_name": NEW, "private": true})),
+            // `restore_issues`: the new repo has no issue yet.
+            answer(200, json!([])),
+        ],
+    );
+    let report = restore_to_new_from(
+        &who(Face::Gui, false),
+        &f.fleet,
+        &f.backup,
+        ("owner/demo", NEW),
+        true,
+        &Pass::Whole,
+        &remote(&f, &api),
+    )
+    .unwrap();
+    assert_eq!((report.refs, report.labels, report.milestones), (3, 2, 1));
+    assert_eq!(
+        report.made,
+        Made {
+            into: Some(NEW.to_string()),
+            ..Made::default()
+        }
+    );
+    // The create the queue was given: the new repo, private.
+    assert_eq!(
+        queued(&f)[0],
+        json!({"kind": "repo", "repo": NEW, "private": true})
+    );
+    for item in queued(&f) {
+        assert_eq!(item["repo"], NEW, "{item}");
+    }
+    for pattern in ["refs/heads", "refs/tags"] {
+        assert_eq!(refs_of(&f.target, pattern), refs_of(&f.source, pattern));
+    }
+    for line in api.log.lock().unwrap().iter() {
+        assert!(!line.contains("owner/demo"), "{line}");
+        assert!(line.starts_with("GET "), "{line}");
+    }
+    // The last read is `restore_issues` looking at the new repo's issues.
+    assert_eq!(
+        *api.log.lock().unwrap(),
+        vec![
+            format!("GET /repos/{NEW}"),
+            format!("GET /repos/{NEW}"),
+            format!("GET /repos/{NEW}/issues?state=all&per_page=100&page=1"),
+        ]
+    );
+}
+
+#[test]
+fn a_new_repo_name_that_exists_is_refused_before_anything_is_queued_or_pushed() {
+    let f = fixture("to-new-taken");
+    let api = Recorded::new(
+        Vec::new(),
+        vec![answer(200, json!({"full_name": NEW, "private": true}))],
+    );
+    match restore_to_new_from(
+        &who(Face::Gui, false),
+        &f.fleet,
+        &f.backup,
+        ("owner/demo", NEW),
+        true,
+        &Pass::Whole,
+        &remote(&f, &api),
+    ) {
+        Err(CoreError::Refused(why)) => assert!(why.contains("already exists"), "{why}"),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    assert!(queued(&f).is_empty());
+    assert!(!f.stub.join("calls.log").exists(), "no fleet call at all");
+    assert!(refs_of(&f.target, "refs").is_empty());
+    assert_eq!(*api.log.lock().unwrap(), vec![format!("GET /repos/{NEW}")]);
+}
+
+/// The same guarded confirm as a restore over the live repo, and the new name is another name.
+#[test]
+fn a_restore_to_a_new_repo_without_the_guarded_confirm_reads_and_writes_nothing() {
+    let f = fixture("to-new-guard");
+    let api = Recorded::new(Vec::new(), Vec::new());
+    let cases = [
+        (
+            who(Face::Gui, false),
+            false,
+            NEW,
+            "needs a confirm in the app",
+        ),
+        (
+            who(Face::Gui, true),
+            true,
+            NEW,
+            "refused inside a job worktree",
+        ),
+        (
+            who(Face::Cli, false),
+            true,
+            NEW,
+            "needs a confirm in the app",
+        ),
+        (
+            who(Face::Mcp, false),
+            true,
+            NEW,
+            "needs a confirm in the app",
+        ),
+        (
+            who(Face::Gui, false),
+            true,
+            "owner/demo",
+            "is the repo itself",
+        ),
+        (
+            who(Face::Gui, false),
+            true,
+            "Owner/Demo",
+            "is the repo itself",
+        ),
+    ];
+    for (caller, confirmed, new, needle) in cases {
+        for pass in [Pass::Whole, Pass::Held(Made::default())] {
+            match restore_to_new_from(
+                &caller,
+                &f.fleet,
+                &f.backup,
+                ("owner/demo", new),
+                confirmed,
+                &pass,
+                &remote(&f, &api),
+            ) {
+                Err(CoreError::Refused(why)) => assert!(why.contains(needle), "{why}"),
+                other => panic!("expected a refusal, got {other:?}"),
+            }
+        }
+    }
+    assert!(api.log.lock().unwrap().is_empty());
+    assert!(!f.stub.join("calls.log").exists(), "no fleet call at all");
+    assert!(refs_of(&f.target, "refs").is_empty());
+}
+
+/// What the first pass held back is done in the new repo: no repo is created, no ref pushed.
+#[test]
+fn the_held_pass_of_a_restore_to_a_new_repo_creates_and_pushes_nothing() {
+    let f = fixture("to-new-held");
+    let api = Recorded::new(Vec::new(), vec![answer(200, json!([]))]);
+    let report = restore_to_new_from(
+        &who(Face::Gui, false),
+        &f.fleet,
+        &f.backup,
+        ("owner/demo", NEW),
+        true,
+        &Pass::Held(Made::default()),
+        &remote(&f, &api),
+    )
+    .unwrap();
+    assert_eq!((report.refs, report.labels, report.milestones), (0, 0, 0));
+    assert!(queued(&f).iter().all(|item| item["kind"] != "repo"));
+    assert!(refs_of(&f.target, "refs").is_empty());
+    assert_eq!(
+        *api.log.lock().unwrap(),
+        vec![format!(
+            "GET /repos/{NEW}/issues?state=all&per_page=100&page=1"
+        )]
     );
 }

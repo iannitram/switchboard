@@ -243,3 +243,71 @@ test("a drop the core refuses shows its text and the request stays listed", asyn
   expect(screen.queryByRole("status")).toBeNull();
   expect(confirmCalls()).toEqual([]);
 });
+
+// #347: a restore to a new private repo, from the confirm step.
+const newBox = () => screen.getByRole("checkbox", { name: "Restore to a new private repo instead" }) as HTMLInputElement;
+const newName = () => screen.getByRole("textbox", { name: "New private repo" }) as HTMLInputElement;
+
+test("a restore goes over the live repo unless the new-repo box is ticked, and only a restore has the box", async () => {
+  core([[GUARDED, GUARDED_DELETE, HELD]], { ok: { what: "", lines: [], cleared: true } });
+  render(<Waiting />);
+  await screen.findAllByRole("article");
+  fireEvent.click(screen.getAllByRole("button", { name: "Confirm in the app" })[0]);
+  expect(newBox().checked).toBe(false);
+  expect(screen.queryByRole("textbox", { name: "New private repo" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  fireEvent.click(screen.getAllByRole("button", { name: "Confirm in the app" })[1]);
+  expect(screen.queryByRole("checkbox")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  fireEvent.click(screen.getByRole("button", { name: HELD_ACTION }));
+  expect(screen.queryByRole("checkbox")).toBeNull();
+});
+
+test("a restore to a new private repo sends its name as into, with the same typed confirm", async () => {
+  const what = "restore owner/alpha into the new private repo owner/alpha-restored";
+  core([[GUARDED], []], { ok: { what, lines: ["owner/alpha-restored was created as a private repo; owner/alpha was left as it is"], cleared: true } });
+  render(<Waiting />);
+  await screen.findAllByRole("article");
+  fireEvent.click(screen.getByRole("button", { name: "Confirm in the app" }));
+  fireEvent.click(newBox());
+  expect(newName().value).toBe("owner/alpha-restored");
+  const step = screen.getByRole("group", { name: "Confirm" });
+  expect(
+    within(step).getByText(
+      "Confirm creates the new private repo owner/alpha-restored on GitHub and restores the backup of owner/alpha into it. owner/alpha itself is left as it is.",
+    ),
+  ).toBeTruthy();
+  expect(within(step).queryByText(/pushed over the live ones/)).toBeNull();
+  // The repo's own name must still be typed.
+  expect(confirmButton().disabled).toBe(true);
+  type("owner/alpha");
+  expect(confirmButton().disabled).toBe(false);
+  // A name that cannot be a new repo, or is the repo itself, keeps Confirm off.
+  for (const bad of ["", "alpha-restored", "owner/alpha", "Owner/Alpha", "owner/a b", "owner/..", "a/b/c"]) {
+    fireEvent.change(newName(), { target: { value: bad } });
+    expect(confirmButton().disabled).toBe(true);
+    fireEvent.click(confirmButton());
+  }
+  expect(confirmCalls()).toEqual([]);
+  fireEvent.change(newName(), { target: { value: "owner/alpha-copy" } });
+  fireEvent.click(confirmButton());
+  const status = await screen.findByRole("status");
+  expect(within(status).getByText(`${what}: done`)).toBeTruthy();
+  expect(confirmCalls()).toEqual([["confirm_guarded", { text: RESTORE, confirmed: true, typed: "owner/alpha", into: "owner/alpha-copy" }]]);
+});
+
+test("the new-repo box does not carry over to the next request", async () => {
+  core([[GUARDED]], { ok: { what: "", lines: [], cleared: true } });
+  render(<Waiting />);
+  await screen.findAllByRole("article");
+  fireEvent.click(screen.getByRole("button", { name: "Confirm in the app" }));
+  fireEvent.click(newBox());
+  fireEvent.change(newName(), { target: { value: "owner/other" } });
+  fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  fireEvent.click(screen.getByRole("button", { name: "Confirm in the app" }));
+  expect(newBox().checked).toBe(false);
+  type("owner/alpha");
+  fireEvent.click(confirmButton());
+  await screen.findByRole("status");
+  expect(confirmCalls()).toEqual([["confirm_guarded", { text: RESTORE, confirmed: true, typed: "owner/alpha" }]]);
+});
