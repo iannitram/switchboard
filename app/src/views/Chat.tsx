@@ -28,7 +28,7 @@ export type Pick =
 /** The route's pick as the core serialises it on the wire (`ChatPick` in `frontdoor/chat.rs`). */
 export type RoutePick =
   | { to: "service"; service: string; model: string }
-  | { to: "claude-handoff"; reason: string }
+  | { to: "claude-handoff"; reason: string; model?: string }
   | { to: "wait"; reason: string };
 
 export type ChatHandoffProps = {
@@ -176,7 +176,8 @@ const defaultImplicit: ChatImplicit = (args) => call<null>("chat_implicit", args
 export function moveLine(route: ChatRoute): string | null {
   if (!route.moved_from) return null;
   const pick = route.pick;
-  const to = pick?.to === "service" ? `${pick.service}/${pick.model}` : pick?.to === "claude-handoff" ? "claude" : "not recorded";
+  const claude = pick?.to === "claude-handoff" ? (pick.model ? `claude/${pick.model}` : "claude") : null;
+  const to = pick?.to === "service" ? `${pick.service}/${pick.model}` : claude ?? "not recorded";
   return `${route.moved_from.replace(" ", "/")} → ${to}: ${route.moved_why ?? "not recorded"}`;
 }
 

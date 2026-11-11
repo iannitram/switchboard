@@ -178,7 +178,8 @@ fn a_claude_handoff_pick_carries_its_reason() {
     assert_eq!(
         ChatRoute::from(&r).pick,
         ChatPick::ClaudeHandoff {
-            reason: "big with tools".to_string()
+            reason: "big with tools".to_string(),
+            model: None,
         }
     );
 }

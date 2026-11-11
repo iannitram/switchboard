@@ -19,8 +19,10 @@ const ASK: &str = "what is a worktree";
 const ANSWER: &str = "A second checkout of one repo.";
 
 /// Logs each call (argv, and the stdin of `attach`) to `calls.log` beside `tools/`; `actions`
-/// prints the fixture's index, `budget` exits STUB_BUDGET_EXIT (75 for a lane in STUB_BRAKED),
-/// `attach` STUB_ATTACH_EXIT.
+/// prints the fixture's index, `budget allow` exits STUB_BUDGET_EXIT (75 for a lane in
+/// STUB_BRAKED), `budget --json` prints the snapshot on disk as the stub sees it (a pool braked
+/// as `budget allow` would answer, `brake`, else `on-pace`; the pools in STUB_STALE stale and
+/// 95 minutes old), `attach` STUB_ATTACH_EXIT.
 const FLEET: &str = r#"import json, os, pathlib, sys
 root = pathlib.Path(__file__).resolve().parent.parent.parent
 argv = sys.argv[1:]
@@ -29,6 +31,19 @@ with open(root / "calls.log", "a", encoding="utf-8", newline="\n") as fh:
     fh.write(json.dumps({"argv": argv, "stdin": data}) + "\n")
 if argv[:1] == ["actions"]:
     sys.stdout.write((root / "answers" / "actions.json").read_text(encoding="utf-8"))
+    sys.exit(0)
+if argv[:2] == ["budget", "--json"]:
+    braked = os.environ.get("STUB_BRAKED", "").split(",")
+    every = os.environ.get("STUB_BUDGET_EXIT", "0") == "75"
+    stale = os.environ.get("STUB_STALE", "").split(",")
+    pools = {}
+    for pool in ["claude", "claudeapi", "chatgpt", "deepseek", "gemini", "qwen"]:
+        pools[pool] = {
+            "verdict": "brake" if every or pool in braked else "on-pace",
+            "reading_age_min": 95 if pool in stale else 5,
+            "stale": pool in stale,
+        }
+    sys.stdout.write(json.dumps(pools))
     sys.exit(0)
 if argv[:1] == ["budget"]:
     if argv[2:3] and argv[2] in os.environ.get("STUB_BRAKED", "").split(","):
@@ -329,14 +344,65 @@ fn a_dry_run_prints_the_route_and_its_reason_and_sends_stores_and_spends_nothing
     );
     assert_eq!(w.asked(), 0);
     assert!(w.threads().is_empty());
+    // #430: a dry run reads the budget snapshot on disk; it never asks `budget allow` (which
+    // may refresh a stale paid pool) and never refreshes.
     let calls = w.fleet_calls();
     assert!(!calls.is_empty());
     for (argv, _) in &calls {
         assert!(
-            argv.starts_with("actions") || argv.starts_with("budget allow"),
+            argv.starts_with("actions") || argv == "budget --json",
             "{argv}"
         );
     }
+}
+
+#[test]
+fn a_dry_run_answers_from_the_snapshot_and_says_how_old_a_stale_one_is() {
+    // #430: the snapshot is the answer: a pool braked in it is skipped, and a stale reading is
+    // named with its age. Nothing refreshes it and nothing is written.
+    let w = world("dry-stale");
+    let out = w.run_with(
+        &["ask", ASK, "--dry-run"],
+        &[("STUB_STALE", "gemini,deepseek")],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(
+        stdout(&out),
+        format!(
+            "route: qwen {MODEL}\nreason: labeller, kind quick-lookup\n\
+             dry run: nothing sent, nothing stored, nothing spent\n\
+             budget snapshot: stale (deepseek 95 min old, gemini 95 min old)\n"
+        )
+    );
+    let json = w.run_with(
+        &["ask", ASK, "--dry-run", "--json"],
+        &[("STUB_STALE", "gemini,deepseek")],
+    );
+    assert_eq!(
+        json_out(&json)["budget_snapshot"],
+        "stale (deepseek 95 min old, gemini 95 min old)"
+    );
+    for (argv, _) in w.fleet_calls() {
+        assert!(!argv.starts_with("budget allow"), "{argv}");
+        assert!(!argv.contains("--refresh"), "{argv}");
+    }
+    assert!(w.threads().is_empty());
+    assert!(!w.data.join("threads").exists(), "a dry run writes nothing");
+    assert_eq!(w.asked(), 0);
+
+    // qwen braked in the snapshot: the dry run says where the ask would go instead.
+    let out = w.run_with(&["ask", ASK, "--dry-run"], &[("STUB_BRAKED", "qwen")]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(
+        stdout(&out).starts_with("route: gemini "),
+        "{}",
+        stdout(&out)
+    );
+    assert!(
+        !stdout(&out).contains("budget snapshot"),
+        "{}",
+        stdout(&out)
+    );
 }
 
 #[test]
@@ -825,6 +891,20 @@ fn an_ask_whose_pool_is_braked_is_answered_by_qwen_and_says_so() {
     const EDIT: &str = "proofread this note";
     let w = world("fallback");
     let braked = [("STUB_BRAKED", "gemini,claudeapi")];
+
+    // #427: a kind with no Qwen row in the routing table never falls back; it is queued.
+    let out = w.run_with(&pm(&["--json", "ask", EDIT]), &braked);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let reply = json_out(&out);
+    assert_eq!(reply["queued"], "waiting for budget: writing-editing");
+    assert!(reply.get("fallback").is_none(), "{reply}");
+
+    // Give writing-editing a Qwen row: now a braked pool falls back to Qwen.
+    let actions = w.root.join("answers/actions.json");
+    let mut table: Value =
+        serde_json::from_str(&std::fs::read_to_string(&actions).unwrap()).unwrap();
+    table["writing-editing"]["ok"]["qwen"] = json!(true);
+    std::fs::write(&actions, table.to_string()).unwrap();
     let out = w.run_with(&pm(&["ask", EDIT]), &braked);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     let text = stdout(&out);

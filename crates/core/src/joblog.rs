@@ -60,6 +60,11 @@ pub struct JobRow {
     /// budget, why; the chat is not moved by it. None on every other row.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback: Option<String>,
+    /// FD-6 (#428): on a chat's rolling-summary row, how many of the thread's turns (queued
+    /// asks included) the summary covers, so a handoff reuses it until new turns arrive and
+    /// then summarises only those. None on every other row, and on a summary stored before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub covers_turns: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -153,6 +158,7 @@ pub fn row_from_ledger(event: &Value) -> JobRow {
         moved_from: None,
         moved_why: None,
         fallback: None,
+        covers_turns: None,
     }
 }
 

@@ -73,6 +73,9 @@ test("moveLine names where the chat went, or nothing when it did not move", () =
   };
   expect(moveLine(handoff)).toBe('qwen/qwen-small → claude: I said "ask Claude"');
   expect(moveLine({ ...handoff, moved_why: undefined })).toBe("qwen/qwen-small → claude: not recorded");
+  // #428: the move names the Claude model it went to.
+  const withModel: ChatRoute = { ...handoff, pick: { to: "claude-handoff", reason: "ask claude", model: "sonnet" } };
+  expect(moveLine(withModel)).toBe('qwen/qwen-small → claude/sonnet: I said "ask Claude"');
 });
 
 test("sendAsJob names the chat's thread when there is one", async () => {

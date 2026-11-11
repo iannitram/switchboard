@@ -121,7 +121,11 @@ pub fn sample_size(rows_logged: usize) -> usize {
 /// keyed by (service, model); a row without a lane or a model cannot be picked and is skipped.
 /// A pass is rating "pass" or "up". The mean cost is over those last N rows (None is 0.0);
 /// ties on the mean go to the smaller model name, then the smaller service.
+///
+/// #427: a row about an answer the local Qwen lane gave as a fallback (`fallback` set: the
+/// answer, or a rating of it) is left out entirely, so thumbs on a fallback never teach routing.
 pub fn learned_pick(kind: &str, rows: &[JobRow]) -> Option<(String, String)> {
+    let rows: Vec<&JobRow> = rows.iter().filter(|row| row.fallback.is_none()).collect();
     let logged = rows
         .iter()
         .filter(|row| row.kind.as_deref() == Some(kind))

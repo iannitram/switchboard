@@ -4,11 +4,13 @@
 
 use crate::abilities::{AbilitiesIndex, FleetModels};
 use crate::autopilot::may_spend;
+use crate::budget::{self, PoolRow};
 use crate::fleet::FleetBridge;
 use crate::frontdoor::adapters::HttpChatTransport;
+use crate::frontdoor::answer::{braked_why, claude_model_of, MOVE_ROLE};
 use crate::frontdoor::labeller::{LlamaLabeller, SmallLabeller};
 use crate::frontdoor::router::{self, BudgetGate, Complexity, Pick, Route, Step};
-use crate::frontdoor::sticky::{leaves_the_model, move_signals, open_chat, STICKY_STEP};
+use crate::frontdoor::sticky::{leaves_the_model, move_signals, open_chat, OpenChat, STICKY_STEP};
 use crate::frontdoor::thread::ThreadStore;
 use crate::CoreError;
 use serde::Serialize;
@@ -100,9 +102,21 @@ pub struct ChatRoute {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "to", rename_all = "kebab-case")]
 pub enum ChatPick {
-    Service { service: String, model: String },
-    ClaudeHandoff { reason: String },
-    Wait { reason: String },
+    Service {
+        service: String,
+        model: String,
+    },
+    /// `model`: the Claude tier the handoff goes to (#428): the thread's earlier Claude model,
+    /// else the kind's `ok.claude` tier, else `DEFAULT_CLAUDE_MODEL`. None only before the route
+    /// functions or `answer` fill it in.
+    ClaudeHandoff {
+        reason: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+    },
+    Wait {
+        reason: String,
+    },
 }
 
 impl From<&Route> for ChatRoute {
@@ -120,6 +134,7 @@ impl From<&Route> for ChatRoute {
             },
             Pick::ClaudeHandoff(reason) => ChatPick::ClaudeHandoff {
                 reason: reason.clone(),
+                model: None,
             },
             Pick::Wait(reason) => ChatPick::Wait {
                 reason: reason.clone(),
@@ -197,16 +212,131 @@ pub fn route_message_on(
     complexity: Complexity,
     route: impl Fn(&str, &AbilitiesIndex, &dyn BudgetGate, Complexity) -> Route,
 ) -> Result<ChatRoute, CoreError> {
+    let gate = FleetGate::new(fleet);
+    let routed = route_message_gated(fleet, machine, message, complexity, &gate, route);
+    match gate.into_error() {
+        Some(err) => Err(err),
+        None => routed,
+    }
+}
+
+/// `route_message_on` asking `gate` which pools are in budget (a dry run's gate reads the
+/// budget snapshot, #430). The caller takes the gate's error.
+fn route_message_gated(
+    fleet: &FleetBridge,
+    machine: Option<&str>,
+    message: &str,
+    complexity: Complexity,
+    gate: &dyn BudgetGate,
+    route: impl Fn(&str, &AbilitiesIndex, &dyn BudgetGate, Complexity) -> Route,
+) -> Result<ChatRoute, CoreError> {
     if message.trim().is_empty() {
         return Err(CoreError::Refused("chat: empty message".to_string()));
     }
     let index = AbilitiesIndex::load_with(fleet, machine)?;
-    let gate = FleetGate::new(fleet);
-    let picked = route(message, &index, &gate, complexity);
-    if let Some(err) = gate.into_error() {
-        return Err(err);
+    let picked = route(message, &index, gate, complexity);
+    Ok(with_claude_model(ChatRoute::from(&picked), &index, None))
+}
+
+/// #430: a budget gate over the snapshot on disk (`budget::read`, `fleet budget --json`),
+/// which never refreshes a reading: a pool is in budget when its verdict is `push` or
+/// `on-pace`; a pool the snapshot does not list is not. A dry run routes with it.
+pub struct SnapshotGate {
+    rows: Vec<PoolRow>,
+}
+
+impl SnapshotGate {
+    pub fn new(rows: Vec<PoolRow>) -> Self {
+        Self { rows }
     }
-    Ok(ChatRoute::from(&picked))
+
+    /// Read the snapshot. A fleet failure is the error.
+    pub fn read(fleet: &FleetBridge) -> Result<Self, CoreError> {
+        Ok(Self::new(budget::read(fleet)?))
+    }
+
+    /// When any reading in the snapshot is stale, how old: `stale (<pool> <age> min old, ...)`,
+    /// pools in name order; an age the snapshot does not give is `age not recorded`.
+    pub fn stale_line(&self) -> Option<String> {
+        let stale: Vec<String> = self
+            .rows
+            .iter()
+            .filter(|row| row.stale)
+            .map(|row| match row.reading_age_min {
+                Some(age) => format!("{} {age} min old", row.pool),
+                None => format!("{} age not recorded", row.pool),
+            })
+            .collect();
+        (!stale.is_empty()).then(|| format!("stale ({})", stale.join(", ")))
+    }
+}
+
+impl BudgetGate for SnapshotGate {
+    fn allows(&self, service: &str) -> bool {
+        self.rows
+            .iter()
+            .any(|row| row.pool == service && matches!(row.verdict.as_str(), "push" | "on-pace"))
+    }
+}
+
+/// #428: the Claude model a handoff goes to when nothing else names one.
+pub const DEFAULT_CLAUDE_MODEL: &str = "sonnet";
+
+/// #428: a Claude handoff route with its model filled in: `thread_model` (the model the
+/// thread's earlier Claude handoff went to, so a thread stays on one model), else the route
+/// kind's `ok.claude` tier, else `DEFAULT_CLAUDE_MODEL`. Any other route is returned as it is.
+pub(crate) fn with_claude_model(
+    mut route: ChatRoute,
+    index: &AbilitiesIndex,
+    thread_model: Option<String>,
+) -> ChatRoute {
+    if let ChatPick::ClaudeHandoff { model, .. } = &mut route.pick {
+        let tier = route
+            .kind
+            .as_deref()
+            .and_then(|kind| index.claude_tiers.get(kind).cloned());
+        *model = thread_model
+            .or_else(|| model.take())
+            .or(tier)
+            .or_else(|| Some(DEFAULT_CLAUDE_MODEL.to_string()));
+    }
+    route
+}
+
+/// FD-5 (#428): the step a route shows when a chat moved off a braked pool goes back to it.
+pub const BRAKE_LIFTED_STEP: &str = "brake lifted";
+
+/// FD-5 (#428): the models a chat open on `open` moved off because their pool was braked
+/// (`answer::braked_why`), home first: the trailing run of brake moves that ends on the open
+/// model, each move's `moved_from` split into service and model. Empty when the chat did not
+/// get here by a brake move.
+fn brake_homes(rows: &[crate::joblog::JobRow], open: &OpenChat) -> Vec<(String, String)> {
+    let mut homes = Vec::new();
+    let mut at = (open.service.clone(), open.model.clone());
+    for row in rows
+        .iter()
+        .rev()
+        .filter(|row| row.role.as_deref() == Some(MOVE_ROLE))
+    {
+        let to = (
+            row.lane.clone().unwrap_or_default(),
+            row.model.clone().unwrap_or_default(),
+        );
+        let Some((service, model)) = row
+            .moved_from
+            .as_deref()
+            .and_then(|from| from.split_once(' '))
+        else {
+            break;
+        };
+        if to != at || row.moved_why.as_deref() != Some(braked_why(service).as_str()) {
+            break;
+        }
+        at = (service.to_string(), model.to_string());
+        homes.push(at.clone());
+    }
+    homes.reverse();
+    homes
 }
 
 /// How long the labeller may take before the route goes on without it (a slow local model must
@@ -270,6 +400,11 @@ impl BudgetGate for Without<'_> {
 /// `sticky chat`, the thread's kind, the same service and model, and `route` is not asked.
 /// Otherwise `route` picks as for a new chat; after a thumbs down or the model's own handoff
 /// marker it may not pick the open service. No thread, or one with no answer, is a new chat.
+///
+/// #428: a chat that moved off a braked pool (#393) moves back when that pool is in budget
+/// again and no signal moves it: step `brake lifted`, the thread's kind, the model it left
+/// (`brake_homes`; the first in budget, home first), and `route` is not asked. A Claude handoff
+/// carries its model (`with_claude_model`, the thread's earlier Claude model first).
 #[allow(clippy::too_many_arguments)]
 pub fn route_in_thread_on(
     fleet: &FleetBridge,
@@ -280,13 +415,38 @@ pub fn route_in_thread_on(
     complexity: Complexity,
     route: impl Fn(&str, &AbilitiesIndex, &dyn BudgetGate, Complexity) -> Route,
 ) -> Result<ChatRoute, CoreError> {
+    let gate = FleetGate::new(fleet);
+    let routed = route_in_thread_gated(
+        fleet, machine, data_dir, handoff_id, message, complexity, &gate, route,
+    );
+    match gate.into_error() {
+        Some(err) => Err(err),
+        None => routed,
+    }
+}
+
+/// `route_in_thread_on` asking `gate` which pools are in budget (a dry run's gate reads the
+/// budget snapshot, #430). The caller takes the gate's error.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn route_in_thread_gated(
+    fleet: &FleetBridge,
+    machine: Option<&str>,
+    data_dir: &Path,
+    handoff_id: Option<&str>,
+    message: &str,
+    complexity: Complexity,
+    gate: &dyn BudgetGate,
+    route: impl Fn(&str, &AbilitiesIndex, &dyn BudgetGate, Complexity) -> Route,
+) -> Result<ChatRoute, CoreError> {
     let open = match handoff_id {
         Some(id) => open_chat(&ThreadStore::new(data_dir), id)?,
         None => None,
     };
     let Some(open) = open else {
-        return route_message_on(fleet, machine, message, complexity, route);
+        return route_message_gated(fleet, machine, message, complexity, gate, route);
     };
+    let store = ThreadStore::new(data_dir);
+    let rows = store.read(handoff_id.unwrap_or_default())?;
     if message.trim().is_empty() {
         return Err(CoreError::Refused("chat: empty message".to_string()));
     }
@@ -294,8 +454,21 @@ pub fn route_in_thread_on(
     let mut agents: Vec<String> = index.agents.keys().cloned().collect();
     agents.extend(router::CLAUDE_AGENTS.iter().map(|a| a.to_string()));
     let found = move_signals(&open, message, &agents);
-    let gate = FleetGate::new(fleet);
-    let chat = if found.is_empty() && gate.allows(&open.service) {
+    // #428: a chat that moved off a braked pool moves back once that pool is in budget again.
+    let home = if found.is_empty() {
+        brake_homes(&rows, &open)
+            .into_iter()
+            .find(|(service, _)| *service != open.service && gate.allows(service))
+    } else {
+        None
+    };
+    let chat = if let Some((service, model)) = home {
+        ChatRoute {
+            step: BRAKE_LIFTED_STEP.to_string(),
+            kind: open.kind.clone(),
+            pick: ChatPick::Service { service, model },
+        }
+    } else if found.is_empty() && gate.allows(&open.service) {
         ChatRoute {
             step: STICKY_STEP.to_string(),
             kind: open.kind.clone(),
@@ -306,14 +479,12 @@ pub fn route_in_thread_on(
         }
     } else {
         let without = Without {
-            gate: &gate,
+            gate,
             service: leaves_the_model(&found).then_some(open.service.as_str()),
         };
-        ChatRoute::from(&route(message, &index, &without, complexity))
+        let picked = ChatRoute::from(&route(message, &index, &without, complexity));
+        with_claude_model(picked, &index, claude_model_of(&rows))
     };
-    if let Some(err) = gate.into_error() {
-        return Err(err);
-    }
     Ok(chat)
 }
 
@@ -387,34 +558,59 @@ pub struct Fallback {
     pub route: ChatRoute,
     /// Why Qwen answers, said plainly: what the route waited for.
     pub reason: String,
+    /// The route as the router left it (the wait): what the ask is held under when Qwen fails
+    /// mid-answer (#427).
+    pub waited: ChatRoute,
 }
 
-/// FD-3 (#377): an ask whose picked pool is braked or over budget falls back to the local Qwen
-/// lane when that lane is up, and is queued only when Qwen is down too. `waited` is the route
-/// as the router left it; anything but a wait for budget is None (the route stands). A wait
-/// for Claude's budget stays a wait (FD-3: Claude is not swapped for another model without
-/// being asked), and so does an unknown kind. The Qwen lane is up when the fleet config names
-/// this machine's Qwen model and server, `fleet budget allow qwen` allows it, and the server
-/// answers `qwen_up` (asked with its `qwen_server_url`, as Autopilot's probe is). A fleet error from the budget check is the error.
+/// FD-3 (#377, #427): an ask that waits (its picked pool braked or over budget, or waiting for
+/// Claude's budget) falls back to the local Qwen lane when that lane is up and its request kind
+/// has a Qwen row in the routing table; otherwise it is queued for Claude. `waited` is the route
+/// as the router left it; anything but a wait is None (the route stands). A route with no kind,
+/// an unknown kind and a kind with no Qwen row are not answered by Qwen (#427). The Qwen lane is
+/// up when the fleet config names this machine's Qwen model and server, `fleet budget allow
+/// qwen` allows it, and the server answers `qwen_up` (asked with its `qwen_server_url`, as
+/// Autopilot's probe is). A fleet error from the budget check is the error.
 pub fn qwen_fallback_on(
     fleet: &FleetBridge,
     machine: Option<&str>,
     waited: &ChatRoute,
     qwen_up: &dyn Fn(&str) -> bool,
 ) -> Result<Option<Fallback>, CoreError> {
+    let gate = FleetGate::new(fleet);
+    let fallback = qwen_fallback_gated(fleet, machine, waited, &gate, qwen_up);
+    match gate.into_error() {
+        Some(err) => Err(err),
+        None => fallback,
+    }
+}
+
+/// `qwen_fallback_on` asking `gate` whether the Qwen lane may spend (a dry run's gate reads the
+/// budget snapshot, #430). The caller takes the gate's error.
+pub(crate) fn qwen_fallback_gated(
+    fleet: &FleetBridge,
+    machine: Option<&str>,
+    waited: &ChatRoute,
+    gate: &dyn BudgetGate,
+    qwen_up: &dyn Fn(&str) -> bool,
+) -> Result<Option<Fallback>, CoreError> {
     let ChatPick::Wait { reason } = &waited.pick else {
         return Ok(None);
     };
-    if !reason.starts_with("waiting for budget") {
+    let Some(kind) = waited.kind.as_deref() else {
         return Ok(None);
-    }
+    };
     let Some((model, _)) = FleetModels::read_qwen_endpoint(fleet, machine) else {
         return Ok(None);
     };
     let Some(url) = FleetModels::read_qwen_server_url(fleet, machine) else {
         return Ok(None);
     };
-    if !may_spend(fleet, QWEN)? || !qwen_up(&url) {
+    let index = AbilitiesIndex::load_with(fleet, machine)?;
+    if index.model(kind, QWEN).is_none() {
+        return Ok(None);
+    }
+    if !gate.allows(QWEN) || !qwen_up(&url) {
         return Ok(None);
     }
     Ok(Some(Fallback {
@@ -427,7 +623,14 @@ pub fn qwen_fallback_on(
             },
         },
         reason: format!("nothing else is in budget ({reason}), so the local Qwen lane answers"),
+        waited: waited.clone(),
     }))
+}
+
+/// #427: the line a chat shows when Qwen, answering as the fallback, failed mid-answer: the ask
+/// is held (queued) for Claude, as if Qwen had been down. `waited` is the route's wait reason.
+pub fn qwen_failed_line(waited: &str) -> String {
+    format!("Qwen failed mid-answer, so the ask is held for Claude ({waited})")
 }
 
 /// The local lane's service name.

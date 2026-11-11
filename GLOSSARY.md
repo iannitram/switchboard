@@ -95,11 +95,11 @@ A named type of ask in the abilities index, such as quick-lookup or web-research
 _Avoid_: intent, category, task type
 
 **Packet**:
-What travels with a chat when it moves to another model: one summary of the whole thread so far (rewritten at each handoff, never stacked), the last 6 turns word for word, and every file link gathered so far. It never carries the full transcript.
+What travels with a chat when it moves to another model: one summary of the whole thread so far (rewritten at each handoff, never stacked, and reused until new messages arrive), the last 6 turns word for word, and every file link gathered so far. It never carries the full transcript.
 _Avoid_: context dump, transcript
 
 **Sticky chat**:
-A chat stays on its model until a signal moves it: I say "ask Claude" or name an agent, I give a thumbs down, or the model replies with the handoff marker.
+A chat stays on its model until a signal moves it: I say "ask Claude" or name an agent, I give a thumbs down, or the model replies with the handoff marker. When its pool is braked, the chat moves to a pool with budget and says so, and moves back when the brake lifts.
 _Avoid_: pinned chat, session lock
 
 **Handoff marker**:

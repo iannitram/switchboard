@@ -67,6 +67,12 @@ fn fleet(dir: &Path) -> FleetBridge {
     ] {
         std::fs::copy(stub.join(file), root.join(file)).unwrap();
     }
+    // #430: a dry run reads `fleet budget --json`, which names the local qwen pool too.
+    let budget_file = root.join("answers/budget.json");
+    let mut budget: Value =
+        serde_json::from_str(&std::fs::read_to_string(&budget_file).unwrap()).unwrap();
+    budget["qwen"] = json!({ "verdict": "on-pace", "stale": false });
+    std::fs::write(&budget_file, budget.to_string()).unwrap();
     let config = json!({ "machines": { MACHINE: {
         "qwen_capable": true,
         "qwen_model": "qwen3.8-27b",
@@ -137,7 +143,8 @@ fn a_dry_run_is_the_route_alone_and_sends_and_stores_nothing() {
             "step": "labeller",
             "kind": "quick-lookup",
             "pick": { "to": "service", "service": "qwen", "model": "qwen3.8-27b" },
-            "dry_run": true
+            "dry_run": true,
+            "budget_snapshot": "stale (chatgpt 138 min old)"
         })
     );
 }

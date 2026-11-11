@@ -111,3 +111,22 @@ fn a_second_answer_still_short_is_returned_as_it_is_and_not_asked_again() {
         strings(&["src/b.rs", "Which port should the sidecar use?"])
     );
 }
+
+// --- #428: open questions match after trim, lower-case and collapsed spaces ---
+
+#[test]
+fn a_question_matches_after_trimming_lower_casing_and_collapsing_spaces() {
+    let summary = "Open: which  PORT should\n the sidecar use?";
+    let questions = strings(&["  Which port should the sidecar use? "]);
+    assert!(missing_from_summary(summary, &[], &questions).is_empty());
+}
+
+#[test]
+fn a_question_is_never_matched_fuzzily() {
+    let summary = "Open: which ports should the sidecar use?";
+    let questions = strings(&["Which port should the sidecar use?"]);
+    assert_eq!(
+        missing_from_summary(summary, &[], &questions),
+        strings(&["Which port should the sidecar use?"])
+    );
+}
