@@ -2671,4 +2671,41 @@ mod tests {
         let second = work_dir("owner", "demo");
         assert_ne!(first, second);
     }
+
+    /// #426: restores into new repos at once each keep their record and every step they
+    /// finished: none is lost to another's read-change-write.
+    #[test]
+    fn restores_at_once_keep_every_record_and_step() {
+        let data = std::env::temp_dir().join(format!("marks-at-once-{}", crate::lock::run_tag()));
+        const RESTORES: u64 = 8;
+        let running: Vec<_> = (0..RESTORES)
+            .map(|n| {
+                let data = data.clone();
+                std::thread::spawn(move || {
+                    let marks = Marks::new(&data);
+                    let repo = format!("owner/new-{n}");
+                    marks.begin(&repo, "owner/demo", n).unwrap();
+                    marks.finished(&repo, STEP_REFS).unwrap();
+                    marks.finished(&repo, STEP_LABELS).unwrap();
+                })
+            })
+            .collect();
+        for thread in running {
+            thread.join().unwrap();
+        }
+        let marks = Marks::new(&data);
+        for n in 0..RESTORES {
+            let mark = marks.get(&format!("owner/new-{n}")).unwrap();
+            assert_eq!(
+                mark,
+                Some(Mark {
+                    from: "owner/demo".into(),
+                    id: n,
+                    done: vec![STEP_REFS.into(), STEP_LABELS.into()],
+                }),
+                "owner/new-{n}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&data);
+    }
 }
