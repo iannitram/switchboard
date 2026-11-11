@@ -1,9 +1,13 @@
 //! CLI-1: `switchboard sky | waiting | reports | budget | loadout | star <repo>#<n>`, as text or
-//! `--json`, printing what the GUI shows.
+//! `--json`, printing what the GUI shows. `errors` (#375) lists the fleet errors the app
+//! recorded and the open IT tickets.
 //! CLI-2: `switchboard refresh | backup <repo> | backup --all`, the GUI buttons.
 //! CLI-3: a repo delete or a restore over a live repo is refused and becomes a Waiting on you
 //! item; `--role <role> merge <repo>#<pr>` goes through CORE-3; inside a job worktree no role
-//! gives write actions.
+//! gives write actions. `--role budget-manager set_pool_cap <pool> <cap>` and `pool_edit <pool>
+//! [--plan <p>] [--cap <n>] [--reset <day time>] [--cost <n>]` edit a pool through
+//! `rules::guard_pool_edit` and `budget::save_pool_edit`, as MCP's tools do (#357, #374).
+//! `budget --refresh` re-reads the pools first (#374); `settings` prints the settings file (#373).
 //!
 //! The raw `fleet` CLI stays the documented escape hatch: Switchboard keeps no state that only
 //! it can read.
@@ -15,10 +19,11 @@ use std::process::ExitCode;
 use serde_json::{json, Value};
 use switchboard_core::backup::{self, BackupOutcome};
 use switchboard_core::backup_run::{self, BackupRow};
-use switchboard_core::budget::{self, PoolRow};
+use switchboard_core::budget::{self, PoolEdit, PoolRow};
 use switchboard_core::clock::{Clock, SystemClock, UnixSeconds};
 use switchboard_core::error::CoreError;
 use switchboard_core::fleet::FleetBridge;
+use switchboard_core::fleet_errors::{self, FleetErrorRecord};
 use switchboard_core::github::live;
 use switchboard_core::github::merge::{self as gh_merge, MergeJob};
 use switchboard_core::github::poll::{self, Poller};
@@ -61,8 +66,11 @@ const NO_SNAPSHOT: &str = "switchboard: no snapshot yet; run switchboard refresh
 
 pub const USAGE: &str = "usage: switchboard [--help | --version] [--json] [--role <role>] \
                      [--project <repo>] [--outcome <o>] [--pool <p>] \
-                     <sky | waiting | reports | budget | loadout | star <repo>#<n> | \
-                     refresh | backup <repo> | backup --all | delete <repo> | restore <repo> | merge <repo>#<pr> | mcp>";
+                     <sky | waiting | reports | errors | budget [--refresh] | loadout | settings | \
+                     star <repo>#<n> | refresh | backup <repo> | backup --all | delete <repo> | \
+                     restore <repo> | merge <repo>#<pr> | set_pool_cap <pool> <cap> | \
+                     pool_edit <pool> [--plan <p>] [--cap <n>] [--reset <day time>] [--cost <n>] | \
+                     mcp>";
 
 /// The writes a CLI command can reach (CLI-3). The real ones are `CliWrites`; the tests pass
 /// fakes.
@@ -159,7 +167,7 @@ impl CliWrites {
             .as_deref()
             .ok_or("set SWITCHBOARD_DATA to the app data folder")?;
         let store = SnapshotStore::new(data);
-        let snaps = store.load_all().map_err(|e| e.to_string())?;
+        let snaps = readable_snapshots(&store, repo)?;
         let full = resolve_repo(repo, snaps.iter().map(|snap| snap.repo.as_str()))?;
         let snap = full
             .and_then(|full| snaps.iter().find(|snap| snap.repo == full))
@@ -247,11 +255,27 @@ impl Writes for CliWrites {
             .data
             .as_deref()
             .ok_or("set SWITCHBOARD_DATA to the app data folder")?;
-        let snaps = SnapshotStore::new(data)
-            .load_all()
-            .map_err(|e| e.to_string())?;
+        let snaps = readable_snapshots(&SnapshotStore::new(data), repo)?;
         resolve_repo(repo, snaps.iter().map(|snap| snap.repo.as_str()))
             .map(|full| full.map(str::to_string))
+    }
+}
+
+/// The stored snapshots for a write on `repo`. A snapshot file that does not read and could be
+/// `repo` (its `owner/name`, or the name part for a bare name) is the error, so `merge` and
+/// `delete` never work from a view missing the repo they name, nor pick another owner's repo of
+/// the same name (#350).
+fn readable_snapshots(store: &SnapshotStore, repo: &str) -> Result<Vec<RepoSnapshot>, String> {
+    let (snaps, bad) = store.load_each().map_err(|e| e.to_string())?;
+    match bad
+        .iter()
+        .find(|file| repo_known(repo, std::slice::from_ref(&file.repo)))
+    {
+        Some(file) => Err(format!(
+            "{}; run switchboard refresh",
+            terminal_safe(&file.error)
+        )),
+        None => Ok(snaps),
     }
 }
 
@@ -401,6 +425,14 @@ pub fn run_with(
         }
     };
     let (all, argv) = take_all(&argv);
+    let (pool_flags, argv) = match take_pool_flags(&argv) {
+        Ok(taken) => taken,
+        Err(e) => {
+            eprintln!("switchboard: {e}");
+            eprintln!("{USAGE}");
+            return ExitCode::from(2);
+        }
+    };
     let args = match super::parse_args(&argv) {
         Ok(args) => args,
         Err(e) => {
@@ -420,6 +452,16 @@ pub fn run_with(
         eprintln!("switchboard: --project, --outcome and --pool are for reports");
         return ExitCode::from(2);
     }
+    if pool_flags.any_edit() && command != Some("pool_edit") {
+        eprintln!("switchboard: --plan, --cap, --reset and --cost are for pool_edit");
+        eprintln!("{USAGE}");
+        return ExitCode::from(2);
+    }
+    if pool_flags.refresh && command != Some("budget") {
+        eprintln!("switchboard: --refresh is for budget");
+        eprintln!("{USAGE}");
+        return ExitCode::from(2);
+    }
     if all && command != Some("backup") {
         eprintln!("switchboard: --all is for backup");
         eprintln!("{USAGE}");
@@ -427,7 +469,7 @@ pub fn run_with(
     }
     if matches!(
         command,
-        Some("sky" | "waiting" | "reports" | "budget" | "loadout")
+        Some("sky" | "waiting" | "reports" | "errors" | "budget" | "loadout" | "settings")
     ) {
         if let Some(code) = no_more_words(&args) {
             return code;
@@ -450,7 +492,11 @@ pub fn run_with(
             run_backup(&target)
         }
         Some("delete" | "restore" | "merge") => write_command(&args, cwd, now, writes, err),
-        Some("budget") => budget(args.json),
+        Some("budget") => budget(args.json, pool_flags.refresh),
+        Some("set_pool_cap" | "pool_edit") => {
+            pool_command(&args, &pool_flags, cwd, now, err, &mut std::io::stdout())
+        }
+        Some("settings") => settings_command(args.json, &mut std::io::stdout()),
         Some("sky") => sky_command(args.json),
         Some("star") => match args.command.get(1..) {
             Some([target]) => star_command(target, args.json),
@@ -462,6 +508,7 @@ pub fn run_with(
         },
         Some("waiting") => waiting(args.json),
         Some("reports") => reports(args.json, &filter),
+        Some("errors") => errors_command(args.json),
         Some("loadout") => loadout_command(
             &it::read_this_machine(&it::SystemProbeRunner, SystemClock.now()),
             args.json,
@@ -507,7 +554,7 @@ fn run_refresh(json: bool) -> ExitCode {
 /// CLI-2: `refresh` over its seams. Each repo `live::repos` names is tried: a 304 on the
 /// events ETag keeps its snapshot (`unchanged`, GH-2), anything else is read as the Refresh
 /// button reads it (`refreshed`). A repo that fails goes to `err` and the exit is 1 once all
-/// were tried.
+/// were tried. A stdout write that fails is said once (`emit_to`) and the exit is 1.
 pub fn refresh_with(
     transport: &dyn GitHubTransport,
     data: &Path,
@@ -532,13 +579,14 @@ pub fn refresh_with(
     }
     let store = SnapshotStore::new(data);
     let mut failed = false;
+    let mut written = true;
     let mut rows = Vec::new();
     for repo in &repos {
         match refresh_one(transport, &store, clock, repo) {
             Ok(status) => {
                 rows.push(json!({"repo": repo, "status": status}));
                 if !json {
-                    let _ = writeln!(out, "{repo}: {status}");
+                    emit_more(out, &mut written, &format!("{repo}: {status}\n"));
                 }
             }
             Err(e) => {
@@ -549,9 +597,17 @@ pub fn refresh_with(
         }
     }
     if json {
-        let _ = writeln!(out, "{}", Value::Array(rows));
+        emit_more(out, &mut written, &format!("{}\n", Value::Array(rows)));
     }
-    ExitCode::from(u8::from(failed))
+    ExitCode::from(u8::from(failed || !written))
+}
+
+/// `emit_to` for one of several outputs: once a write has failed (`written` false), the rest are
+/// skipped, so the error is said once and the caller exits 1.
+fn emit_more(out: &mut dyn Write, written: &mut bool, text: &str) {
+    if *written {
+        *written = emit_to(out, text) == ExitCode::SUCCESS;
+    }
 }
 
 /// One repo of `refresh`: `unchanged` or `refreshed`.
@@ -625,7 +681,8 @@ fn run_backup(target: &[String]) -> ExitCode {
 /// CLI-2: `backup` over its seams: `back_up` backs one repo up (BAK-1). Each outcome is
 /// recorded as the button records it (`backup_run::record`, so a refusal adds its Waiting on
 /// you item, BAK-2). A refusal or a failure on one repo goes to `err`; the other repos are still
-/// tried and the exit is 1. `target` is one repo, or `--all`; anything else is exit 2.
+/// tried and the exit is 1. `target` is one repo, or `--all`; anything else is exit 2. A
+/// stdout write that fails is said once (`emit_to`) and the exit is 1.
 pub fn backup_with(
     settings: &Settings,
     data: &Path,
@@ -663,13 +720,26 @@ pub fn backup_with(
         return ExitCode::from(1);
     };
     let mut failed = false;
+    let mut written = true;
     for repo in &repos {
         let row: Result<BackupRow, CoreError> = back_up(repo)
             .and_then(|outcome| backup_run::record(data, backups, repo, &outcome, now));
         match row {
             Ok(row) => match &row.reason {
                 None => {
-                    let _ = writeln!(out, "{repo}: backed up to {}", row.folder);
+                    let renamed = row
+                        .manifest
+                        .as_ref()
+                        .and_then(|m| m.resolved_repo.as_deref())
+                        .map(|now| {
+                            format!(
+                                " (GitHub answered for {}: renamed or moved)",
+                                terminal_safe(now)
+                            )
+                        })
+                        .unwrap_or_default();
+                    let line = format!("{repo}: backed up to {}{renamed}\n", row.folder);
+                    emit_more(out, &mut written, &line);
                 }
                 Some(reason) => {
                     failed = true;
@@ -682,7 +752,7 @@ pub fn backup_with(
             }
         }
     }
-    ExitCode::from(u8::from(failed))
+    ExitCode::from(u8::from(failed || !written))
 }
 
 /// CLI-3: `delete <repo>`, `restore <repo>` and `merge <repo>#<pr>` through `rules::guard`. A
@@ -824,6 +894,223 @@ fn take_filter(argv: &[String]) -> Result<(Filter, Vec<String>), String> {
     Ok((filter, rest))
 }
 
+/// BUD-2, BUD-3 (#357, #374): the pool flags taken out of `argv`: `pool_edit`'s `--plan`,
+/// `--cap`, `--reset` and `--cost`, each with its value as given, and `budget --refresh`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PoolFlags {
+    pub plan: Option<String>,
+    pub cap: Option<String>,
+    pub reset: Option<String>,
+    pub cost: Option<String>,
+    pub refresh: bool,
+}
+
+impl PoolFlags {
+    /// Whether any of `pool_edit`'s flags was given.
+    fn any_edit(&self) -> bool {
+        self.plan.is_some() || self.cap.is_some() || self.reset.is_some() || self.cost.is_some()
+    }
+}
+
+/// `PoolFlags` out of `argv`, with the other words kept in order. A value flag with no value is
+/// an error; a value may start with `-` (a negative number is the core's refusal), not `--`.
+pub fn take_pool_flags(argv: &[String]) -> Result<(PoolFlags, Vec<String>), String> {
+    let mut flags = PoolFlags::default();
+    let mut rest = Vec::new();
+    let mut words = argv.iter();
+    while let Some(word) = words.next() {
+        let slot = match word.as_str() {
+            "--plan" => &mut flags.plan,
+            "--cap" => &mut flags.cap,
+            "--reset" => &mut flags.reset,
+            "--cost" => &mut flags.cost,
+            "--refresh" => {
+                flags.refresh = true;
+                continue;
+            }
+            _ => {
+                rest.push(word.clone());
+                continue;
+            }
+        };
+        match words.next() {
+            Some(value) if !value.starts_with("--") => *slot = Some(value.clone()),
+            _ => return Err(format!("{word} needs a value")),
+        }
+    }
+    Ok((flags, rest))
+}
+
+/// A number word for `field` (`cap`, `cost`): an error names it when it is not a number.
+fn number_word(field: &str, word: &str) -> Result<f64, String> {
+    word.trim()
+        .parse::<f64>()
+        .map_err(|_| format!("{field} must be a number, got {}", terminal_safe(word)))
+}
+
+/// The pool edit a `set_pool_cap <pool> <cap>` or `pool_edit <pool> [--plan ..]` line asks for,
+/// or the usage error.
+fn pool_edit_from(args: &super::Args, flags: &PoolFlags) -> Result<PoolEdit, String> {
+    let command = args.command.first().map(String::as_str).unwrap_or_default();
+    match (command, args.command.get(1..).unwrap_or_default()) {
+        ("set_pool_cap", [pool, cap]) => Ok(PoolEdit {
+            pool: pool.clone(),
+            cap: Some(number_word("cap", cap)?),
+            ..PoolEdit::default()
+        }),
+        ("set_pool_cap", _) => Err("set_pool_cap needs <pool> <cap>".to_string()),
+        ("pool_edit", [pool]) => {
+            if !flags.any_edit() {
+                return Err(
+                    "pool_edit needs at least one of --plan, --cap, --reset, --cost".to_string(),
+                );
+            }
+            Ok(PoolEdit {
+                pool: pool.clone(),
+                plan: flags.plan.clone(),
+                cap: flags
+                    .cap
+                    .as_deref()
+                    .map(|w| number_word("cap", w))
+                    .transpose()?,
+                reset: flags.reset.clone(),
+                cost_usd: flags
+                    .cost
+                    .as_deref()
+                    .map(|w| number_word("cost", w))
+                    .transpose()?,
+            })
+        }
+        _ => Err("pool_edit needs one <pool>".to_string()),
+    }
+}
+
+/// CLI-3, BUD-2 (#357, #374): `--role budget-manager set_pool_cap <pool> <cap>` and
+/// `--role budget-manager pool_edit <pool> [--plan <p>] [--cap <n>] [--reset <day time>]
+/// [--cost <n>]`: the same check (`rules::guard_pool_edit`) and the same save
+/// (`budget::save_pool_edit`: file, ledger row and Waiting item, all or nothing) as MCP's
+/// tools of the same names. Text says what was set and what it was (#362); `--json` prints
+/// the ledger row and the budget rows read again. A bad line is exit 2; a refusal or a save
+/// that fails is its text on stderr, exit 1.
+pub fn pool_command(
+    args: &super::Args,
+    flags: &PoolFlags,
+    cwd: &Path,
+    now: UnixSeconds,
+    err: &mut dyn Write,
+    out: &mut dyn Write,
+) -> ExitCode {
+    let command = args.command.first().map(String::as_str).unwrap_or_default();
+    let edit = match pool_edit_from(args, flags) {
+        Ok(edit) => edit,
+        Err(e) => {
+            let _ = writeln!(err, "switchboard: {e}");
+            let _ = writeln!(err, "{USAGE}");
+            return ExitCode::from(2);
+        }
+    };
+    if let Verdict::Refuse(text) | Verdict::ToWaiting(text) =
+        rules::guard_pool_edit(&guard_for(args, cwd), &edit.pool)
+    {
+        return refuse(err, &terminal_safe(&text));
+    }
+    let (root, data) = match pipeline_or_fail().and_then(|root| Ok((root, data_or_fail()?))) {
+        Ok(found) => found,
+        Err(fail) => {
+            let _ = writeln!(err, "{}", fail.message);
+            return ExitCode::from(fail.code);
+        }
+    };
+    let clock = switchboard_core::clock::FixedClock::at(now);
+    let saved = match budget::save_pool_edit(&FleetBridge::new(&root), &edit, &data, &clock) {
+        Ok(saved) => saved,
+        Err(e) => {
+            // An empty pool name leaves no gap before the colon (#416).
+            let who = [command, edit.pool.as_str()]
+                .iter()
+                .filter(|w| !w.is_empty())
+                .copied()
+                .collect::<Vec<_>>()
+                .join(" ");
+            let _ = writeln!(err, "{}", terminal_safe(&format!("{who}: {e}")));
+            return ExitCode::from(1);
+        }
+    };
+    let text = if args.json {
+        let answer = json!({ "edit": saved.ledger_row, "budget": saved.rows });
+        match serde_json::to_string_pretty(&answer) {
+            Ok(text) => format!("{text}\n"),
+            Err(e) => {
+                let _ = writeln!(err, "switchboard {command}: {e}");
+                return ExitCode::from(1);
+            }
+        }
+    } else {
+        format!(
+            "{}\n",
+            terminal_safe(&format!(
+                "{command} {}: {}",
+                edit.pool,
+                budget::edit_summary(&saved.ledger_row)
+            ))
+        )
+    };
+    emit_to(out, &text)
+}
+
+/// CORE-5 (#373): `switchboard settings`: the settings file in the app config folder
+/// (`config_dir`), as the Settings view shows it: one `<name>: <path>` line per setting
+/// (`not set` when unset), or `--json` as the app's `settings_get` answers
+/// (`{"settings": .., "missing": [..]}`). A file that does not read is exit 1.
+pub fn settings_command(json: bool, out: &mut dyn Write) -> ExitCode {
+    let Some(config) = config_dir() else {
+        eprintln!("switchboard: set {CONFIG_ENV} to the app config folder");
+        return ExitCode::from(2);
+    };
+    let settings = match settings::load(&config.join("settings.json")) {
+        Ok(settings) => settings,
+        Err(e) => {
+            eprintln!("switchboard settings: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let text = if json {
+        let view = json!({ "settings": &settings, "missing": settings.missing() });
+        match serde_json::to_string_pretty(&view) {
+            Ok(text) => format!("{text}\n"),
+            Err(e) => {
+                eprintln!("switchboard settings: {e}");
+                return ExitCode::from(1);
+            }
+        }
+    } else {
+        settings_text(&settings)
+    };
+    emit_to(out, &text)
+}
+
+/// One line per setting, in `settings::SETTING_NAMES` order.
+fn settings_text(settings: &Settings) -> String {
+    let values = [
+        &settings.pipeline_repo,
+        &settings.nextcloud_backups,
+        &settings.vault_agents,
+    ];
+    settings::SETTING_NAMES
+        .iter()
+        .zip(values)
+        .map(|(name, value)| {
+            let shown = value
+                .as_deref()
+                .filter(|path| !path.as_os_str().is_empty())
+                .map_or("not set".to_string(), |path| {
+                    terminal_safe(&path.display().to_string())
+                });
+            format!("{name}: {shown}\n")
+        })
+        .collect()
+}
+
 /// An environment variable as a path, or `None` when unset or empty.
 fn env_path(key: &str) -> Option<PathBuf> {
     std::env::var_os(key)
@@ -954,8 +1241,15 @@ fn data_or_fail() -> Result<PathBuf, Fail> {
 }
 
 /// `switchboard budget`: one line per pool (text) or the rows as a JSON array (`--json`).
-fn budget(json: bool) -> ExitCode {
-    let rows = match budget_rows() {
+/// `--refresh` (BUD-3, #374) re-reads every pool that has a reader first, as the app's timer
+/// does (`budget::refresh`).
+fn budget(json: bool, refresh: bool) -> ExitCode {
+    let rows = if refresh {
+        budget_refreshed_rows()
+    } else {
+        budget_rows()
+    };
+    let rows = match rows {
         Ok(rows) => rows,
         Err(fail) => return exit_with(fail),
     };
@@ -970,6 +1264,13 @@ fn budget(json: bool) -> ExitCode {
 pub(crate) fn budget_rows() -> Result<Vec<PoolRow>, Fail> {
     let root = pipeline_or_fail()?;
     budget::read(&FleetBridge::new(&root)).map_err(|e| fail(1, format!("switchboard budget: {e}")))
+}
+
+/// BUD-3 (#374): the pool rows after `fleet budget --refresh`.
+fn budget_refreshed_rows() -> Result<Vec<PoolRow>, Fail> {
+    let root = pipeline_or_fail()?;
+    budget::refresh(&FleetBridge::new(&root))
+        .map_err(|e| fail(1, format!("switchboard budget: {e}")))
 }
 
 /// One line per pool, in row order, with what the budget panel shows (BUD-1, #361):
@@ -1006,11 +1307,113 @@ fn budget_text(rows: &[PoolRow]) -> String {
 
 /// Every stored snapshot in the data folder, or the failure saying why there is none.
 fn snapshots(command: &str, data: &Path) -> Result<Vec<RepoSnapshot>, Fail> {
-    match SnapshotStore::new(data).load_all() {
-        Ok(snaps) if snaps.is_empty() => Err(fail(1, NO_SNAPSHOT.to_string())),
-        Ok(snaps) => Ok(snaps),
+    match SnapshotStore::new(data).load_each() {
+        Ok((snaps, bad)) if snaps.is_empty() => {
+            warn_unreadable(command, &bad);
+            Err(fail(1, NO_SNAPSHOT.to_string()))
+        }
+        Ok((snaps, bad)) => {
+            warn_unreadable(command, &bad);
+            Ok(snaps)
+        }
         Err(e) => Err(fail(1, format!("switchboard {command}: {e}"))),
     }
+}
+
+/// GH-1 (#350): name each snapshot file that does not read on stderr; the views show the rest.
+fn warn_unreadable(command: &str, bad: &[switchboard_core::github::snapshot::Unreadable]) {
+    for file in bad {
+        eprintln!(
+            "switchboard {command}: {}; skipped, run switchboard refresh",
+            terminal_safe(&file.error)
+        );
+    }
+}
+
+/// #375 (CORE-2, IT-2): what `errors` prints and the MCP `errors` tool returns: the fleet
+/// errors the app recorded (`fleet_errors::load`, the list the app shows), newest first; how
+/// many lines of the file did not read; and the open IT tickets in the stored snapshots.
+#[derive(Debug)]
+pub(crate) struct ErrorsAnswer {
+    pub fleet_errors: Vec<FleetErrorRecord>,
+    pub skipped_lines: usize,
+    pub it_tickets: Vec<it::ItTicket>,
+}
+
+/// #375: the errors and tickets in `data`. A snapshot file that does not read is named on
+/// stderr and the rest are used; no snapshot is no tickets, not a failure. Damaged lines of the
+/// errors file are counted in `skipped_lines` and named on stderr.
+pub(crate) fn errors_answer(data: &Path) -> Result<ErrorsAnswer, Fail> {
+    let recorded =
+        fleet_errors::load(data).map_err(|e| fail(1, format!("switchboard errors: {e}")))?;
+    if recorded.skipped > 0 {
+        eprintln!(
+            "switchboard errors: {} line(s) of {} did not read; skipped",
+            recorded.skipped,
+            fleet_errors::FLEET_ERRORS_FILE
+        );
+    }
+    let (snaps, bad) = SnapshotStore::new(data)
+        .load_each()
+        .map_err(|e| fail(1, format!("switchboard errors: {e}")))?;
+    warn_unreadable("errors", &bad);
+    Ok(ErrorsAnswer {
+        fleet_errors: recorded.errors.iter().map(FleetErrorRecord::from).collect(),
+        skipped_lines: recorded.skipped,
+        it_tickets: it::open_tickets(&snaps),
+    })
+}
+
+impl ErrorsAnswer {
+    /// `{"fleet_errors": [..], "skipped_lines": n, "it_tickets": [..]}`.
+    pub(crate) fn to_json(&self) -> Value {
+        json!({
+            "fleet_errors": self.fleet_errors,
+            "skipped_lines": self.skipped_lines,
+            "it_tickets": self.it_tickets,
+        })
+    }
+}
+
+/// `switchboard errors`: the recorded fleet errors, newest first, then the open IT tickets
+/// (text), or both as one JSON object (`--json`). Read only.
+fn errors_command(json: bool) -> ExitCode {
+    let answer = match data_or_fail().and_then(|data| errors_answer(&data)) {
+        Ok(answer) => answer,
+        Err(fail) => return exit_with(fail),
+    };
+    if json {
+        return print_json("errors", serde_json::to_string_pretty(&answer.to_json()));
+    }
+    emit(&errors_text(&answer))
+}
+
+/// One line per fleet error as the app's banner words it, then one per open IT ticket.
+fn errors_text(answer: &ErrorsAnswer) -> String {
+    let mut text = String::new();
+    if answer.fleet_errors.is_empty() {
+        text.push_str("no fleet errors recorded\n");
+    } else {
+        text.push_str("fleet errors, newest first:\n");
+        for err in &answer.fleet_errors {
+            text.push_str(&format!("  {}\n", terminal_safe(&err.message)));
+        }
+    }
+    if answer.it_tickets.is_empty() {
+        text.push_str("no open IT tickets\n");
+    } else {
+        text.push_str("open IT tickets:\n");
+        for t in &answer.it_tickets {
+            text.push_str(&format!(
+                "  {}#{}: {} | {}\n",
+                terminal_safe(&t.repo),
+                t.number,
+                terminal_safe(&t.title),
+                terminal_safe(&t.link)
+            ));
+        }
+    }
+    text
 }
 
 /// `switchboard waiting`: the Waiting on you items from the stored snapshots and the local items
@@ -1029,16 +1432,21 @@ fn waiting(json: bool) -> ExitCode {
 
 /// MCP-1: the items `waiting` prints, newest first.
 pub(crate) fn waiting_items(data: &Path) -> Result<Vec<Item>, Fail> {
-    let snaps = SnapshotStore::new(data)
-        .load_all()
+    let (snaps, bad) = SnapshotStore::new(data)
+        .load_each()
         .map_err(|e| fail(1, format!("switchboard waiting: {e}")))?;
+    warn_unreadable("waiting", &bad);
     let local = LocalItems::new(data)
         .load()
         .map_err(|e| fail(1, format!("switchboard waiting: {e}")))?;
     if snaps.is_empty() && local.is_empty() {
         return Err(fail(1, NO_SNAPSHOT.to_string()));
     }
-    Ok(waiting::assemble(&snaps, &local))
+    let priority = waiting::priority_items(data, SystemClock.now());
+    Ok(waiting::merge(vec![
+        waiting::assemble(&snaps, &local),
+        priority,
+    ]))
 }
 
 /// One line per item, in list order: `<what> | <why> | <action> | <link>`; no items gives the
@@ -1182,6 +1590,8 @@ struct SkyRow {
     brightness: f64,
     open: usize,
     drifted: usize,
+    /// The priority copy's age in days, the same on every row (SKY-9, #345).
+    priority_age_days: Option<i64>,
 }
 
 /// `switchboard sky`: one row per repo in the Sky view's placement order, from the same
@@ -1201,7 +1611,8 @@ fn sky_command(json: bool) -> ExitCode {
 /// The sky model and the snapshots it was built from.
 fn sky_model(data: &Path) -> Result<(sky::model::SkyModel, Vec<RepoSnapshot>), Fail> {
     let snaps = snapshots("sky", data)?;
-    let model = sky::model::load(data, SystemClock.now())
+    let events = ledger_events().map_err(|e| fail(1, format!("switchboard sky: {e}")))?;
+    let model = sky::model::load_with_ledger(data, &events.unwrap_or_default(), SystemClock.now())
         .map_err(|e| fail(1, format!("switchboard sky: {e}")))?;
     Ok((model, snaps))
 }
@@ -1220,6 +1631,7 @@ fn sky_rows(data: &Path) -> Result<Vec<SkyRow>, Fail> {
                 .find(|s| s.repo == c.repo)
                 .map_or(0, |s| s.issues.iter().filter(|i| i.state == "open").count()),
             drifted: c.drift.len(),
+            priority_age_days: model.priority_age_days,
         })
         .collect())
 }
@@ -1234,6 +1646,7 @@ fn sky_json(rows: &[SkyRow]) -> Value {
                     "brightness": row.brightness,
                     "open": row.open,
                     "drifted": row.drifted,
+                    "priority_age_days": row.priority_age_days,
                 })
             })
             .collect(),
@@ -1260,9 +1673,11 @@ pub(crate) fn constellation_answer(data: &Path, repo: &str) -> Result<Value, Fai
     }
 }
 
-/// One line per repo: `<repo>: brightness <b>, <n> open, <d> drifted`.
+/// One line per repo: `<repo>: brightness <b>, <n> open, <d> drifted`, then the priority
+/// copy's age (`sky::priority::age_line`).
 fn sky_text(rows: &[SkyRow]) -> String {
-    rows.iter()
+    let mut text: String = rows
+        .iter()
         .map(|row| {
             format!(
                 "{}: brightness {:.2}, {} open, {} drifted\n",
@@ -1272,14 +1687,18 @@ fn sky_text(rows: &[SkyRow]) -> String {
                 row.drifted
             )
         })
-        .collect()
+        .collect();
+    text.push_str(&sky::priority::age_line(
+        rows.first().and_then(|r| r.priority_age_days),
+    ));
+    text
 }
 
 /// The PR that closes a star, as `star` prints it.
 struct StarPr {
     number: u64,
     state: String,
-    /// The last R25 verdict, `PASS` or `FAIL`.
+    /// The last R25 verdict, `PASS` or `FAIL`, marked when not on the head (`review_text`).
     review: Option<String>,
     /// The combined check state on the head.
     ci: String,
@@ -1354,11 +1773,7 @@ fn star_facts(data: &Path, target: &str) -> Result<Star, Fail> {
             .map(|pr| StarPr {
                 number: pr.number,
                 state: pr.state.clone(),
-                review: pr
-                    .verdicts
-                    .last()
-                    .filter(|v| matches!(v.verdict.as_str(), "PASS" | "FAIL"))
-                    .map(|v| v.verdict.clone()),
+                review: gh_merge::review_text(pr),
                 ci: pr.ci_on_head.clone(),
             }),
         job,
@@ -1393,15 +1808,12 @@ pub(crate) fn star_answer(data: &Path, target: &str) -> Result<Value, Fail> {
     star_facts(data, target).map(|star| star_json(&star))
 }
 
-/// MCP-1: the reports as `reports --json` prints them, unfiltered, read the way the app reads
-/// them.
-pub(crate) fn reports_answer() -> Result<Vec<Report>, Fail> {
+/// MCP-1, REP-3 (#358): the reports as `reports --json` prints them, narrowed by `filter`, read
+/// the way the CLI and the app read them (`load_reports`).
+pub(crate) fn reports_answer(filter: &Filter) -> Result<Vec<Report>, Fail> {
     let root = pipeline_or_fail()?;
     let env = std::env::var_os(reports::FLEET_STATE_DIR_ENV);
-    let threads = data_dir()
-        .map(|d| reports::thread_rows(&d))
-        .unwrap_or_default();
-    reports::load(&FleetBridge::new(&root), env.as_deref(), &threads, None)
+    load_reports(&root, env.as_deref(), data_dir().as_deref(), filter)
         .map_err(|e| fail(1, format!("switchboard reports: {e}")))
 }
 
@@ -1435,22 +1847,30 @@ fn star_text(star: &Star) -> String {
     )
 }
 
+/// The fleet ledger's events; `Ok(None)` when the pipeline checkout is not set
+/// (`pipeline_dir`: `SWITCHBOARD_PIPELINE`, else `pipeline_repo` in settings.json, #359).
+/// The fleet state folder is `SWITCHBOARD_STATE` when set, else the one `reports` and the app
+/// read (`reports::state_dir`: `FLEET_STATE_DIR`, then the pipeline checkout's rule).
+fn ledger_events() -> Result<Option<Vec<Value>>, String> {
+    let Some(pipeline) = pipeline_dir() else {
+        return Ok(None);
+    };
+    let state = env_path(STATE_ENV).unwrap_or_else(|| {
+        let env = std::env::var_os(reports::FLEET_STATE_DIR_ENV);
+        reports::state_dir(&pipeline, env.as_deref())
+    });
+    joblog::read_ledger(&joblog::ledger_files(&pipeline, &state))
+        .map(Some)
+        .map_err(|e| e.to_string())
+}
+
 /// The fleet job running on `repo#number`: the last ledger `start` event for it with no `end`
 /// after it, as `<lane> <model> on <machine>, attempt <n>`. `Ok(None)` when the pipeline
 /// checkout is not set, so the job log cannot be read.
 fn running_job(repo: &str, number: u64) -> Result<Option<Option<String>>, String> {
-    let Some(pipeline) = pipeline_dir() else {
+    let Some(events) = ledger_events()? else {
         return Ok(None);
     };
-    let state = env_path(STATE_ENV)
-        .or_else(|| env_path("FLEET_STATE_DIR"))
-        .unwrap_or_else(|| {
-            let mut name = pipeline.file_name().unwrap_or_default().to_os_string();
-            name.push("-fleet-state");
-            pipeline.with_file_name(name)
-        });
-    let events =
-        joblog::read_ledger(&joblog::ledger_files(&pipeline, &state)).map_err(|e| e.to_string())?;
     let short = repo.rsplit('/').next().unwrap_or(repo);
     let ids = [format!("{repo}#{number}"), format!("{short}#{number}")];
     let field = |event: &Value, key: &str| -> Option<String> {

@@ -16,9 +16,9 @@ reuses:
 ```
 Cargo.toml                    one Rust workspace (core, cli, app/src-tauri)
 crates/core/                  switchboard-core: every rule, read and write
-  src/{settings,fleet,abilities,joblog,rules,platform,clock,error}.rs
+  src/{settings,fleet,fleet_errors,abilities,joblog,rules,platform,clock,error,lock}.rs
   src/github/                 snapshot, transport, poll, queue, merge
-  src/sky/                    features, layout, drift, chain, codemap, priority, labels
+  src/sky/                    features, layout, drift, chain, codemap, priority, labels, jobs
   src/{waiting,reports,budget,backup,it}.rs
   src/frontdoor/              router, labeller, adapters, packet, sticky, thread
   src/autopilot/              review, driver, instructions, classify, weekly
@@ -67,6 +67,9 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 ### core-fleet
 `crates/core/src/fleet.rs` · CORE-1, CORE-2, AUTO-1 · present. `FleetBridge` runs `<python> <root>/tools/fleet/fleet.py <cmd> --json` (root from settings, `FLEET_ROOT` overrides) and parses it; a non-zero exit or bad JSON is a `FleetError` (command, exit code, stderr), recorded in `FleetErrorLog`, never a guessed value. Tests use `tests/fixtures/fleet-stub/` (`FLEET_STUB_EXIT`, `FLEET_STUB_BADJSON`, answers in `answers/<cmd>.json`). Used by abilities, joblog, budget, github::queue, autopilot, it. `clean_child_env(cmd)` (with the pure `clean_ld_library_path(ld, appdir)`) takes the packaged app's `PYTHONHOME`, `PYTHONPATH`, `PYTHONDONTWRITEBYTECODE` and its `APPDIR` entries in `LD_LIBRARY_PATH` out of every fleet child's environment, the bridge's and `FleetStarter::start`'s.
 
+### core-fleet-errors
+`crates/core/src/fleet_errors.rs` · CORE-2, IT-2 · present (#375). The fleet errors the app records, kept in `<data>/fleet-errors.jsonl`: one `FleetErrorRecord` per line (command, exit code, stderr, reason as `{"kind": ..}`, undo note, and the shown `message`), appended whole under `lock::FileLock`, kept to the last `FLEET_ERROR_LOG_CAP` (50) lines. `record` returns an error, never panics; `load` reads newest first, skips and counts a line that does not read (`Recorded::skipped`); no file is no errors. The app's `fleet_errors` list and the CLI's `errors` both read through `load`. Failures in the CLI or MCP themselves are not recorded.
+
 ### core-abilities
 `crates/core/src/abilities.rs` · the abilities index · present. Reads `fleet actions --json`: every action and request kind (`"request": true`) with `needs` and `first`, and per kind the model for each service (`models`, `model(kind, service)`): the `ok.<service>.model` rows, plus `ok.qwen: true` and a top-level `claudeapi: true` filled from `tools/fleet/config.json` (`FleetModels`: this machine's `qwen_model`, `ok.claude`'s tier through `claudeapi_models`; `load_with`). Read by the router (FD-1, FD-3) and FD-12.
 
@@ -74,7 +77,9 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 `crates/core/src/joblog.rs` · CORE-4 · present. One `JobRow` shape for ledger attempts and local chat rows; a missing field is `None` and shows as "not recorded". U9's asked fields (`checks`, `escalation_step`, `review_fix_loc`) are in the shape and read as "not recorded" until the pipeline batch writes them. Read by reports, the router (FD-4) and budget.
 
 ### core-rules
-`crates/core/src/rules.rs` · CORE-3 (and the worktree test for CLI-3, MCP-3) · present. `guard(caller, action)` for merge, repo delete and restore over a live repo; the same `Verdict` and text whichever face asks. Called by github::merge, backup restore, cli, mcp and the Tauri commands.
+`crates/core/src/rules.rs` · CORE-3 (and the worktree test for CLI-3, MCP-3) · present. `guard(caller, action)` for merge, repo delete and restore over a live repo; the same `Verdict` and text whichever face asks. `guard_pool_edit(caller, pool)` for a budget pool edit: the app, or the budget-manager role from the CLI or MCP, never inside a job worktree. Called by github::merge, backup restore, cli, mcp and the Tauri commands.
+
+- CORE-3, BAK-3 confirm in the app (`crates/core/src/confirm.rs`: `guarded_request`, `confirm_with`, `confirm`, `Done`; the `confirm_guarded` command; the confirm step in `Waiting.tsx`): present. A delete or restore request the CLI left in Waiting on you is read back from its item, goes through `guard` as the app with my confirm, and runs only when the repo's `owner/name` was typed letter for letter (the view enables Confirm on a match, the core checks the typed name again); a refusal changes nothing. A restore runs `backup::restore_over_live` from the repo's backup folder; one that held comments or closes back keeps its item with `HELD_ACTION`, and its next confirm runs `backup::restore_held_over_live` (`Pass::Held` with the record of what the restore made, kept beside the item in `<data>/waiting/held-restores.json` by `HeldRecords`: no ref push, no issue queued). A delete request archives the repo (`crates/core/src/github/archive.rs`: `archive_repo`, one `PATCH {"archived": true}`); nothing is ever deleted (#347). Not built: a restore to a new private repo from the app, turning a request down, MCP delete and restore tools.
 
 ### core-platform
 `crates/core/src/platform.rs` · the R04 seams · present. See Platforms above.
@@ -82,17 +87,20 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 ### core-clock, core-error
 `crates/core/src/clock.rs`, `error.rs` · present. The injected clock (`Clock`, `SystemClock`, `FixedClock`) and `CoreError`, the one error faces see.
 
+### core-lock
+`crates/core/src/lock.rs` · BUD-2, CORE-2 · present. One writer at a time for a file the core reads, changes and writes back, across threads and processes on every OS, no extra crate (#416): `FileLock::take(target, wait)` makes `<target>.switchboard-lock` with `create_new`, waits up to `wait`, takes over a lock older than `STALE_LOCK` (10 min, a dead run's), and removes it on drop. `run_tag` and `temp_path` give each run its own temp file names, as the backup's `run_tag` does (#363).
+
 ### github-snapshot
 `crates/core/src/github/snapshot.rs` · GH-1 · present. `RepoSnapshot` (issues, PRs with verdicts and CI on head, milestones, labels, ROADMAP.md, the code map) and `SnapshotStore`: one JSON file per repo under the app's data folder, with its age.
 
 ### github-transport
-`crates/core/src/github/transport.rs` · present. `GitHubTransport`: GraphQL and REST GET with `If-None-Match`; `Recorded` replays answers in tests. Token from `platform::TokenStore`.
+`crates/core/src/github/transport.rs` · present. `GitHubTransport`: GraphQL, REST GET with `If-None-Match`, and REST PATCH (`rest_patch`: closes, body rewrites and the archive, the writes that are not creates; a transport that does not implement it refuses); `Recorded` replays answers in tests and logs each PATCH. Token from `platform::TokenStore`.
 
 ### github-poll
 `crates/core/src/github/poll.rs`, `crates/core/src/github/live.rs` · GH-1, GH-2, GH-3 · present. The 10-minute poll (`Poller::tick`), the Refresh button (`refresh_all`), the ETag skip (`unchanged`), refresh-on-action (`after_write`). In the app (`live.rs`, #240): the repos it reads (the priority copy's order, then the rest of the snapshot store, by name); a thread in `app/src-tauri/src/main.rs` that ticks every minute and sends `snapshot`; the `refresh_all` command the Sky's Refresh button calls.
 
 ### github-queue
-`crates/core/src/github/queue.rs` · GH-4 · present. `send(fleet, creates)`: one `fleet ghq add-batch` then `fleet ghq run`; a stop on a rate limit leaves items queued, never a failure.
+`crates/core/src/github/queue.rs` · GH-4 · present. `send(fleet, creates)`: one `fleet ghq add-batch` then `fleet ghq run`; a stop on a rate limit leaves items queued, never a failure. `send_keyed` also answers each create's queue key and whether the batch added it; `records(fleet, keys)` reads those items from the queue's own record (`queue.json` in the folder `fleet ghq status` names).
 
 ### github-merge
 `crates/core/src/github/merge.rs` · GH-5 · present. `eligibility(pr, carried_over)` (PASS on head or carried by patch-id, CI green on head) and `merge` through `merge_pr.py` (dry run, then push) after `rules::guard`. Never `gh pr merge` or the merge API.
@@ -120,8 +128,11 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 ### sky-labels
 `crates/core/src/sky/labels.rs` · SKY-10 · present. The `feature:` label for a design-pass issue and an automatic bug.
 
+### sky-jobs
+`crates/core/src/sky/jobs.rs` · SKY-4, SKY-8 · present. The fleet jobs in flight from the fleet ledger's events (a `start` with no later `end` from the same machine), the job `star` names.
+
 ### sky-model
-`crates/core/src/sky/model.rs` · SKY-1 to SKY-9 · present. The SkyModel the `sky` command answers: the snapshot store and the priority copy in the app data folder, assembled from the sky modules; no snapshot is `GitHub: no snapshot yet`.
+`crates/core/src/sky/model.rs` · SKY-1 to SKY-9 · present. The SkyModel the `sky` command answers: the snapshot store and the priority copy in the app data folder, with the jobs in flight from the fleet ledger (`load_with_ledger`), assembled from the sky modules; no snapshot is `GitHub: no snapshot yet`.
 
 ### sky-face
 `app/src/views/Sky.tsx` (+ `app/src/sky/`) · SKY-1, SKY-3, SKY-4, SKY-5, SKY-6, SKY-7, SKY-8 · present. SVG: the sky, the zoomed constellation (clusters, stars, blocked-by lines, milestone rings), star states, the drift list, reuse lines, the chain highlight, the star panel. Paints what the core worked out.
@@ -157,19 +168,23 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - BUD-3 refresh (`refresh`, `RefreshTimer`, `budget_rows`, `budget_refresh`): present.
 - BUD-1 panel (`BudgetPanel`, `Budget`): present.
 - BUD-2 save (`save_edit`, `parse_reset`, `budget_save_edit`): present.
+- BUD-2 save for the CLI and MCP (`save_pool_edit`: file, ledger row in `<data>/pool-edits.jsonl` and Waiting item, all or nothing; `edit_summary`, the reply text naming each new value and the old one): present.
+- BUD-2 edits at the same time (#416): the save holds `lock::FileLock` on `config.json`, then on the ledger, for the read, the writes, the Waiting item and any undo; a second edit waits up to `EDIT_LOCK_WAIT` (10 s), then is refused with what to do. Temp files are named per run (`lock::temp_path`). A cap is at least `MIN_CAP_USD` (a cent): present.
 - BUD-2 editor (`PoolEditor`): present.
 
 ### backup
 `crates/core/src/backup.rs` · BAK-1, BAK-2, BAK-3 · planned. A git bundle of every ref plus JSON of issues, PRs, comments, labels, milestones, releases (under 1 GB) and the wiki, with a manifest, in `<NextCloud backups>/github/<repo>/`; the overwrite guard; restore to a new private repo (issues through the create queue), over a live repo only after `rules::guard`.
-- BAK-2 overwrite guard (`refuse_reason`): present.
+- BAK-2 overwrite guard (`refuse_reason`): present. `backup_repo` also refuses, before any read, when the last backup's manifest is damaged or missing beside other files, and when the last backup has a wiki and the new one has none.
 
 - BAK-1 JSON of issues, PRs, comments, labels, milestones (`write_json`): present.
 - BAK-1 git bundle (`bundle`): present.
 - BAK-1 releases.json (`write_release_list`, `RELEASE_FILE_LIMIT`): present.
-- BAK-1 release files under 1 GB (`fetch_release_files`, `write_releases`): present.
-- BAK-1 wiki mirror (`copy_wiki`): present.
-- BAK-1 back up one repo or all (`backup_repo`, `backup_all`, `BackupOutcome`; the Sky's back up buttons): present.
-- BAK-W back up from the app (`backup_run`: `folder`, `repos`, `record`, `run_one`, `run_all`; commands `backup_repo`, `backup_all`): present.
+- BAK-1 release files under 1 GB (`fetch_release_files`, `write_releases`; `FileSource`, `HttpFiles` over the network; part of every `backup_repo`): present. A file that does not come with the size the release gives fails the backup.
+- BAK-1 wiki mirror (`copy_wiki`): present. Only a clone that says the repo is not there means no wiki; any other failed clone fails the backup.
+- BAK-1 back up one repo or all (`backup_repo`, `backup_all`, `BackupOutcome`, `RepoBackup`; the Sky's back up buttons): present. One backup of a repo at a time in a process, each in a staging folder of its own (`.<name>.new-<run>`); `backup_all` tries every repo and gives each its own outcome or error; the manifest holds the bundle's hash (`bundle_hash`) and, when GitHub answered the name asked for with the items of another (a repo renamed or moved before the backup), that name (`resolved_repo`), which the outcome line also says.
+- BAK-W back up from the app (`backup_run`: `folder`, `repos`, `record`, `failed_row`, `run_one`, `run_all`; commands `backup_repo`, `backup_all`): present.
+  A repo whose backup failed in a "Back up all" is a row with outcome `failed`.
+- BAK-3 restore (`restore_history`, `restore_issues`, `restore_over_live`, `restore_held_over_live`, `Pass`, `RestoreReport`, `IssuesReport`; `crates/core/src/renumber.rs`: `renumber`): present in core. The app calls `restore_over_live`, then `restore_held_over_live` for what was held back, after my confirm (`confirm.rs`, #347); no face calls the restore to a new private repo yet. The backup is checked against its manifest before any write (repo name against the folder, and the manifest's `repo` or `resolved_repo` against the API addresses in the JSON, ref count, bundle hash, label and milestone counts); labels and milestones keep colour, description and due date; a comment goes to the number its issue has in the repo now; whatever the repo already has is not created again; issues and milestones that were closed in the backup are closed once they are there (over a live repo only those the restore made: `Made`, the issues and milestones its batch added to the create queue, each by the number the queue's own record says it made, never one found by title; anything else is left as it is and named), and a plain `#N` in a restored body or comment gets the number its issue has now (#365; through `rest_patch`, counted in `closed`, `milestones_closed`, `renumbered`, and in `state_waiting` while they wait); what is not restored is listed in `left_out` (PRs and their comments, the wiki, releases, a label that is there with another colour).
 
 ### frontdoor
 `crates/core/src/frontdoor/` · FD-1 to FD-13 · planned. `router` (the four steps, the `first` list against budget, the learned pick), `labeller` (rules, then a small model, U8), `adapters` (one per service; none for the Claude subscription), `packet` (summary, last 6 turns, links; the summary check), `sticky` (what moves a chat; implicit signals), `thread` (one JSON Lines file per thread). Face: `app/src/views/Chat.tsx` with BroCrew's composer and messages ported; the "Open in Claude" button (FD-8).
@@ -223,7 +238,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - AUTO-2 roadmap pass (`roadmap_pass`, `pm_job` in `passes.rs`; run by `after_poll`): present.
 
 ### it
-`crates/core/src/it.rs` · IT-1 to IT-4, FD-12 · planned. The loadout from the platform's probe list, unmet `needs`, IT tickets through `fleet errors file`, `it-triage` jobs with `never_on` (waits for U9), ladder-out bugs with the star's `feature:` label.
+`crates/core/src/it.rs` · IT-1 to IT-4, FD-12 · planned. The loadout from the platform's probe list, unmet `needs`, IT tickets through `fleet errors file`, `it-triage` jobs with `never_on` (waits for U9), ladder-out bugs with the star's `feature:` label. `open_tickets(snaps)` lists the open `it`-labelled issues in the stored snapshots, for `errors` (#375).
 - IT-1 loadout read (`read_loadout`): present. `SystemProbeRunner` kills a probe after `PROBE_TIMEOUT` (5 s, `run_probe_within`); it then has no exit code (#339).
 - IT-1 loadout every minute (`read_and_store`, `latest_loadout`, `current_loadout`, the `loadout` event): present.
 - IT-2 file error tickets (`file_error_tickets`): present.
@@ -238,12 +253,14 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 `crates/cli/src/main.rs`, `cli.rs` · CLI-1, CLI-2, CLI-3 · CLI-1, CLI-2 and CLI-3 present. Text or `--json`; the same numbers as the GUI; role-flagged writes through `rules::guard`. Arguments are read with `args_os` (a non-UTF-8 word is exit 2, `utf8_args`); `--help`/`--version` answer anywhere on the line; extra words after a command are exit 2; stdout goes through `emit` (a closed pipe is a quiet exit 0, any other write error one line and exit 1, never a panic); text output escapes control characters in titles and other outside text (`terminal_safe`). A bare repo name resolves to its one `owner/name` (`resolve_repo`); one that matches two owners is an error naming both. `main.rs` routes `mcp` (`mcp_call`): `--role` before or after it, `--help`, and exit 2 for any other flag or word.
 - CLI-1 parse arguments, budget, sky, star, waiting, reports, loadout: present. `sky` and `star` read the stored snapshot in the app data folder (`SWITCHBOARD_DATA`, else the desktop app's) and never call GitHub; `star` reads its running job from the job log when a pipeline checkout is known. The pipeline checkout is `SWITCHBOARD_PIPELINE`, else `pipeline_repo` in `settings.json` (`pipeline_dir`). `budget` text shows points over or under pace, the reading's age and the stale mark (BUD-1); `reports` text shows all five REP-1 parts under each head line.
 - CLI-2 `refresh`, `backup <repo>`, `backup --all`: present. `backup` reads `settings.json` from the app config folder (`SWITCHBOARD_CONFIG`, else `SWITCHBOARD_DATA`, else the desktop app's; `config_dir`). The Refresh and Back up buttons from the CLI, one line per repo (`<repo>: refreshed | unchanged`, `<repo>: backed up to <path>`); a failed or refused repo goes to stderr and the exit is 1 after all were tried; `backup` alone exits 2.
+- `errors` (#375, read only): the fleet errors the app kept (`fleet_errors::load`), newest first, then the open IT tickets (`it::open_tickets`); `--json` is `{fleet_errors, skipped_lines, it_tickets}` (`errors_answer`), and damaged lines are named on stderr: present.
 - CLI-3 delete and restore refused to Waiting on you, `--role` merge through the guard and GH-5's merge (`CliWrites`), none inside a job worktree: present.
+- `--role budget-manager set_pool_cap <pool> <cap>` and `pool_edit <pool> [--plan] [--cap] [--reset] [--cost]` (`pool_command`, `take_pool_flags`) through `rules::guard_pool_edit` and `budget::save_pool_edit`, the same path as MCP's tools; `budget --refresh` re-reads the pools first (`budget::refresh`); `settings` prints the settings file, read only (`settings_command`): present. `refresh` and `backup` write stdout through `emit_to` too.
 
 ### mcp
-`crates/cli/src/mcp.rs` · MCP-1 to MCP-3 present. JSON-RPC over stdio; six read tools; role write tools; none inside a job worktree. Bad lines (non-UTF-8, batch, non-object) get a JSON-RPC error; tool arguments are checked against each tool's input schema.
-- MCP-2 write tools reach the real core (`CoreWrites`: the CLI's merge, BUD-2's save, local Waiting items): present.
+`crates/cli/src/mcp.rs` · MCP-1 to MCP-3 present. JSON-RPC over stdio; six read tools; role read tools (`role_read_tools`: the satellite's `errors`, #375, the CLI's `errors --json`); role write tools; neither inside a job worktree. Bad lines (non-UTF-8, batch, non-object) get a JSON-RPC error; tool arguments are checked against each tool's input schema.
+- MCP-2 write tools reach the real core (`CoreWrites`: the CLI's merge, BUD-2's save, local Waiting items): present. budget-manager has `set_pool_cap`, `pool_edit` and `budget_refresh`; a pool edit's reply states what was set. `reports` takes the CLI's `project`, `outcome` and `pool` filters (`cli::reports_answer`).
 - MCP-3 no write tools in a job worktree: present.
 
 ### shell
-`app/src-tauri/`, `app/src/App.tsx`, `app/src/core.ts`, `app/src/ErrorBanner.tsx` · SHELL-1, SHELL-2, SHELL-3 · present (empty window, wired to the core: `views`, `settings_missing`, `fleet_errors`; the error banner present); the AppImage present: `tools/build-appimage.sh` builds it inside the craft-build container). `tools/check-notices.py` (present) lists every file under `app/src/brocrew/` and fails on one without its Apache-2.0 notice. `app/src/brocrew/` holds BroCrew's lifted chat helpers (present): `composer-notice.ts`, `message-links.ts`, `message-paths.ts` and `ipc-types.ts`, all listed in `NOTICE`.
+`app/src-tauri/`, `app/src/App.tsx`, `app/src/core.ts`, `app/src/ErrorBanner.tsx` · SHELL-1, SHELL-2, SHELL-3 · present (empty window, wired to the core: `views`, `settings_missing`, `fleet_errors` (newest first, read from the errors kept in the app data folder, #375: `keep_errors_in`, `fleet_error_rows`); the error banner present); the AppImage present: `tools/build-appimage.sh` builds it inside the craft-build container). `tools/check-notices.py` (present) lists every file under `app/src/brocrew/` and fails on one without its Apache-2.0 notice. `app/src/brocrew/` holds BroCrew's lifted chat helpers (present): `composer-notice.ts`, `message-links.ts`, `message-paths.ts` and `ipc-types.ts`, all listed in `NOTICE`.

@@ -85,12 +85,20 @@ impl mcp::ReadCore for Core {
                 items.truncate(limit);
                 serde_json::to_value(items).map_err(cli::Fail::from)
             }),
-            "reports" => cli::reports_answer().and_then(|mut reports| {
+            // REP-3 (#358): the same filters as `reports --project/--outcome/--pool`.
+            "reports" => cli::reports_answer(&switchboard_core::reports::Filter {
+                project: text("project").map(str::to_string),
+                outcome: text("outcome").map(str::to_string),
+                pool: text("pool").map(str::to_string),
+            })
+            .and_then(|mut reports| {
                 reports.truncate(limit);
                 serde_json::to_value(reports).map_err(cli::Fail::from)
             }),
             "budget" => cli::budget_rows()
                 .and_then(|rows| serde_json::to_value(rows).map_err(cli::Fail::from)),
+            // #375: the satellite's read tool (`mcp::role_read_tools`).
+            "errors" => cli::errors_answer(self.data()?).map(|answer| answer.to_json()),
             other => return Err(format!("unknown tool: {other}")),
         };
         answer.map_err(|fail| fail.message)
@@ -136,6 +144,11 @@ pub fn mcp_call(argv: &[String]) -> Option<Result<McpCall, String>> {
             "--project" | "--outcome" | "--pool" => {
                 words.next();
                 error.get_or_insert_with(|| format!("{word} is for reports"));
+            }
+            // The pool edit's flags take a value too (#374).
+            "--plan" | "--cap" | "--reset" | "--cost" => {
+                words.next();
+                error.get_or_insert_with(|| format!("{word} is for pool_edit"));
             }
             "--help" | "-h" => help = true,
             "--version" | "-V" => version = true,

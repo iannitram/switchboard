@@ -191,7 +191,14 @@ fn set_pool_cap_saves_config_a_ledger_row_and_a_waiting_item() {
             json!({ "pool": "deepseek", "cap": 25.0 }),
         )],
     );
-    assert_eq!(text(&replies[0]), (false, "set_pool_cap: done".to_string()));
+    // #362: the reply states the new cap (it said `set_pool_cap: done`).
+    assert_eq!(
+        text(&replies[0]),
+        (
+            false,
+            "set_pool_cap deepseek: cap_usd is now 25.0 (was 10)".to_string()
+        )
+    );
     let pool = &config(&root)["pools"]["deepseek"];
     assert_eq!(pool["cap_usd"], json!(25.0));
     assert_eq!(pool["note"], "keep me");
@@ -210,6 +217,71 @@ fn set_pool_cap_saves_config_a_ledger_row_and_a_waiting_item() {
         }
     );
     assert_eq!(items[0].since, NOW);
+}
+
+#[test]
+fn a_waiting_item_that_cannot_be_added_leaves_the_pool_as_it_was() {
+    // #340: the Waiting item is part of the save; `waiting/local.json` is a folder here.
+    let dir = fresh("cap-no-waiting");
+    let root = pipeline(&dir);
+    let data = dir.join("data");
+    std::fs::create_dir_all(LocalItems::new(&data).path()).unwrap();
+    let clock = FixedClock::at(NOW);
+    let writes = CoreWrites {
+        merge: &no_merge,
+        fleet: Some(FleetBridge::with_root(&root)),
+        data: Some(data.clone()),
+        clock: &clock,
+    };
+    let replies = run(
+        Role::BudgetManager,
+        &writes,
+        &[call(
+            3,
+            "set_pool_cap",
+            json!({ "pool": "deepseek", "cap": 25.0 }),
+        )],
+    );
+    let (is_error, said) = text(&replies[0]);
+    assert!(is_error, "{said}");
+    assert!(said.starts_with("set_pool_cap deepseek: "), "{said}");
+    assert!(said.contains("local.json"), "{said}");
+    assert_eq!(
+        config(&root),
+        serde_json::from_str::<Value>(CONFIG).unwrap()
+    );
+    assert!(!data.join("pool-edits.jsonl").exists());
+}
+
+#[test]
+fn pool_edit_saves_a_plan_and_states_it() {
+    let dir = fresh("plan");
+    let root = pipeline(&dir);
+    let data = dir.join("data");
+    let clock = FixedClock::at(NOW);
+    let writes = CoreWrites {
+        merge: &no_merge,
+        fleet: Some(FleetBridge::with_root(&root)),
+        data: Some(data.clone()),
+        clock: &clock,
+    };
+    let replies = run(
+        Role::BudgetManager,
+        &writes,
+        &[call(
+            3,
+            "pool_edit",
+            json!({ "pool": "deepseek", "cap": 12, "cost_usd": 3.5 }),
+        )],
+    );
+    let (is_error, said) = text(&replies[0]);
+    assert!(!is_error, "{said}");
+    assert!(
+        said.starts_with("pool_edit deepseek: cap_usd is now 12.0 (was 10)"),
+        "{said}"
+    );
+    assert_eq!(config(&root)["pools"]["deepseek"]["cap_usd"], json!(12.0));
+    assert_eq!(LocalItems::new(&data).load().unwrap().len(), 1);
 }
 
 #[test]
@@ -388,7 +460,10 @@ fn the_binary_set_pool_cap_writes_the_pipeline_config() {
     );
     assert_eq!(
         text(&replies(&out)[0]),
-        (false, "set_pool_cap: done".to_string())
+        (
+            false,
+            "set_pool_cap deepseek: cap_usd is now 25.0 (was 10)".to_string()
+        )
     );
     assert_eq!(config(&root)["pools"]["deepseek"]["cap_usd"], json!(25.0));
     assert_eq!(lines(&data.join("pool-edits.jsonl")).len(), 1);

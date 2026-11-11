@@ -13,6 +13,7 @@ use std::process::{Command, Stdio};
 
 use mcp::{serve, ReadCore, WriteCore};
 use serde_json::{json, Value};
+use switchboard_core::budget::PoolEdit;
 use switchboard_core::rules::Role;
 
 const READ: [&str; 6] = [
@@ -39,6 +40,8 @@ struct FakeWrite {
     no_pass: bool,
     merged: RefCell<Vec<(String, u64)>>,
     caps: RefCell<Vec<(String, f64)>>,
+    edits: RefCell<Vec<(String, PoolEdit)>>,
+    refreshes: RefCell<u32>,
     waiting: RefCell<Vec<String>>,
 }
 
@@ -51,9 +54,19 @@ impl WriteCore for FakeWrite {
         Ok(())
     }
 
-    fn set_pool_cap(&self, pool: &str, cap: f64) -> Result<(), String> {
-        self.caps.borrow_mut().push((pool.to_string(), cap));
-        Ok(())
+    fn pool_edit(&self, tool: &str, edit: &PoolEdit) -> Result<String, String> {
+        if let Some(cap) = edit.cap {
+            self.caps.borrow_mut().push((edit.pool.clone(), cap));
+        }
+        self.edits
+            .borrow_mut()
+            .push((tool.to_string(), edit.clone()));
+        Ok(format!("{tool} {}: saved", edit.pool))
+    }
+
+    fn budget_refresh(&self) -> Result<Value, String> {
+        *self.refreshes.borrow_mut() += 1;
+        Ok(json!([{ "pool": "claude" }]))
     }
 
     fn waiting(&self, text: &str) -> Result<(), String> {
@@ -172,7 +185,7 @@ fn project_manager_merge_with_a_pass_merges_once() {
 fn budget_manager_lists_set_pool_cap_and_no_merge() {
     assert_eq!(
         tool_names(Some(Role::BudgetManager)),
-        with_extra(&["set_pool_cap"])
+        with_extra(&["set_pool_cap", "pool_edit", "budget_refresh"])
     );
     let write = FakeWrite::default();
     let replies = run(
@@ -203,7 +216,8 @@ fn budget_manager_set_pool_cap_reaches_the_core_once() {
 
 #[test]
 fn satellite_lists_no_write_tool() {
-    assert_eq!(tool_names(Some(Role::Satellite)), with_extra(&[]));
+    // #375: the satellite's one extra tool is a read (`errors`), never a write.
+    assert_eq!(tool_names(Some(Role::Satellite)), with_extra(&["errors"]));
     let write = FakeWrite::default();
     let replies = run(
         Some(Role::Satellite),
@@ -238,4 +252,135 @@ fn a_bad_role_exits_before_any_reply() {
     let output = child.wait_with_output().expect("wait for switchboard");
     assert!(!output.status.success());
     assert!(output.stdout.is_empty(), "no reply before the error");
+}
+
+#[test]
+fn budget_manager_pool_edit_reaches_the_core_with_each_field() {
+    let write = FakeWrite::default();
+    let replies = run(
+        Some(Role::BudgetManager),
+        &write,
+        &[call(
+            11,
+            "pool_edit",
+            json!({ "pool": "claude", "plan": "max-5x", "reset": "Sun 6:00am", "cost_usd": 100 }),
+        )],
+    );
+    assert_eq!(replies[0]["result"]["isError"], false, "{replies:?}");
+    assert_eq!(
+        replies[0]["result"]["content"][0]["text"],
+        "pool_edit claude: saved"
+    );
+    let edits = write.edits.borrow();
+    assert_eq!(edits.len(), 1);
+    assert_eq!(
+        edits[0],
+        (
+            "pool_edit".to_string(),
+            PoolEdit {
+                pool: "claude".into(),
+                plan: Some("max-5x".into()),
+                cap: None,
+                reset: Some("Sun 6:00am".into()),
+                cost_usd: Some(100.0),
+            }
+        )
+    );
+}
+
+#[test]
+fn pool_edit_without_a_pool_or_with_a_bad_field_never_reaches_the_core() {
+    let write = FakeWrite::default();
+    let replies = run(
+        Some(Role::BudgetManager),
+        &write,
+        &[
+            call(12, "pool_edit", json!({ "plan": "max-5x" })),
+            call(13, "pool_edit", json!({ "pool": "claude", "cap": "lots" })),
+        ],
+    );
+    for reply in &replies {
+        assert_eq!(reply["error"]["code"], -32602, "{reply}");
+    }
+    assert!(write.edits.borrow().is_empty());
+}
+
+#[test]
+fn budget_manager_budget_refresh_reaches_the_core_once() {
+    let write = FakeWrite::default();
+    let replies = run(
+        Some(Role::BudgetManager),
+        &write,
+        &[call(14, "budget_refresh", json!({}))],
+    );
+    assert_eq!(replies[0]["result"]["isError"], false, "{replies:?}");
+    let text = replies[0]["result"]["content"][0]["text"].as_str().unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(text).unwrap(),
+        json!([{ "pool": "claude" }])
+    );
+    assert_eq!(*write.refreshes.borrow(), 1);
+}
+
+#[test]
+fn other_roles_get_no_pool_edit_and_no_budget_refresh() {
+    for role in [Role::ProjectManager, Role::Satellite] {
+        let write = FakeWrite::default();
+        let replies = run(
+            Some(role.clone()),
+            &write,
+            &[
+                call(
+                    15,
+                    "pool_edit",
+                    json!({ "pool": "claude", "plan": "max-5x" }),
+                ),
+                call(16, "budget_refresh", json!({})),
+            ],
+        );
+        assert_eq!(replies[0]["error"]["message"], "unknown tool: pool_edit");
+        assert_eq!(
+            replies[1]["error"]["message"],
+            "unknown tool: budget_refresh"
+        );
+        assert!(write.edits.borrow().is_empty());
+        assert_eq!(*write.refreshes.borrow(), 0);
+    }
+}
+
+/// #375: the satellite reads the recorded fleet errors and the IT tickets; the call reaches the
+/// read core with no write made.
+#[test]
+fn satellite_errors_reaches_the_read_core() {
+    let write = FakeWrite::default();
+    let replies = run(
+        Some(Role::Satellite),
+        &write,
+        &[call(30, "errors", json!({}))],
+    );
+    assert_eq!(replies[0]["result"]["isError"], false, "{}", replies[0]);
+    let text = replies[0]["result"]["content"][0]["text"].as_str().unwrap();
+    let answer: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(answer["tool"], "errors");
+    assert!(write.merged.borrow().is_empty());
+    assert!(write.caps.borrow().is_empty());
+    assert!(write.edits.borrow().is_empty());
+}
+
+/// #375: MCP-1's six stay the list with no role, and the other roles do not read `errors`.
+#[test]
+fn errors_is_unknown_without_the_satellite_role() {
+    for role in [None, Some(Role::ProjectManager), Some(Role::BudgetManager)] {
+        assert!(
+            !tool_names(role.clone()).iter().any(|t| t == "errors"),
+            "{role:?} lists errors"
+        );
+        let replies = run(
+            role,
+            &FakeWrite::default(),
+            &[call(31, "errors", json!({}))],
+        );
+        assert_eq!(replies[0]["error"]["code"], -32602);
+        assert_eq!(replies[0]["error"]["message"], "unknown tool: errors");
+    }
 }

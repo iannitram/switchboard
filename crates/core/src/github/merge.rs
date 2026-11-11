@@ -11,6 +11,8 @@ use crate::CoreError;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MergeEligibility {
     Eligible,
+    /// The PR is `closed` or `merged` (#341). Holds its state.
+    NotOpen(String),
     /// No PASS at all.
     NoPass,
     /// The latest PASS is on an older head and a code commit came after it.
@@ -23,6 +25,10 @@ pub enum MergeEligibility {
 /// is an update from main with the same patch-id (`carried_over`, worked out by the caller
 /// with `git patch-id`).
 pub fn eligibility(pr: &PullRequest, carried_over: bool) -> MergeEligibility {
+    // A closed or merged PR is never merged again, whatever its verdict and CI (#341).
+    if matches!(pr.state.as_str(), "closed" | "merged") {
+        return MergeEligibility::NotOpen(pr.state.clone());
+    }
     // The list is oldest first, so the last verdict is the latest one. Only a PASS counts.
     let latest = match pr.verdicts.last() {
         Some(v) if v.verdict == "PASS" => v,
@@ -37,6 +43,22 @@ pub fn eligibility(pr: &PullRequest, carried_over: bool) -> MergeEligibility {
         MergeEligibility::Eligible
     } else {
         MergeEligibility::CiNotGreen(pr.ci_on_head.clone())
+    }
+}
+
+/// SKY-8 (#342): the PR's latest R25 verdict as `star` shows it: `PASS` or `FAIL` when it names
+/// the PR's head, `PASS on an older commit` or `FAIL on an older commit` when a commit came
+/// after it (GH-5 refuses such a PASS unless it carries over by patch-id). `None` when the
+/// latest verdict is neither PASS nor FAIL, or there is none.
+pub fn review_text(pr: &PullRequest) -> Option<String> {
+    let latest = pr
+        .verdicts
+        .last()
+        .filter(|v| matches!(v.verdict.as_str(), "PASS" | "FAIL"))?;
+    if latest.sha == pr.head_sha {
+        Some(latest.verdict.clone())
+    } else {
+        Some(format!("{} on an older commit", latest.verdict))
     }
 }
 
@@ -67,6 +89,14 @@ pub fn merge(caller: &Caller, job: &MergeJob<'_>, poller: &Poller<'_>) -> Result
     .into_result()?;
     match eligibility(job.pr, job.carried_over) {
         MergeEligibility::Eligible => {}
+        MergeEligibility::NotOpen(state) => {
+            let why = if state == "merged" {
+                "the PR is already merged"
+            } else {
+                "the PR is closed"
+            };
+            return Err(CoreError::Refused(why.to_string()));
+        }
         MergeEligibility::NoPass => {
             return Err(CoreError::Refused(
                 "no VERDICT: PASS on this PR".to_string(),

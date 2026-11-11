@@ -37,6 +37,8 @@ fn pull(number: u64, state: &str, closes: &[u64], verdicts: &[&str], ci: &str) -
             })
             .collect(),
         ci_on_head: ci.to_string(),
+        // The verdicts name the head (#342: `star` marks a verdict on an older commit).
+        head_sha: "abc".to_string(),
         ..Default::default()
     }
 }
@@ -118,6 +120,15 @@ fn fixture(tag: &str) -> PathBuf {
     dir
 }
 
+/// The fixture priority copy's age in days now.
+fn copy_age() -> i64 {
+    let copy = switchboard_core::sky::priority::parse(
+        r#"{"updated_at": "2026-11-05T12:00:00Z", "order": []}"#,
+    )
+    .unwrap();
+    switchboard_core::sky::priority::age_days(&copy, SystemClock.now())
+}
+
 /// A pipeline checkout whose legacy job log holds a running job on alpha#2 and a finished one
 /// on alpha#1.
 fn pipeline(tag: &str) -> PathBuf {
@@ -161,11 +172,16 @@ fn sky_prints_one_line_per_repo_in_placement_order() {
     let data = fixture("text");
     let out = switchboard(&["sky"], &data, None);
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    // #345 added the priority copy's last line.
     assert_eq!(
         stdout(&out),
-        "iannitram/beta: brightness 0.00, 1 open, 3 drifted\n\
-         iannitram/alpha: brightness 0.33, 3 open, 2 drifted\n\
-         iannitram/gamma: brightness 0.00, 0 open, 1 drifted\n"
+        format!(
+            "iannitram/beta: brightness 0.00, 1 open, 3 drifted\n\
+             iannitram/alpha: brightness 0.33, 3 open, 2 drifted\n\
+             iannitram/gamma: brightness 0.00, 0 open, 1 drifted\n\
+             priority copy: {} days old\n",
+            copy_age()
+        )
     );
 }
 
@@ -177,10 +193,11 @@ fn sky_json_is_the_same_rows_as_the_window() {
     let rows: Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
     assert_eq!(
         rows,
+        // #345 added the priority copy's age to each row.
         json!([
-            {"repo": "iannitram/beta", "brightness": 0.0, "open": 1, "drifted": 3},
-            {"repo": "iannitram/alpha", "brightness": 1.0 / 3.0, "open": 3, "drifted": 2},
-            {"repo": "iannitram/gamma", "brightness": 0.0, "open": 0, "drifted": 1},
+            {"repo": "iannitram/beta", "brightness": 0.0, "open": 1, "drifted": 3, "priority_age_days": copy_age()},
+            {"repo": "iannitram/alpha", "brightness": 1.0 / 3.0, "open": 3, "drifted": 2, "priority_age_days": copy_age()},
+            {"repo": "iannitram/gamma", "brightness": 0.0, "open": 0, "drifted": 1, "priority_age_days": copy_age()},
         ])
     );
 

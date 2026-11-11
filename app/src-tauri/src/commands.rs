@@ -12,6 +12,8 @@ use switchboard_core::it::{self, Loadout, ProbeRunner};
 use switchboard_core::platform::{current_os, loadout_probes, Probe};
 use switchboard_core::reports::{self, thread_rows, Filter, Report, FLEET_STATE_DIR_ENV};
 use switchboard_core::settings::{self, Settings};
+// The test modules (`confirm_guarded_tests.rs`, `pool_edit_tests.rs`) take it in through `super::*`.
+#[cfg(test)]
 use switchboard_core::waiting::LocalItems;
 use switchboard_core::CoreError;
 use tauri::Manager;
@@ -26,6 +28,8 @@ pub struct AppState {
     pub github: Mutex<()>,
     /// IT-1: the newest loadout read, for the panel and the router (FD-12); None before the first read.
     pub loadout: Mutex<Option<Loadout>>,
+    /// #375: where recorded fleet errors are kept (`fleet_errors_disk`); unset, none are.
+    pub errors_disk: ErrorsOnDisk,
 }
 
 impl AppState {
@@ -35,6 +39,7 @@ impl AppState {
             errors: Mutex::new(FleetErrorLog::default()),
             github: Mutex::new(()),
             loadout: Mutex::new(None),
+            errors_disk: ErrorsOnDisk::default(),
         }
     }
 }
@@ -179,21 +184,70 @@ pub fn settings_save(
     save_settings(&state.settings_path, &settings).map_err(|e| FaceError::new("settings_save", &e))
 }
 
-/// CORE-2: the fleet errors this session recorded, newest first.
+/// CORE-2: the recorded fleet errors, newest first: the ones kept in the app data folder
+/// (#375, the list the CLI's `errors` prints), or this session's while none can be read.
 #[tauri::command]
 pub fn fleet_errors(state: tauri::State<'_, AppState>) -> Vec<FleetErrorRow> {
-    let log = state.errors.lock().unwrap_or_else(|p| p.into_inner());
-    log.errors.iter().map(FleetErrorRow::from).collect()
+    fleet_error_rows(&state)
 }
 
-/// SKY-W: the sky the Sky view paints, from the snapshot in the app data folder.
+/// SKY-W: the sky the Sky view paints (`sky_at` in the app data folder, now). A ledger or
+/// settings file that does not read is named on stderr; the sky shows without jobs.
 #[tauri::command]
-pub fn sky(app: tauri::AppHandle) -> Result<switchboard_core::sky::model::SkyModel, FaceError> {
+pub fn sky(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<switchboard_core::sky::model::SkyModel, FaceError> {
+    let env = std::env::var_os(FLEET_STATE_DIR_ENV);
     app.path()
         .app_data_dir()
         .map_err(|e| CoreError::Io(format!("app data dir: {e}")))
-        .and_then(|data| switchboard_core::sky::model::load(&data, SystemClock.now()))
+        .and_then(|data| {
+            sky_at(
+                &state.settings_path,
+                env.as_deref(),
+                &data,
+                SystemClock.now(),
+            )
+        })
+        .map(|(model, jobs_error)| {
+            if let Some(e) = jobs_error {
+                eprintln!("sky: the jobs in flight could not be read, so none are shown: {e}");
+            }
+            model
+        })
         .map_err(|e| FaceError::new("sky", &e))
+}
+
+/// SKY-W, SKY-4 (#343): the sky from the snapshot in `data`, with the jobs in flight from the
+/// fleet ledger (`ledger_events`). A ledger or settings file that does not read leaves the sky
+/// without jobs, and its error comes back beside the sky; only the sky's own read fails it.
+pub fn sky_at(
+    settings_path: &Path,
+    env: Option<&std::ffi::OsStr>,
+    data: &Path,
+    now: UnixSeconds,
+) -> Result<(switchboard_core::sky::model::SkyModel, Option<CoreError>), CoreError> {
+    let (events, jobs_error) = match ledger_events(settings_path, env) {
+        Ok(events) => (events, None),
+        Err(e) => (Vec::new(), Some(e)),
+    };
+    let model = switchboard_core::sky::model::load_with_ledger(data, &events, now)?;
+    Ok((model, jobs_error))
+}
+
+/// SKY-4 (#343): the fleet ledger's events, from the fleet state `reports` reads; none while
+/// the settings name no pipeline repo, as the CLI has none without its pipeline checkout.
+pub fn ledger_events(
+    settings_path: &Path,
+    env: Option<&std::ffi::OsStr>,
+) -> Result<Vec<serde_json::Value>, CoreError> {
+    let settings = settings::load(settings_path)?;
+    let Ok(root) = settings.pipeline_repo() else {
+        return Ok(Vec::new());
+    };
+    let state = reports::state_dir(root, env);
+    switchboard_core::joblog::read_ledger(&switchboard_core::joblog::ledger_files(root, &state))
 }
 
 /// The fleet bridge over the pipeline repo the settings file names.
@@ -224,6 +278,7 @@ pub fn record_fleet_error(
     let copy = {
         let mut log = state.errors.lock().unwrap_or_else(|p| p.into_inner());
         log.record(e.clone());
+        keep_on_disk(state, e);
         FleetErrorLog {
             errors: log.errors.clone(),
         }
@@ -237,6 +292,72 @@ pub fn record_fleet_error(
         filed
     }))
 }
+
+// #375 (CORE-2, IT-2): recorded fleet errors kept on disk, in the app data folder, through
+// `switchboard_core::fleet_errors`, so the CLI and MCP list what the app recorded and the list
+// outlives a restart. Filing IT tickets still hands fleet this session's log.
+
+/// #375: the app data folder the errors are kept in, and whether a keep has failed.
+#[derive(Debug, Default)]
+pub struct ErrorsOnDisk {
+    dir: std::sync::OnceLock<PathBuf>,
+    /// Set once an error could not be kept, so the list reads this session's log, which has it.
+    behind: std::sync::atomic::AtomicBool,
+}
+
+impl AppState {
+    /// #375: keep recorded fleet errors in `data` from now on (the app data folder, set once at
+    /// start; a second call is ignored).
+    pub fn keep_errors_in(&self, data: PathBuf) {
+        let _ = self.errors_disk.dir.set(data);
+    }
+}
+
+/// #375: append `err` to the errors kept on disk. A failure is said on stderr and leaves the
+/// action that hit the fleet error as it was; the list then reads this session's log.
+fn keep_on_disk(state: &AppState, err: &FleetError) {
+    let Some(data) = state.errors_disk.dir.get() else {
+        return;
+    };
+    if let Err(e) = switchboard_core::fleet_errors::record(data, err) {
+        eprintln!("fleet error not kept on disk: {e}");
+        state
+            .errors_disk
+            .behind
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// #375: the rows `fleet_errors` answers, newest first: the errors kept on disk, read as the
+/// CLI reads them; this session's log while no folder is set, a keep has failed, or the file
+/// does not read.
+pub fn fleet_error_rows(state: &AppState) -> Vec<FleetErrorRow> {
+    let behind = state
+        .errors_disk
+        .behind
+        .load(std::sync::atomic::Ordering::Relaxed);
+    if let Some(data) = state.errors_disk.dir.get().filter(|_| !behind) {
+        match switchboard_core::fleet_errors::load(data) {
+            Ok(kept) => {
+                if kept.skipped > 0 {
+                    eprintln!(
+                        "fleet errors: {} line(s) of {} did not read; skipped",
+                        kept.skipped,
+                        switchboard_core::fleet_errors::FLEET_ERRORS_FILE
+                    );
+                }
+                return kept.errors.iter().map(FleetErrorRow::from).collect();
+            }
+            Err(e) => eprintln!("fleet errors: {e}; showing this session's"),
+        }
+    }
+    let log = state.errors.lock().unwrap_or_else(|p| p.into_inner());
+    log.errors.iter().rev().map(FleetErrorRow::from).collect()
+}
+
+#[cfg(test)]
+#[path = "fleet_errors_disk_tests.rs"]
+mod fleet_errors_disk_tests;
 
 /// FD-9: log a thumbs press on one answer (#179) as that turn's rating row in the chat's
 /// thread, in the thread store in the app data folder.
@@ -326,16 +447,28 @@ pub fn budget_save_edit(
         .map_err(|e| CoreError::Io(format!("app data dir: {e}")))
         .and_then(|data| {
             let fleet = bridge(&state.settings_path)?;
-            let saved =
-                budget::save_edit(&fleet, &edit, &data.join("pool-edits.jsonl"), &SystemClock)?;
-            LocalItems::new(&data).add(saved.waiting)?;
-            Ok(saved.rows)
+            save_pool_edit_rows(&fleet, &edit, &data, &SystemClock)
         })
         .map_err(|e| {
             record_fleet_error(&state, &e);
             FaceError::new("budget_save_edit", &e)
         })
 }
+
+/// BUD-2 (#340): the Budget panel's save through `budget::save_pool_edit`, the same as the CLI
+/// and MCP: file, ledger row and Waiting item all or nothing; the rows read again.
+pub fn save_pool_edit_rows(
+    fleet: &FleetBridge,
+    edit: &PoolEdit,
+    data: &Path,
+    clock: &dyn Clock,
+) -> Result<Vec<PoolRow>, CoreError> {
+    budget::save_pool_edit(fleet, edit, data, clock).map(|saved| saved.rows)
+}
+
+#[cfg(test)]
+#[path = "pool_edit_tests.rs"]
+mod pool_edit_tests;
 
 /// REP-1, REP-3: the reports, newest first, narrowed by `filter` when the face sends one.
 /// The chat threads join from the thread store in the app data folder (REP follow-up, #286).
@@ -479,6 +612,56 @@ pub fn chat_send_as_job(
         })
 }
 
+/// CORE-3, BAK-3 (#347): confirm a delete or restore request that waits in Waiting on you.
+/// `confirmed` is true only when I pressed the confirm button on that request, and `typed` is
+/// the repo's `owner/name` as I typed it there; neither argument has a default. Without the
+/// confirm the guard refuses, and a typed name that is not the request's repo is refused by
+/// the core. `cwd` is the folder the app runs in (a job worktree refuses everything). A
+/// refusal changes nothing. A delete request archives the repo; nothing is ever deleted.
+pub fn confirm_guarded_at(
+    settings_path: &Path,
+    data: &Path,
+    text: &str,
+    confirmed: bool,
+    typed: &str,
+    cwd: &Path,
+) -> Result<switchboard_core::confirm::Done, CoreError> {
+    use switchboard_core::rules::{self, Caller, Face};
+    let caller = Caller {
+        face: Face::Gui,
+        role: None,
+        in_job_worktree: rules::is_job_worktree(cwd),
+        confirmed_in_app: confirmed,
+    };
+    let settings = settings::load(settings_path)?;
+    switchboard_core::confirm::confirm(&settings, data, text, typed, &caller)
+}
+
+/// CORE-3, BAK-3 (#347): the Waiting on you view's confirm on a guarded request. It runs off
+/// the main thread: a restore pushes to GitHub.
+#[tauri::command(async)]
+pub fn confirm_guarded(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    text: String,
+    confirmed: bool,
+    typed: String,
+) -> Result<switchboard_core::confirm::Done, FaceError> {
+    app.path()
+        .app_data_dir()
+        .map_err(|e| CoreError::Io(format!("app data dir: {e}")))
+        .and_then(|data| {
+            let cwd = std::env::current_dir()
+                .map_err(|e| CoreError::Io(format!("working folder: {e}")))?;
+            confirm_guarded_at(&state.settings_path, &data, &text, confirmed, &typed, &cwd)
+        })
+        .map_err(|e| FaceError::new("confirm_guarded", &e))
+}
+
+#[cfg(test)]
+#[path = "confirm_guarded_tests.rs"]
+mod confirm_guarded_tests;
+
 #[cfg(test)]
 #[path = "it_tickets_tests.rs"]
 mod it_tickets_tests;
@@ -486,6 +669,9 @@ mod it_tickets_tests;
 #[cfg(test)]
 #[path = "loadout_tests.rs"]
 mod loadout_tests;
+#[cfg(test)]
+#[path = "sky_ledger_tests.rs"]
+mod sky_ledger_tests;
 #[cfg(test)]
 #[path = "commands_tests.rs"]
 mod tests;

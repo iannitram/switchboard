@@ -1,8 +1,14 @@
 //! `switchboard mcp`: JSON-RPC over stdio.
 //! MCP-1: without a role flag, six read tools only: `sky`, `constellation`, `star`, `waiting`,
 //! `reports`, `budget`, their schemas under about 2,000 tokens together.
-//! MCP-2: with a role flag, that role's write tools, each through CORE-3.
+//! MCP-2: with a role flag, that role's write tools, each through CORE-3: project-manager
+//! `merge`; budget-manager `set_pool_cap`, `pool_edit` (plan, cap, reset, cost, #374) and
+//! `budget_refresh` (#374), the pool edits through `rules::guard_pool_edit` and
+//! `budget::save_pool_edit`, as the CLI's commands of the same names.
+//! `reports` takes the CLI's `project`, `outcome` and `pool` filters (#358).
 //! MCP-3: inside a job worktree, no write tool whatever the flag.
+//! #375: the satellite role also reads `errors`, the fleet errors the app recorded and the open
+//! IT tickets (IT-3: triage runs on another machine). MCP-1's six stay the list with no role.
 
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
@@ -24,7 +30,21 @@ pub trait ReadCore {
 pub trait WriteCore {
     /// GH-5's eligibility (PASS on head, CI green) and the merge itself.
     fn merge(&self, repo: &str, pr: u64) -> Result<(), String>;
-    fn set_pool_cap(&self, pool: &str, cap: f64) -> Result<(), String>;
+    /// BUD-2: save `edit` (file, ledger row and Waiting item, all or nothing, #340). `tool`
+    /// names the tool in the text; `Ok` is the reply stating what was set (#362), `Err` the
+    /// reason nothing changed.
+    fn pool_edit(&self, tool: &str, edit: &PoolEdit) -> Result<String, String>;
+    /// BUD-2: `pool_edit` with the cap alone.
+    fn set_pool_cap(&self, pool: &str, cap: f64) -> Result<String, String> {
+        let edit = PoolEdit {
+            pool: pool.to_string(),
+            cap: Some(cap),
+            ..PoolEdit::default()
+        };
+        self.pool_edit("set_pool_cap", &edit)
+    }
+    /// BUD-3: re-read every pool that has a reader now (`fleet budget --refresh`); the rows.
+    fn budget_refresh(&self) -> Result<Value, String>;
     /// A guarded request the CLI or MCP may not run becomes a Waiting on you item.
     fn waiting(&self, text: &str) -> Result<(), String>;
 }
@@ -45,23 +65,36 @@ impl WriteCore for CoreWrites<'_> {
         (self.merge)(repo, pr)
     }
 
-    fn set_pool_cap(&self, pool: &str, cap: f64) -> Result<(), String> {
-        let fleet = self.fleet.as_ref().ok_or_else(|| {
-            "set_pool_cap: set SWITCHBOARD_PIPELINE to your pipeline checkout".to_string()
-        })?;
-        let data = self.data.as_ref().ok_or_else(|| {
-            "set_pool_cap: set SWITCHBOARD_DATA to the app data folder".to_string()
-        })?;
-        let edit = PoolEdit {
-            pool: pool.to_string(),
-            cap: Some(cap),
-            ..PoolEdit::default()
+    fn pool_edit(&self, tool: &str, edit: &PoolEdit) -> Result<String, String> {
+        let fleet = self
+            .fleet
+            .as_ref()
+            .ok_or_else(|| format!("{tool}: set SWITCHBOARD_PIPELINE to your pipeline checkout"))?;
+        let data = self
+            .data
+            .as_ref()
+            .ok_or_else(|| format!("{tool}: set SWITCHBOARD_DATA to the app data folder"))?;
+        let pool = &edit.pool;
+        // An empty pool name leaves no gap before the colon (#416).
+        let who = if pool.is_empty() {
+            tool.to_string()
+        } else {
+            format!("{tool} {pool}")
         };
-        let saved = budget::save_edit(fleet, &edit, &data.join("pool-edits.jsonl"), self.clock)
-            .map_err(|e| format!("set_pool_cap {pool}: {e}"))?;
-        LocalItems::new(data)
-            .add(saved.waiting)
-            .map_err(|e| format!("set_pool_cap {pool}: {e}"))
+        let saved = budget::save_pool_edit(fleet, edit, data, self.clock)
+            .map_err(|e| format!("{who}: {e}"))?;
+        Ok(format!(
+            "{tool} {pool}: {}",
+            budget::edit_summary(&saved.ledger_row)
+        ))
+    }
+
+    fn budget_refresh(&self) -> Result<Value, String> {
+        let fleet = self.fleet.as_ref().ok_or_else(|| {
+            "budget_refresh: set SWITCHBOARD_PIPELINE to your pipeline checkout".to_string()
+        })?;
+        let rows = budget::refresh(fleet).map_err(|e| format!("budget_refresh: {e}"))?;
+        serde_json::to_value(rows).map_err(|e| format!("budget_refresh: {e}"))
     }
 
     fn waiting(&self, text: &str) -> Result<(), String> {
@@ -100,8 +133,17 @@ pub const READ_TOOLS: [&str; 6] = [
 pub fn write_tools(role: &Role) -> Vec<&'static str> {
     match role {
         Role::ProjectManager => vec!["merge"],
-        Role::BudgetManager => vec!["set_pool_cap"],
+        Role::BudgetManager => vec!["set_pool_cap", "pool_edit", "budget_refresh"],
         Role::Satellite => vec![],
+    }
+}
+
+/// #375: the read tools a role adds to MCP-1's six, in this order. The satellite is the machine
+/// that triages IT tickets (IT-3), so it reads the fleet errors and the tickets.
+pub fn role_read_tools(role: &Role) -> Vec<&'static str> {
+    match role {
+        Role::Satellite => vec!["errors"],
+        Role::ProjectManager | Role::BudgetManager => vec![],
     }
 }
 
@@ -255,7 +297,9 @@ fn call_tool(
     };
     let raw_args = params.get("arguments").unwrap_or(&Value::Null);
     let held = role.is_some_and(|r| write_tools(r).contains(&name));
-    if !READ_TOOLS.contains(&name) && !held {
+    let read =
+        READ_TOOLS.contains(&name) || role.is_some_and(|r| role_read_tools(r).contains(&name));
+    if !read && !held {
         return error(id, INVALID_PARAMS, &format!("unknown tool: {name}"));
     }
     let args = match tool_schema(name).map(|schema| check_args(name, &schema, raw_args)) {
@@ -263,7 +307,7 @@ fn call_tool(
         Some(Err(message)) => return error(id, INVALID_PARAMS, &message),
         None => raw_args.clone(),
     };
-    if READ_TOOLS.contains(&name) {
+    if read {
         return read_call(id, name, &args, core);
     }
     match role {
@@ -276,6 +320,7 @@ fn call_tool(
 fn tool_schema(name: &str) -> Option<Value> {
     let all = read_tools().as_array().cloned().unwrap_or_default();
     all.into_iter()
+        .chain(role_read_schemas().into_iter().map(|(_, schema)| schema))
         .chain(write_schemas().into_iter().map(|(_, schema)| schema))
         .find(|tool| tool["name"] == name)
         .map(|tool| tool["inputSchema"].clone())
@@ -353,8 +398,10 @@ fn read_call(id: &Value, name: &str, args: &Value, core: &dyn ReadCore) -> Value
     }
 }
 
-/// MCP-2: a write tool. `merge` is guarded by CORE-3 here; the rule has no action for a pool
-/// cap, so `set_pool_cap` is gated by its role alone (see `write_tools`).
+/// MCP-2: a write tool. `merge` is guarded by CORE-3 here; the pool edits by
+/// `rules::guard_pool_edit`, the same check the CLI makes (the role already holds them, see
+/// `write_tools`). The reply is the core's text: `merge: done`, the pool edit's new values
+/// (#362), or the re-read rows as JSON.
 fn write_call(
     id: &Value,
     name: &str,
@@ -363,9 +410,16 @@ fn write_call(
     write: &dyn WriteCore,
     in_job_worktree: bool,
 ) -> Value {
+    let caller = Caller {
+        face: Face::Mcp,
+        role: Some(role.clone()),
+        in_job_worktree,
+        confirmed_in_app: false,
+    };
     let outcome = match name {
         "merge" => match (args["repo"].as_str(), args["pr"].as_u64()) {
-            (Some(repo), Some(pr)) => guarded_merge(role, repo, pr, write, in_job_worktree),
+            (Some(repo), Some(pr)) => guarded_merge(role, repo, pr, write, in_job_worktree)
+                .map(|()| format!("{name}: done")),
             _ => {
                 return error(
                     id,
@@ -374,8 +428,10 @@ fn write_call(
                 )
             }
         },
-        _ => match (args["pool"].as_str(), args["cap"].as_f64()) {
-            (Some(pool), Some(cap)) => write.set_pool_cap(pool, cap),
+        "set_pool_cap" => match (args["pool"].as_str(), args["cap"].as_f64()) {
+            (Some(pool), Some(cap)) => {
+                guard_pool(&caller, pool).and_then(|()| write.set_pool_cap(pool, cap))
+            }
             _ => {
                 return error(
                     id,
@@ -384,16 +440,36 @@ fn write_call(
                 )
             }
         },
+        "pool_edit" => {
+            let edit = PoolEdit {
+                pool: args["pool"].as_str().unwrap_or_default().to_string(),
+                plan: args["plan"].as_str().map(str::to_string),
+                cap: args["cap"].as_f64(),
+                reset: args["reset"].as_str().map(str::to_string),
+                cost_usd: args["cost_usd"].as_f64(),
+            };
+            guard_pool(&caller, &edit.pool).and_then(|()| write.pool_edit(name, &edit))
+        }
+        // `budget_refresh`: a re-read, held by the role alone (`write_tools`).
+        _ => write.budget_refresh().map(|rows| rows.to_string()),
     };
     match outcome {
-        Ok(()) => ok(
+        Ok(text) => ok(
             id,
-            json!({ "content": [{ "type": "text", "text": format!("{name}: done") }], "isError": false }),
+            json!({ "content": [{ "type": "text", "text": text }], "isError": false }),
         ),
         Err(message) => ok(
             id,
             json!({ "content": [{ "type": "text", "text": message }], "isError": true }),
         ),
+    }
+}
+
+/// `rules::guard_pool_edit` as a `Result`: the refusal is its text, as the CLI prints it.
+fn guard_pool(caller: &Caller, pool: &str) -> Result<(), String> {
+    match rules::guard_pool_edit(caller, pool) {
+        Verdict::Allow => Ok(()),
+        Verdict::Refuse(text) | Verdict::ToWaiting(text) => Err(text),
     }
 }
 
@@ -426,10 +502,17 @@ fn guarded_merge(
     }
 }
 
-/// MCP-1 and MCP-2: the six read tools, then the role's write tools.
+/// MCP-1 and MCP-2: the six read tools, then the role's read tools (#375), then its write tools.
 fn tools(role: Option<&Role>) -> Value {
     let mut list = read_tools().as_array().cloned().unwrap_or_default();
     if let Some(role) = role {
+        let reads = role_read_tools(role);
+        list.extend(
+            role_read_schemas()
+                .into_iter()
+                .filter(|(name, _)| reads.contains(name))
+                .map(|(_, schema)| schema),
+        );
         let held = write_tools(role);
         let all = write_schemas();
         list.extend(
@@ -441,8 +524,20 @@ fn tools(role: Option<&Role>) -> Value {
     Value::Array(list)
 }
 
+/// #375: every role read tool's `(name, schema)`; `tools` lists the ones a role holds.
+fn role_read_schemas() -> [(&'static str, Value); 1] {
+    [(
+        "errors",
+        json!({
+            "name": "errors",
+            "description": "The fleet errors the app recorded, newest first, and the open IT tickets.",
+            "inputSchema": { "type": "object", "properties": {} }
+        }),
+    )]
+}
+
 /// MCP-2: every write tool's `(name, schema)`; `tools` lists the ones a role holds.
-fn write_schemas() -> [(&'static str, Value); 2] {
+fn write_schemas() -> [(&'static str, Value); 4] {
     [
         (
             "merge",
@@ -463,7 +558,7 @@ fn write_schemas() -> [(&'static str, Value); 2] {
             "set_pool_cap",
             json!({
                 "name": "set_pool_cap",
-                "description": "Set one budget pool's cap.",
+                "description": "Set one budget pool's dollar cap; the reply states the new cap.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -472,6 +567,32 @@ fn write_schemas() -> [(&'static str, Value); 2] {
                     },
                     "required": ["pool", "cap"]
                 }
+            }),
+        ),
+        (
+            "pool_edit",
+            json!({
+                "name": "pool_edit",
+                "description": "Edit one budget pool in place (plan, cap, reset, cost), as the Budget panel does.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "pool": { "type": "string", "description": "The pool's name" },
+                        "plan": { "type": "string" },
+                        "cap": { "type": "number", "minimum": 0 },
+                        "reset": { "type": "string", "description": "e.g. Sun 6:00am" },
+                        "cost_usd": { "type": "number", "minimum": 0 }
+                    },
+                    "required": ["pool"]
+                }
+            }),
+        ),
+        (
+            "budget_refresh",
+            json!({
+                "name": "budget_refresh",
+                "description": "Re-read every pool that has a reader now, then return the budget rows.",
+                "inputSchema": { "type": "object", "properties": {} }
             }),
         ),
     ]
@@ -513,7 +634,15 @@ fn read_tools() -> Value {
         {
             "name": "reports",
             "description": "Reports built from job cards and handoff threads.",
-            "inputSchema": { "type": "object", "properties": { "limit": limit } }
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "limit": limit,
+                    "project": { "type": "string" },
+                    "outcome": { "type": "string" },
+                    "pool": { "type": "string" }
+                }
+            }
         },
         {
             "name": "budget",

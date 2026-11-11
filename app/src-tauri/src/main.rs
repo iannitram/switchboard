@@ -159,12 +159,18 @@ fn autopilot_after_poll(
                         std::thread::spawn(move || {
                             match switchboard_core::backup::backup_all(&settings, &run.backup) {
                                 Ok(outcomes) => {
+                                    use switchboard_core::backup::BackupOutcome;
                                     for (repo, outcome) in outcomes {
-                                        if let switchboard_core::backup::BackupOutcome::Refused(
-                                            why,
-                                        ) = outcome
-                                        {
-                                            eprintln!("weekly backup: {repo} refused: {why}");
+                                        match outcome {
+                                            Ok(BackupOutcome::Written(manifest)) => {
+                                                if let Some(now) = manifest.resolved_repo {
+                                                    eprintln!("weekly backup: {repo}: GitHub answered for {now}: renamed or moved");
+                                                }
+                                            }
+                                            Ok(BackupOutcome::Refused(why)) => {
+                                                eprintln!("weekly backup: {repo} refused: {why}");
+                                            }
+                                            Err(e) => eprintln!("weekly backup: {e}"),
                                         }
                                     }
                                 }
@@ -214,6 +220,10 @@ fn main() {
         .setup(|app| {
             let dir = app.path().app_config_dir()?;
             app.manage(commands::AppState::new(dir.join("settings.json")));
+            // #375: recorded fleet errors are kept in the app data folder.
+            if let Ok(data) = app.path().app_data_dir() {
+                app.state::<commands::AppState>().keep_errors_in(data);
+            }
             let satellite = app.handle().clone();
             std::thread::spawn(move || satellite_loop(satellite, dir));
             let handle = app.handle().clone();
@@ -299,6 +309,7 @@ fn main() {
             commands::backup_all,
             commands::chat_route,
             commands::chat_send_as_job,
+            commands::confirm_guarded,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Switchboard");

@@ -237,18 +237,17 @@ fn load_with_a_bad_local_file_is_its_parse_error() {
     }
 }
 
+// #350 changed this test: a bad snapshot file used to be the parse error of the whole load.
 #[test]
-fn load_with_a_bad_snapshot_file_is_its_parse_error() {
+fn load_with_a_bad_snapshot_file_skips_it_and_keeps_the_good_ones() {
     let dir = data_dir("badsnap");
+    SnapshotStore::new(&dir).save(&beta()).unwrap();
     let path = SnapshotStore::new(&dir).path_for("iannitram/bad");
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, "[1, 2").unwrap();
-    match load(&dir).unwrap_err() {
-        CoreError::Parse(msg) => {
-            assert!(msg.starts_with(&format!("{}: ", path.display())), "{msg}")
-        }
-        other => panic!("got {other:?}"),
-    }
+    assert_eq!(
+        whats(&load(&dir).unwrap()),
+        vec!["iannitram/beta#3: Name the app"]
+    );
 }
 
 // --- The shell registers the command; the code map says so ---
