@@ -140,9 +140,10 @@ fn no_role_merge_is_an_unknown_tool() {
 
 #[test]
 fn project_manager_lists_merge_after_the_read_tools() {
+    // #384 added the three front-door tools after `merge`.
     assert_eq!(
         tool_names(Some(Role::ProjectManager)),
-        with_extra(&["merge"])
+        with_extra(&["merge", "ask", "ask_as_job", "rate"])
     );
 }
 
