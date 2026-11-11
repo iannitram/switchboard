@@ -357,6 +357,32 @@ fn a_killed_satellite_run_leaves_its_loop_to_the_next_run() {
     first.wait().unwrap();
     let loop_pid = loops::read(&dir).loops[0].pid;
     assert!(loops::alive(loop_pid, None), "the loop outlives its run");
+    // TEMP diagnostics (Windows CI)
+    let mut diag = format!("record: {:?}\n", loops::read(&dir).loops);
+    for i in 0..10 {
+        diag.push_str(&format!(
+            "t+{}ms alive={} token={:?}\n",
+            i * 200,
+            loops::alive(loop_pid, None),
+            loops::process_token(loop_pid)
+        ));
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    if cfg!(windows) {
+        let tl = Command::new("tasklist").args(["/FO", "CSV", "/NH"]).output().unwrap();
+        for line in String::from_utf8_lossy(&tl.stdout).lines() {
+            let l = line.to_lowercase();
+            if l.contains("py") || l.contains("switchboard") {
+                diag.push_str(&format!("tasklist: {line}\n"));
+            }
+        }
+    }
+    diag.push_str(&format!(
+        "calls: {:?}\nerr: {}\nout: {}\n",
+        w.calls("fleet"),
+        std::fs::read_to_string(dir.join("gemini.err")).unwrap_or_default(),
+        std::fs::read_to_string(dir.join("gemini.out")).unwrap_or_default()
+    ));
 
     let second = spawn(&argv, &w);
     let second_pid = second.id();
@@ -371,7 +397,12 @@ fn a_killed_satellite_run_leaves_its_loop_to_the_next_run() {
     assert_eq!(code(&out), Some(0), "{}{}", stdout(&out), stderr(&out));
     let text = stdout(&out);
     assert!(text.contains("adopted the gemini loop"), "{text}");
-    assert!(!text.contains("started gemini"), "{text}");
+    assert!(
+        !text.contains("started gemini"),
+        "{text}\n{}\nDIAG:\n{diag}\ncalls after: {:?}",
+        stderr(&out),
+        w.calls("fleet")
+    );
     assert_eq!(w.runs().len(), 1, "one loop, never a second copy");
     assert!(loops::read(&dir).loops.is_empty());
     assert!(!lock::held(&dir));
