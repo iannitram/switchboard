@@ -252,6 +252,49 @@ pub fn write_release_list(
 /// Where release file bytes come from: the network in the app, a stub in tests.
 pub trait FileSource {
     fn fetch(&self, url: &str) -> Result<Vec<u8>, CoreError>;
+
+    /// Writes the file at `url` to `dest` and returns its size in bytes. The default holds the
+    /// file in memory; `HttpFiles` streams it to disk instead (#433).
+    fn fetch_to(&self, url: &str, dest: &Path) -> Result<u64, CoreError> {
+        let bytes = self.fetch(url)?;
+        std::fs::write(dest, &bytes).map_err(|e| io_error(dest, e))?;
+        Ok(bytes.len() as u64)
+    }
+}
+
+/// A name for a temporary file beside `path`: unique per process, call and moment.
+fn temp_beside(path: &Path) -> std::path::PathBuf {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    let name = path
+        .file_name()
+        .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+    path.with_file_name(format!(".{name}.{}.{n}.{nanos}.part", std::process::id()))
+}
+
+/// A temporary file removed when the guard drops (an error return or a panic) unless `keep`
+/// was called once it was renamed into place.
+struct TempFile(Option<std::path::PathBuf>);
+
+impl TempFile {
+    fn path(&self) -> &Path {
+        self.0.as_deref().unwrap_or(Path::new(""))
+    }
+
+    fn keep(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 /// A tag or file name as one safe path part: `/` and `\` become `_`, and a result that is
@@ -296,20 +339,22 @@ fn fetch_into(
                 .ok_or_else(|| {
                     CoreError::Parse(format!("release {tag}: asset {name} has no download URL"))
                 })?;
-            let bytes = files.fetch(url)?;
-            // A download cut short must not be kept as if it were the whole file.
-            if let Some(size) = asset["size"].as_u64() {
-                if bytes.len() as u64 != size {
-                    return Err(CoreError::GitHub(format!(
-                        "release {tag}: {name} came as {} bytes, the release says {size}",
-                        bytes.len()
-                    )));
-                }
-            }
             let dir = staging.join(safe_part(tag));
             std::fs::create_dir_all(&dir).map_err(|e| io_error(&dir, e))?;
             let path = dir.join(safe_part(name));
-            std::fs::write(&path, bytes).map_err(|e| io_error(&path, e))?;
+            // The file streams to a temporary file, which is removed whatever happens.
+            let tmp = TempFile(Some(temp_beside(&path)));
+            let len = files.fetch_to(url, tmp.path())?;
+            // A download cut short must not be kept as if it were the whole file.
+            if let Some(size) = asset["size"].as_u64() {
+                if len != size {
+                    return Err(CoreError::GitHub(format!(
+                        "release {tag}: {name} came as {len} bytes, the release says {size}"
+                    )));
+                }
+            }
+            std::fs::rename(tmp.path(), &path).map_err(|e| io_error(&path, e))?;
+            tmp.keep();
             count += 1;
         }
     }
@@ -586,7 +631,14 @@ impl HttpFiles {
 
 impl FileSource for HttpFiles {
     fn fetch(&self, url: &str) -> Result<Vec<u8>, CoreError> {
-        use std::io::Read;
+        let tmp = TempFile(Some(temp_beside(
+            &std::env::temp_dir().join("switchboard-release-file"),
+        )));
+        self.fetch_to(url, tmp.path())?;
+        std::fs::read(tmp.path()).map_err(|e| io_error(tmp.path(), e))
+    }
+
+    fn fetch_to(&self, url: &str, dest: &Path) -> Result<u64, CoreError> {
         let failed = |why: String| CoreError::GitHub(format!("GET {url}: {why}"));
         let mut request = self
             .agent
@@ -597,13 +649,14 @@ impl FileSource for HttpFiles {
             request = request.set("Authorization", &format!("Bearer {}", self.token));
         }
         let answer = request.call().map_err(|e| failed(e.to_string()))?;
-        let mut bytes = Vec::new();
-        answer
-            .into_reader()
-            .take(RELEASE_FILE_LIMIT)
-            .read_to_end(&mut bytes)
-            .map_err(|e| failed(e.to_string()))?;
-        Ok(bytes)
+        let mut reader = std::io::Read::take(answer.into_reader(), RELEASE_FILE_LIMIT);
+        // A file cut short by an error or a panic is removed; a whole one is kept.
+        let mut file = std::fs::File::create(dest).map_err(|e| io_error(dest, e))?;
+        let partial = TempFile(Some(dest.to_path_buf()));
+        let n = std::io::copy(&mut reader, &mut file).map_err(|e| failed(e.to_string()))?;
+        drop(file);
+        partial.keep();
+        Ok(n)
     }
 }
 

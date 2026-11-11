@@ -628,10 +628,10 @@ fn bad_lines_are_usage_errors() {
         ),
         (&["ask", ASK, "--unmet", "web"], "--unmet is for ask_as_job"),
         (&["ask", ASK, "--nope"], "unknown flag: --nope"),
-        (&["sky", "--dry-run"], "--dry-run and --thread are for ask"),
+        (&["sky", "--dry-run"], "--dry-run is for ask"),
         (
             &["rate", "t", "1", "up", "--thread", "t"],
-            "--dry-run and --thread are for ask",
+            "--thread is for ask and ask_as_job",
         ),
         (&["rate", "t", "1"], "rate needs <thread> <turn> <up|down>"),
         (

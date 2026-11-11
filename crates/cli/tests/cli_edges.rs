@@ -594,6 +594,7 @@ fn a_reports_filter_value_named_mcp_is_not_the_mcp_command() {
 fn loadout_is_a_quiet_exit_when_the_reader_closed_the_pipe() {
     let loadout = switchboard_core::it::Loadout {
         read_at: 0,
+        timed_out: Vec::new(),
         clis: vec![],
         models_loaded: vec!["m".to_string()],
         toolchains: vec![],
@@ -616,6 +617,7 @@ fn loadout_is_a_quiet_exit_when_the_reader_closed_the_pipe() {
 fn loadout_text_escapes_model_names_and_fleet_errors() {
     let loadout = switchboard_core::it::Loadout {
         read_at: 0,
+        timed_out: Vec::new(),
         clis: vec![],
         models_loaded: vec![EVIL.to_string()],
         toolchains: vec![],

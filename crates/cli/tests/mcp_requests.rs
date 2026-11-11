@@ -12,7 +12,7 @@ mod mcp;
 
 use std::path::{Path, PathBuf};
 
-use mcp::{serve, CoreWrites, ReadCore};
+use mcp::{serve_outside_job_worktree as serve, CoreWrites, ReadCore};
 use serde_json::{json, Value};
 use switchboard_core::clock::FixedClock;
 use switchboard_core::confirm::HeldRecords;

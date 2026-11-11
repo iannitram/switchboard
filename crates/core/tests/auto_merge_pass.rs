@@ -546,3 +546,135 @@ fn the_code_map_names_the_merge_pass_present() {
         "- AUTO-4 merge pass (`merge_pass` in `passes.rs`; the app's poll thread runs it after `after_poll`): present."
     ));
 }
+
+/// A transport that answers `GET /repos/<repo>/pulls/<n>` from a table and logs every request.
+struct Lookup {
+    pulls: Vec<(String, Result<Value, String>)>,
+    log: Mutex<Vec<String>>,
+}
+
+impl GitHubTransport for Lookup {
+    fn graphql(&self, _query: &str, _variables: &Value) -> Result<Value, CoreError> {
+        Err(CoreError::GitHub("no GraphQL here".to_string()))
+    }
+
+    fn rest_get(&self, path: &str, _etag: Option<&str>) -> Result<RestAnswer, CoreError> {
+        self.log.lock().unwrap().push(format!("GET {path}"));
+        match self.pulls.iter().find(|(p, _)| p == path) {
+            Some((_, Ok(body))) => Ok(RestAnswer {
+                status: 200,
+                etag: None,
+                body: body.clone(),
+            }),
+            Some((_, Err(e))) => Err(CoreError::GitHub(e.clone())),
+            None => Ok(RestAnswer {
+                status: 404,
+                etag: None,
+                body: json!({}),
+            }),
+        }
+    }
+}
+
+#[test]
+fn a_refused_item_whose_pr_left_the_poll_is_looked_up_and_cleared_when_settled() {
+    use switchboard_core::autopilot::passes::clear_vanished_merges;
+    let w = world("vanished");
+    let data = w.pipeline.join("data");
+    let local = switchboard_core::waiting::LocalItems::new(&data);
+    record_refused_merges(
+        &data,
+        &[
+            refused("o/r", 1),
+            refused("o/r", 2),
+            refused("o/r", 3),
+            refused("o/r", 4),
+            refused("o/r", 5),
+        ],
+        100,
+    )
+    .unwrap();
+    // 5 is still in the poll (open): never looked up. 1 merged, 2 closed, 3 open, 4 errors.
+    let open = PullRequest {
+        number: 5,
+        state: "open".to_string(),
+        ..Default::default()
+    };
+    let snaps = [snap("o/r", vec![open])];
+    let t = Lookup {
+        pulls: vec![
+            (
+                "/repos/o/r/pulls/1".to_string(),
+                Ok(json!({ "state": "closed", "merged": true })),
+            ),
+            (
+                "/repos/o/r/pulls/2".to_string(),
+                Ok(json!({ "state": "closed", "merged": false })),
+            ),
+            (
+                "/repos/o/r/pulls/3".to_string(),
+                Ok(json!({ "state": "open", "merged": false })),
+            ),
+            ("/repos/o/r/pulls/4".to_string(), Err("offline".to_string())),
+        ],
+        log: Mutex::new(Vec::new()),
+    };
+    let cleared = clear_vanished_merges(&data, &snaps, &t, 0).unwrap();
+    assert_eq!(cleared, [("o/r".to_string(), 1), ("o/r".to_string(), 2)]);
+    let left: Vec<String> = local.load().unwrap().into_iter().map(|i| i.what).collect();
+    assert_eq!(left, ["Merge o/r#3", "Merge o/r#4", "Merge o/r#5"]);
+    let log = t.log.lock().unwrap().clone();
+    assert_eq!(log.len(), 4);
+    assert!(!log.iter().any(|l| l.ends_with("/pulls/5")));
+}
+
+/// #433: no lookup storm: with more vanished items than `VANISHED_LOOKUPS_PER_PASS`, one pass
+/// looks up that many, and the next minute's pass looks up the next ones, round the list.
+#[test]
+fn vanished_lookups_are_bounded_per_pass_and_reach_every_item_in_turn() {
+    use switchboard_core::autopilot::passes::{clear_vanished_merges, VANISHED_LOOKUPS_PER_PASS};
+    assert_eq!(VANISHED_LOOKUPS_PER_PASS, 5);
+    let w = world("vanished-many");
+    let data = w.pipeline.join("data");
+    let all: Vec<RefusedMerge> = (1..=7).map(|n| refused("o/r", n)).collect();
+    record_refused_merges(&data, &all, 100).unwrap();
+    // Every PR is still open, so nothing clears and each pass asks again.
+    let t = Lookup {
+        pulls: (1..=7)
+            .map(|n| {
+                (
+                    format!("/repos/o/r/pulls/{n}"),
+                    Ok(json!({ "state": "open" })),
+                )
+            })
+            .collect(),
+        log: Mutex::new(Vec::new()),
+    };
+    let asked = |now: i64| {
+        t.log.lock().unwrap().clear();
+        assert!(clear_vanished_merges(&data, &[], &t, now)
+            .unwrap()
+            .is_empty());
+        let mut prs: Vec<u64> = t
+            .log
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|l| l.rsplit('/').next().unwrap().parse().unwrap())
+            .collect();
+        prs.sort_unstable();
+        prs
+    };
+    assert_eq!(asked(0), [1, 2, 3, 4, 5]);
+    assert_eq!(
+        asked(59),
+        [1, 2, 3, 4, 5],
+        "the same minute asks the same ones"
+    );
+    assert_eq!(
+        asked(60),
+        [1, 2, 3, 6, 7],
+        "the next minute moves on, round the list"
+    );
+    assert_eq!(asked(120), [1, 4, 5, 6, 7]);
+}

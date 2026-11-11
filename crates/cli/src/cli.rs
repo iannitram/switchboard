@@ -2216,6 +2216,9 @@ pub fn loadout_text(loadout: &Loadout) -> String {
     for (name, signed_in) in &loadout.clis {
         let state = if *signed_in {
             "signed in"
+        } else if loadout.timed_out.contains(name) {
+            // #433: the probe ran out of time; that is not the same as signed out.
+            "could not check: timed out"
         } else {
             "not signed in"
         };

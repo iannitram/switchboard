@@ -10,6 +10,7 @@ const THIS: &str = "machine-a";
 fn fixture() -> Loadout {
     Loadout {
         read_at: 0,
+        timed_out: Vec::new(),
         clis: vec![("gh".to_string(), true), ("codex".to_string(), false)],
         models_loaded: vec!["llama-small".to_string()],
         toolchains: vec!["rust".to_string()],
