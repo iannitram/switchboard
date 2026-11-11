@@ -658,6 +658,41 @@ pub fn confirm_guarded(
         .map_err(|e| FaceError::new("confirm_guarded", &e))
 }
 
+/// #347, turn a request down: the archive or restore request `text` leaves Waiting on you,
+/// with the record a held restore kept. Nothing is archived, pushed or queued. `cwd` is the
+/// folder the app runs in (a job worktree refuses). A refusal changes nothing.
+pub fn drop_guarded_at(
+    data: &Path,
+    text: &str,
+    cwd: &Path,
+) -> Result<switchboard_core::confirm::Dropped, CoreError> {
+    use switchboard_core::rules::{self, Caller, Face};
+    let caller = Caller {
+        face: Face::Gui,
+        role: None,
+        in_job_worktree: rules::is_job_worktree(cwd),
+        confirmed_in_app: false,
+    };
+    switchboard_core::confirm::drop_request(data, text, &caller)
+}
+
+/// #347: the Waiting on you view's "Drop the request" on a guarded request.
+#[tauri::command]
+pub fn drop_guarded(
+    app: tauri::AppHandle,
+    text: String,
+) -> Result<switchboard_core::confirm::Dropped, FaceError> {
+    app.path()
+        .app_data_dir()
+        .map_err(|e| CoreError::Io(format!("app data dir: {e}")))
+        .and_then(|data| {
+            let cwd = std::env::current_dir()
+                .map_err(|e| CoreError::Io(format!("working folder: {e}")))?;
+            drop_guarded_at(&data, &text, &cwd)
+        })
+        .map_err(|e| FaceError::new("drop_guarded", &e))
+}
+
 #[cfg(test)]
 #[path = "confirm_guarded_tests.rs"]
 mod confirm_guarded_tests;

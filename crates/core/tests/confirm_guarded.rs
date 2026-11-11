@@ -10,7 +10,8 @@ use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use switchboard_core::backup::{Created, IssuesReport, Made, Pass, RestoreReport};
 use switchboard_core::confirm::{
-    confirm_with, guarded_request, Actions, Done, HeldRecords, HELD_ACTION,
+    confirm_with, drop_request, drop_requests_for, guarded_request, Actions, Done, Dropped,
+    HeldRecords, HELD_ACTION,
 };
 use switchboard_core::github::archive::Archived;
 use switchboard_core::rules::{Caller, Face, GuardedAction, Role};
@@ -676,5 +677,177 @@ fn the_apps_confirm_without_a_backups_folder_stops_before_any_restore() {
         &unconfirmed,
     ));
     assert_eq!(why, "restore over owner/alpha: needs a confirm in the app");
+    unchanged(&data, &before);
+}
+
+fn not_dropped(result: Result<Dropped, CoreError>) -> String {
+    match result {
+        Err(CoreError::Refused(why)) => why,
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
+/// #347: turning a request down removes its item and nothing else. The other request stays.
+#[test]
+fn dropping_a_request_removes_its_item_and_nothing_else() {
+    let (data, _) = seeded("drop");
+    let app = caller(Face::Gui, None, false, false);
+    let dropped = drop_request(&data, &text_of(&asked(&delete())), &app).unwrap();
+    assert_eq!(
+        dropped,
+        Dropped {
+            what: format!("archive {REPO}"),
+            lines: vec![format!(
+                "the request to archive {REPO} was dropped; nothing was archived, pushed or queued"
+            )],
+        }
+    );
+    assert_eq!(
+        LocalItems::new(&data).load().unwrap(),
+        vec![asked(&restore())]
+    );
+    assert!(!data.join("waiting").join("held-restores.json").exists());
+}
+
+/// A held restore's record goes with its item; another request's record stays.
+#[test]
+fn dropping_a_held_restore_removes_its_record_too() {
+    let (data, _) = seeded("drop-held");
+    let text = text_of(&asked(&restore()));
+    let held = RestoreReport {
+        issues: IssuesReport {
+            comments_waiting: 2,
+            ..IssuesReport::default()
+        },
+        made: made(),
+        ..report()
+    };
+    let run = Restore::answering(Ok(held));
+    let app = caller(Face::Gui, None, false, true);
+    assert!(!run.run(&data, &text, &app).unwrap().cleared);
+    let records = HeldRecords::new(&data);
+    assert_eq!(records.get(&text).unwrap(), Some(made()));
+    // A record of some other request, to see it is left.
+    let file = data.join("waiting").join("held-restores.json");
+    let mut all: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    all["another request"] = all[text.as_str()].clone();
+    std::fs::write(&file, all.to_string()).unwrap();
+
+    let dropped = drop_request(&data, &text, &caller(Face::Gui, None, false, false)).unwrap();
+    assert_eq!(dropped.what, format!("restore over {REPO}"));
+    assert_eq!(
+        dropped.lines,
+        vec![
+            format!(
+                "the request to restore over {REPO} was dropped; nothing was archived, pushed \
+                 or queued"
+            ),
+            "what the restore held back stays undone".to_string(),
+        ]
+    );
+    assert_eq!(records.get(&text).unwrap(), None);
+    assert_eq!(records.get("another request").unwrap(), Some(made()));
+    assert_eq!(
+        LocalItems::new(&data).load().unwrap(),
+        vec![asked(&delete())]
+    );
+    assert_eq!(run.calls.borrow().len(), 1, "the drop ran no restore");
+    assert!(run.archives.borrow().is_empty());
+}
+
+/// Dropping what is not there, or an item that is no archive or restore request, is refused
+/// and changes nothing.
+#[test]
+fn dropping_what_is_not_waiting_is_a_clear_refusal() {
+    let (data, before) = seeded("drop-none");
+    let app = caller(Face::Gui, None, false, false);
+    assert_eq!(
+        not_dropped(drop_request(
+            &data,
+            "I was asked to archive owner/beta",
+            &app
+        )),
+        "I was asked to archive owner/beta: no such request is waiting on you; nothing was \
+         dropped"
+    );
+    let merge = GuardedAction::Merge {
+        repo: REPO.into(),
+        pr: 4,
+    };
+    LocalItems::new(&data).add(asked(&merge)).unwrap();
+    let before_merge = std::fs::read_to_string(LocalItems::new(&data).path()).unwrap();
+    assert_ne!(before, before_merge);
+    let why = not_dropped(drop_request(&data, &text_of(&asked(&merge)), &app));
+    assert!(
+        why.ends_with("is not an archive or restore request; nothing was dropped"),
+        "{why}"
+    );
+    let other = GuardedAction::DeleteRepo {
+        repo: "owner/beta".into(),
+    };
+    assert_eq!(
+        not_dropped(drop_requests_for(&data, &other, &app)),
+        "archive owner/beta: no such request is waiting on you; nothing was dropped"
+    );
+    assert_eq!(
+        not_dropped(drop_requests_for(&data, &merge, &app)),
+        "merge owner/alpha#4: is not an archive or restore request; nothing was dropped"
+    );
+    unchanged(&data, &before_merge);
+    // An empty data folder: the same refusal.
+    let empty = data_dir("drop-empty");
+    assert_eq!(
+        not_dropped(drop_requests_for(&empty, &delete(), &app)),
+        format!("archive {REPO}: no such request is waiting on you; nothing was dropped")
+    );
+    assert!(!empty.exists(), "and nothing was written");
+}
+
+/// By action (the CLI and MCP): every waiting request for that action on that repo goes,
+/// whoever filed it and in whichever wording; the other action's request stays.
+#[test]
+fn dropping_by_action_takes_every_request_for_it() {
+    let (data, _) = seeded("drop-all");
+    let local = LocalItems::new(&data);
+    for text in [
+        format!("I was asked from MCP to archive {REPO}"),
+        format!("I was asked from the CLI to delete {REPO}"),
+    ] {
+        local.add(guarded_item(&delete(), &text, NOW)).unwrap();
+    }
+    let cli = caller(Face::Cli, None, false, false);
+    let dropped = drop_requests_for(&data, &delete(), &cli).unwrap();
+    assert_eq!(dropped.what, format!("archive {REPO}"));
+    assert_eq!(dropped.lines.len(), 3, "{:?}", dropped.lines);
+    assert_eq!(local.load().unwrap(), vec![asked(&restore())]);
+}
+
+/// Inside a job worktree nothing is dropped, whoever asks.
+#[test]
+fn inside_a_job_worktree_nothing_is_dropped() {
+    let (data, before) = seeded("drop-wt");
+    for face in [Face::Gui, Face::Cli, Face::Mcp] {
+        let who = caller(face, Some(Role::ProjectManager), true, true);
+        assert_eq!(
+            not_dropped(drop_requests_for(&data, &delete(), &who)),
+            format!("drop the request to archive {REPO}: refused inside a job worktree")
+        );
+        assert_eq!(
+            not_dropped(drop_request(&data, &text_of(&asked(&delete())), &who)),
+            format!("drop the request to archive {REPO}: refused inside a job worktree")
+        );
+    }
+    unchanged(&data, &before);
+}
+
+/// A record file that cannot be read stops the drop before the item is removed.
+#[test]
+fn an_unreadable_record_stops_the_drop() {
+    let (data, before) = seeded("drop-bad-record");
+    std::fs::write(data.join("waiting").join("held-restores.json"), "{ nope").unwrap();
+    let app = caller(Face::Gui, None, false, false);
+    let got = drop_requests_for(&data, &restore(), &app);
+    assert!(matches!(got, Err(CoreError::Parse(_))), "{got:?}");
     unchanged(&data, &before);
 }

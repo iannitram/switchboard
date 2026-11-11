@@ -21,6 +21,7 @@ use switchboard_core::backup::{self, BackupOutcome};
 use switchboard_core::backup_run::{self, BackupRow};
 use switchboard_core::budget::{self, PoolEdit, PoolRow};
 use switchboard_core::clock::{Clock, SystemClock, UnixSeconds};
+use switchboard_core::confirm;
 use switchboard_core::error::CoreError;
 use switchboard_core::fleet::FleetBridge;
 use switchboard_core::fleet_errors::{self, FleetErrorRecord};
@@ -68,7 +69,7 @@ pub const USAGE: &str = "usage: switchboard [--help | --version] [--json] [--rol
                      [--project <repo>] [--outcome <o>] [--pool <p>] \
                      <sky | waiting | reports | errors | budget [--refresh] | loadout | settings | \
                      star <repo>#<n> | refresh | backup <repo> | backup --all | delete <repo> | \
-                     restore <repo> | merge <repo>#<pr> | set_pool_cap <pool> <cap> | \
+                     restore <repo> | drop <delete | restore> <repo> | merge <repo>#<pr> | set_pool_cap <pool> <cap> | \
                      pool_edit <pool> [--plan <p>] [--cap <n>] [--reset <day time>] [--cost <n>] | \
                      mcp>";
 
@@ -89,6 +90,17 @@ pub trait Writes {
     fn full_repo(&self, repo: &str) -> Result<Option<String>, String> {
         self.knows_repo(repo)
             .map(|known| known.then(|| repo.to_string()))
+    }
+    /// #347: turn down every waiting request for `action` (`confirm::drop_requests_for`). `Ok`
+    /// is one line for each request dropped, an error the refusal text. The default has no
+    /// Waiting list to drop from.
+    fn drop_requests(
+        &self,
+        action: &GuardedAction,
+        caller: &Caller,
+    ) -> Result<Vec<String>, String> {
+        let _ = (action, caller);
+        Err("drop: no Waiting on you list here".to_string())
     }
 }
 
@@ -258,6 +270,23 @@ impl Writes for CliWrites {
         let snaps = readable_snapshots(&SnapshotStore::new(data), repo)?;
         resolve_repo(repo, snaps.iter().map(|snap| snap.repo.as_str()))
             .map(|full| full.map(str::to_string))
+    }
+
+    fn drop_requests(
+        &self,
+        action: &GuardedAction,
+        caller: &Caller,
+    ) -> Result<Vec<String>, String> {
+        let data = self
+            .data
+            .as_deref()
+            .ok_or("drop: set SWITCHBOARD_DATA to the app data folder")?;
+        confirm::drop_requests_for(data, action, caller)
+            .map(|dropped| dropped.lines)
+            .map_err(|e| match e {
+                CoreError::Refused(why) => why,
+                other => format!("drop: {other}"),
+            })
     }
 }
 
@@ -492,6 +521,7 @@ pub fn run_with(
             run_backup(&target)
         }
         Some("delete" | "restore" | "merge") => write_command(&args, cwd, now, writes, err),
+        Some("drop") => drop_command(&args, cwd, writes, err),
         Some("budget") => budget(args.json, pool_flags.refresh),
         Some("set_pool_cap" | "pool_edit") => {
             pool_command(&args, &pool_flags, cwd, now, err, &mut std::io::stdout())
@@ -834,6 +864,50 @@ fn write_command(
             refuse(err, &text)
         }
         Verdict::Refuse(text) => refuse(err, &text),
+    }
+}
+
+/// #347: `drop delete <repo>` and `drop restore <repo>` turn down the request the command of
+/// that name left in Waiting on you. Its item and its held-restore record go; nothing is
+/// archived, pushed or queued. No role is needed, as none is needed to ask; inside a job
+/// worktree it is refused. A bare repo name is resolved as `delete` and `restore` resolve it;
+/// an `owner/name` Switchboard no longer knows is taken as written, so its request can still
+/// be dropped.
+fn drop_command(
+    args: &super::Args,
+    cwd: &Path,
+    writes: &dyn Writes,
+    err: &mut dyn Write,
+) -> ExitCode {
+    let words: Vec<&str> = args.command[1..].iter().map(String::as_str).collect();
+    let (kind, repo) = match words.as_slice() {
+        [kind @ ("delete" | "restore"), repo] => (*kind, *repo),
+        _ => {
+            let _ = writeln!(err, "switchboard: drop needs <delete | restore> <repo>");
+            let _ = writeln!(err, "{USAGE}");
+            return ExitCode::from(2);
+        }
+    };
+    let repo = match writes.full_repo(repo) {
+        Ok(Some(full)) => full,
+        Ok(None) if repo.contains('/') => repo.to_string(),
+        Ok(None) => {
+            let _ = writeln!(err, "switchboard: no such repo: {repo}");
+            return ExitCode::from(1);
+        }
+        Err(e) => {
+            let _ = writeln!(err, "switchboard: drop: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let action = if kind == "delete" {
+        GuardedAction::DeleteRepo { repo }
+    } else {
+        GuardedAction::RestoreOverLive { repo }
+    };
+    match writes.drop_requests(&action, &guard_for(args, cwd)) {
+        Ok(lines) => emit(&format!("{}\n", lines.join("\n"))),
+        Err(text) => refuse(err, &text),
     }
 }
 

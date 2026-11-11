@@ -264,6 +264,106 @@ pub fn confirm_with(
     }
 }
 
+/// What turning a request down did, as the face shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Dropped {
+    /// What the dropped request asked for, e.g. `archive owner/name`.
+    pub what: String,
+    /// One plain line for each request that left Waiting on you.
+    pub lines: Vec<String>,
+}
+
+/// #347, turn a request down: the archive or restore request whose Waiting on you text is
+/// `text` leaves the list, and the record a held restore kept beside it goes with it. Nothing
+/// else happens: no archive, no push, nothing queued.
+///
+/// `Refused` when no such request is waiting, when the item is not an archive or restore
+/// request (`guarded_request`), or inside a job worktree. A refusal changes nothing.
+pub fn drop_request(data_dir: &Path, text: &str, caller: &Caller) -> Result<Dropped, CoreError> {
+    let source = Source::GuardedAction {
+        text: text.to_string(),
+    };
+    let items = LocalItems::new(data_dir).load()?;
+    let Some(item) = items.iter().find(|i| i.source == source) else {
+        return Err(CoreError::Refused(format!(
+            "{text}: no such request is waiting on you; nothing was dropped"
+        )));
+    };
+    let Some(action) = guarded_request(item) else {
+        return Err(CoreError::Refused(format!(
+            "{text}: is not an archive or restore request; nothing was dropped"
+        )));
+    };
+    drop_items(data_dir, &action, &[item], caller)
+}
+
+/// `drop_request` for the CLI and MCP, which name the request by what it asks: every waiting
+/// request for `action` (an archive of, or a restore over, one repo) leaves the list, whoever
+/// filed it. `Refused` when none is waiting.
+pub fn drop_requests_for(
+    data_dir: &Path,
+    action: &GuardedAction,
+    caller: &Caller,
+) -> Result<Dropped, CoreError> {
+    let what = worded(action);
+    if matches!(action, GuardedAction::Merge { .. }) {
+        return Err(CoreError::Refused(format!(
+            "{what}: is not an archive or restore request; nothing was dropped"
+        )));
+    }
+    if caller.in_job_worktree {
+        return Err(in_worktree(&what));
+    }
+    let items = LocalItems::new(data_dir).load()?;
+    let asked: Vec<&Item> = items
+        .iter()
+        .filter(|item| guarded_request(item).as_ref() == Some(action))
+        .collect();
+    if asked.is_empty() {
+        return Err(CoreError::Refused(format!(
+            "{what}: no such request is waiting on you; nothing was dropped"
+        )));
+    }
+    drop_items(data_dir, action, &asked, caller)
+}
+
+fn in_worktree(what: &str) -> CoreError {
+    CoreError::Refused(format!(
+        "drop the request to {what}: refused inside a job worktree"
+    ))
+}
+
+/// Removes `items`, each a waiting request for `action`, and their held-restore records. The
+/// records are read first, so a file that cannot be read stops the drop before anything goes.
+fn drop_items(
+    data_dir: &Path,
+    action: &GuardedAction,
+    items: &[&Item],
+    caller: &Caller,
+) -> Result<Dropped, CoreError> {
+    let what = worded(action);
+    if caller.in_job_worktree {
+        return Err(in_worktree(&what));
+    }
+    let local = LocalItems::new(data_dir);
+    let records = HeldRecords::new(data_dir);
+    records.load()?;
+    let mut lines = Vec::new();
+    for item in items {
+        local.remove(&item.source)?;
+        if let Source::GuardedAction { text } = &item.source {
+            records.set(text, None)?;
+        }
+        lines.push(format!(
+            "the request to {what} was dropped; nothing was archived, pushed or queued"
+        ));
+        if item.action == HELD_ACTION {
+            lines.push("what the restore held back stays undone".to_string());
+        }
+    }
+    Ok(Dropped { what, lines })
+}
+
 /// What each held restore made (`RestoreReport::made`), by its request's text, in
 /// `<data>/waiting/held-restores.json`, beside the Waiting item it belongs to.
 pub struct HeldRecords {

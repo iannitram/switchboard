@@ -162,3 +162,46 @@ fn the_window_registers_the_confirm_command() {
     let main = include_str!("main.rs");
     assert!(main.contains("commands::confirm_guarded,"));
 }
+
+/// #347, turn a request down: the request leaves Waiting on you and the other one stays. No
+/// settings are read: a drop goes nowhere but the data folder.
+#[test]
+fn dropping_a_request_removes_it_and_leaves_the_other() {
+    let s = setup("drop");
+    let dropped = drop_guarded_at(&s.data, DELETE, &s.cwd).unwrap();
+    assert_eq!(dropped.what, "archive owner/alpha");
+    assert_eq!(
+        dropped.lines,
+        ["the request to archive owner/alpha was dropped; nothing was archived, pushed or queued"]
+    );
+    let left = LocalItems::new(&s.data).load().unwrap();
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].what, RESTORE);
+}
+
+#[test]
+fn dropping_what_is_not_waiting_or_from_a_job_worktree_is_refused() {
+    let s = setup("drop-refused");
+    assert_eq!(
+        drop_guarded_at(&s.data, "restore over owner/beta", &s.cwd),
+        Err(CoreError::Refused(
+            "restore over owner/beta: no such request is waiting on you; nothing was dropped"
+                .to_string()
+        ))
+    );
+    let job = s
+        .cwd
+        .parent()
+        .unwrap()
+        .join("switchboard-wt")
+        .join("fleet-9");
+    std::fs::create_dir_all(&job).unwrap();
+    assert_eq!(
+        drop_guarded_at(&s.data, RESTORE, &job),
+        Err(CoreError::Refused(
+            "drop the request to restore over owner/alpha: refused inside a job worktree"
+                .to_string()
+        ))
+    );
+    unchanged(&s);
+}

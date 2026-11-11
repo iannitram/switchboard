@@ -33,12 +33,13 @@ const TASK: WaitingItemData = {
 type Answer = { ok: unknown } | { error: { command: string; lines: string[] } };
 
 // The core as the view sees it: `waiting` answers `lists` in turn (the last one again after
-// that) and `confirm_guarded` answers `confirm`.
-function core(lists: WaitingItemData[][], confirm: Answer) {
+// that), `confirm_guarded` answers `confirm` and `drop_guarded` answers `drop`.
+function core(lists: WaitingItemData[][], confirm: Answer, drop?: Answer) {
   let reads = 0;
   vi.mocked(call).mockImplementation((async (command: string) => {
     if (command === "waiting") return { ok: lists[Math.min(reads++, lists.length - 1)] };
     if (command === "confirm_guarded") return confirm;
+    if (command === "drop_guarded" && drop) return drop;
     throw new Error(`unexpected command ${command}`);
   }) as never);
 }
@@ -69,7 +70,7 @@ test("listing the request confirms nothing, and its action only opens the confir
   fireEvent.click(screen.getByRole("button", { name: "Confirm in the app" }));
   const step = screen.getByRole("group", { name: "Confirm" });
   expect(within(step).getByText(RESTORE)).toBeTruthy();
-  expect(within(step).getAllByRole("button").map((b) => b.textContent)).toEqual(["Cancel", "Confirm"]);
+  expect(within(step).getAllByRole("button").map((b) => b.textContent)).toEqual(["Cancel", "Drop the request", "Confirm"]);
   expect(confirmCalls()).toEqual([]);
 });
 
@@ -208,4 +209,37 @@ test("a restore that held comments back says its confirm pushes nothing again", 
   expect(within(step).getByText("Confirm only queues what the restore over owner/alpha held back (comments, closes). Nothing is pushed again.")).toBeTruthy();
   expect(within(step).queryByText(/pushed over the live ones/)).toBeNull();
   expect(confirmButton().disabled).toBe(true);
+});
+
+const dropCalls = () => vi.mocked(call).mock.calls.filter(([command]) => command === "drop_guarded");
+
+test("Drop the request sends only the request's text, needs no name typed, and never confirms", async () => {
+  const lines = ["the request to restore over owner/alpha was dropped; nothing was archived, pushed or queued"];
+  core([[GUARDED, TASK], [TASK]], { ok: { what: "", lines: [], cleared: true } }, { ok: { what: "restore over owner/alpha", lines } });
+  render(<Waiting />);
+  await screen.findAllByRole("article");
+  fireEvent.click(screen.getByRole("button", { name: "Confirm in the app" }));
+  expect(dropCalls()).toEqual([]);
+  fireEvent.click(screen.getByRole("button", { name: "Drop the request" }));
+  const status = await screen.findByRole("status");
+  expect(within(status).getByText("restore over owner/alpha: dropped")).toBeTruthy();
+  expect(within(status).getByText(lines[0])).toBeTruthy();
+  expect(dropCalls()).toEqual([["drop_guarded", { text: RESTORE }]]);
+  expect(confirmCalls()).toEqual([]);
+  await waitFor(() => expect(screen.getAllByRole("article").map((a) => a.getAttribute("aria-label"))).toEqual(["Book the dentist"]));
+  expect(screen.queryByRole("group", { name: "Confirm" })).toBeNull();
+});
+
+test("a drop the core refuses shows its text and the request stays listed", async () => {
+  const refusal = `${RESTORE}: no such request is waiting on you; nothing was dropped`;
+  core([[GUARDED]], { ok: { what: "", lines: [], cleared: true } }, { error: { command: "drop_guarded", lines: [refusal] } });
+  render(<Waiting />);
+  await screen.findAllByRole("article");
+  fireEvent.click(screen.getByRole("button", { name: "Confirm in the app" }));
+  fireEvent.click(screen.getByRole("button", { name: "Drop the request" }));
+  const alert = await screen.findByRole("alert");
+  expect(within(alert).getByText("drop_guarded failed")).toBeTruthy();
+  expect(within(alert).getByText(refusal)).toBeTruthy();
+  expect(screen.queryByRole("status")).toBeNull();
+  expect(confirmCalls()).toEqual([]);
 });

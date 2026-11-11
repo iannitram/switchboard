@@ -310,6 +310,7 @@ fn main() {
             commands::chat_route,
             commands::chat_send_as_job,
             commands::confirm_guarded,
+            commands::drop_guarded,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Switchboard");

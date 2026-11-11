@@ -30,6 +30,9 @@ export function WaitingList({ items, onAction }: { items: WaitingItemData[]; onA
 // CORE-3, BAK-3 (#347): what the core's `confirm_guarded` command answers (confirm.rs `Done`).
 export type ConfirmDone = { what: string; lines: string[]; cleared: boolean };
 
+// #347: what the core's `drop_guarded` command answers (confirm.rs `Dropped`).
+export type DropDone = { what: string; lines: string[] };
+
 // The text of a guarded request (core's `Source::GuardedAction`), null for any other item.
 export function guardedText(item: WaitingItemData): string | null {
   const source = item.source as { GuardedAction?: { text?: unknown } } | null;
@@ -72,7 +75,8 @@ export function confirmLine(request: GuardedRequest): string {
 // a live repo asked for from the CLI or MCP) opens the confirm step. Its Confirm button is
 // enabled only while the box holds the repo's `owner/name`, letter for letter; only it sends
 // `confirmed: true`, with the name typed, and the core checks the name again. Cancel sends
-// nothing (CORE-3, #347).
+// nothing. "Drop the request" turns the request down: it only takes the item out of the list,
+// needs no name typed and archives, pushes and queues nothing (CORE-3, #347).
 export function Waiting() {
   const [items, setItems] = useState<WaitingItemData[]>([]);
   const [error, setError] = useState<CoreError | null>(null);
@@ -81,6 +85,7 @@ export function Waiting() {
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState<ConfirmDone | null>(null);
   const [refused, setRefused] = useState<CoreError | null>(null);
+  const [dropped, setDropped] = useState<DropDone | null>(null);
   const live = useRef(true);
 
   const read = useCallback(
@@ -108,6 +113,7 @@ export function Waiting() {
   const ask = (item: WaitingItemData) => {
     if (busy || guardedRequest(item) === null) return;
     setDone(null);
+    setDropped(null);
     setRefused(null);
     setTyped("");
     setAsking(item);
@@ -133,6 +139,23 @@ export function Waiting() {
     await read();
   };
 
+  const drop = async () => {
+    const text = asking && guardedText(asking);
+    if (!text || busy) return;
+    setBusy(true);
+    const res = await call<DropDone>("drop_guarded", { text });
+    if (!live.current) return;
+    setBusy(false);
+    setAsking(null);
+    setTyped("");
+    if ("error" in res) {
+      setRefused(res.error);
+    } else {
+      setDropped(res.ok);
+    }
+    await read();
+  };
+
   if (error) {
     return (
       <div role="alert">
@@ -149,7 +172,7 @@ export function Waiting() {
         <section role="group" aria-label="Confirm">
           <p data-part="request">{asking.what}</p>
           <p data-part="does">{confirmLine(request)}</p>
-          <p>Cancel leaves the request waiting.</p>
+          <p>Cancel leaves the request waiting. Drop the request takes it out of this list and does nothing else.</p>
           <label>
             Type {request.repo} to confirm
             <input
@@ -163,6 +186,9 @@ export function Waiting() {
           </label>
           <button type="button" disabled={busy} onClick={() => setAsking(null)}>
             Cancel
+          </button>
+          <button type="button" disabled={busy} onClick={() => void drop()}>
+            Drop the request
           </button>
           <button type="button" disabled={busy || !matches} onClick={() => void confirm()}>
             Confirm
@@ -184,6 +210,14 @@ export function Waiting() {
             <p key={i}>{line}</p>
           ))}
           {!done.cleared && <p>The request stays in Waiting on you.</p>}
+        </div>
+      )}
+      {dropped && (
+        <div role="status">
+          <p>{dropped.what}: dropped</p>
+          {dropped.lines.map((line, i) => (
+            <p key={i}>{line}</p>
+          ))}
         </div>
       )}
       <WaitingList items={items} onAction={ask} />
