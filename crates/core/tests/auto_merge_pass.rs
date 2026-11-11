@@ -501,6 +501,29 @@ fn a_draft_pr_is_skipped_by_the_merge_pass() {
 }
 
 #[test]
+fn a_snapshot_saved_before_drafts_were_read_loads_with_no_drafts() {
+    // #432 (ruling 7): a snapshot on disk from before `draft` existed still loads; its PRs are
+    // not drafts, so the merge pass still offers them.
+    let w = world("old-snapshot");
+    let data = w.pipeline.join("data");
+    let store = SnapshotStore::new(&data);
+    store
+        .save(&snap("o/r", vec![pr(30, Some(HEAD), "success", &[3])]))
+        .unwrap();
+    let path = store.path_for("o/r");
+    let mut old: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    old["pulls"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("draft")
+        .unwrap();
+    std::fs::write(&path, old.to_string()).unwrap();
+    let loaded = store.load("o/r").unwrap().unwrap();
+    assert!(!loaded.pulls[0].draft);
+    assert_eq!(loaded.pulls[0].number, 30);
+}
+
+#[test]
 fn the_poll_reads_whether_a_pr_is_a_draft() {
     assert!(REPO_QUERY.contains("isDraft"));
     let data = json!({ "repository": { "pullRequests": { "nodes": [

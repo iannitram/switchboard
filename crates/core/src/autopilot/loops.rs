@@ -156,17 +156,32 @@ pub fn now_ms() -> i64 {
         .map_or(0, |d| d.as_millis() as i64)
 }
 
+/// What `process_token` answers when this system's process list could not be read (`ps` or
+/// `tasklist` would not run): taken for running, so a loop is never started twice, nor
+/// adopted, on a guess.
+pub const UNKNOWN_TOKEN: &str = "unknown";
+
 /// Is process `pid` running, and (with a token) the same process that had `token`?
 pub fn alive(pid: u32, token: Option<&str>) -> bool {
-    match process_token(pid) {
-        Some(now) => token.map_or(true, |want| want == now),
+    same_process(process_token(pid).as_deref(), token)
+}
+
+/// `alive` for a token read now (`None`: no such process) and the one recorded. A token that
+/// could not be read, now or then, is taken for the same process.
+pub fn same_process(now: Option<&str>, recorded: Option<&str>) -> bool {
+    match now {
+        Some(now) => {
+            now == UNKNOWN_TOKEN
+                || recorded.map_or(true, |want| want == now || want == UNKNOWN_TOKEN)
+        }
         None => false,
     }
 }
 
 /// A word that names process `pid` while it runs (its start time), or `None` when no such
-/// process runs (gone, or ended and not yet reaped). No extra dependency: Linux reads `/proc`,
-/// another Unix asks `ps`, Windows asks `tasklist`.
+/// process runs (gone, or ended and not yet reaped), or `UNKNOWN_TOKEN` when `ps` or `tasklist`
+/// would not answer. No extra dependency: Linux reads `/proc`, another Unix asks `ps`, Windows
+/// asks `tasklist`.
 pub fn process_token(pid: u32) -> Option<String> {
     if pid == 0 {
         return None;
@@ -189,11 +204,13 @@ fn token_of(pid: u32) -> Option<String> {
 
 #[cfg(all(unix, not(target_os = "linux")))]
 fn token_of(pid: u32) -> Option<String> {
-    let out = std::process::Command::new("ps")
+    let Ok(out) = std::process::Command::new("ps")
         .args(["-o", "stat=,lstart=", "-p", &pid.to_string()])
         .stderr(std::process::Stdio::null())
         .output()
-        .ok()?;
+    else {
+        return Some(UNKNOWN_TOKEN.to_string());
+    };
     let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if !out.status.success() || text.is_empty() || text.starts_with('Z') {
         return None;
@@ -208,12 +225,15 @@ fn token_of(pid: u32) -> Option<String> {
 fn token_of(pid: u32) -> Option<String> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let out = std::process::Command::new("tasklist")
+    let out = match std::process::Command::new("tasklist")
         .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
         .creation_flags(CREATE_NO_WINDOW)
         .stderr(std::process::Stdio::null())
         .output()
-        .ok()?;
+    {
+        Ok(out) if out.status.success() => out,
+        _ => return Some(UNKNOWN_TOKEN.to_string()),
+    };
     // `tasklist` gives no start time: a process id used again is taken for the same process.
     String::from_utf8_lossy(&out.stdout)
         .contains(&format!("\"{pid}\""))

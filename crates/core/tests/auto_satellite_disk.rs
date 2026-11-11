@@ -380,6 +380,19 @@ fn the_process_token_tells_a_running_process_from_an_ended_one() {
     child.wait().unwrap();
 }
 
+#[test]
+fn a_process_list_that_cannot_be_read_is_taken_for_running() {
+    // Review of #432: when `ps` or `tasklist` will not run, a loop and its owner are taken for
+    // running, so no second copy starts and no live run's loop is adopted on a guess.
+    let unknown = Some(loops::UNKNOWN_TOKEN);
+    assert!(loops::same_process(unknown, Some("start 1")));
+    assert!(loops::same_process(Some("start 1"), unknown));
+    assert!(loops::same_process(Some("start 1"), Some("start 1")));
+    assert!(loops::same_process(Some("start 1"), None));
+    assert!(!loops::same_process(Some("start 2"), Some("start 1")));
+    assert!(!loops::same_process(None, unknown));
+}
+
 fn refused() -> PassReport {
     let mut report = PassReport::new(Pass::Satellite, false);
     report.held_elsewhere = Some(true);
