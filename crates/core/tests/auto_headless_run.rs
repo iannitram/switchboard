@@ -406,10 +406,14 @@ fn the_weekly_backup_runs_inside_the_passes_lock() {
     let clock = FixedClock::at(SUNDAY_AFTER_SIX);
     let github = FakeGitHub::default();
     let seen: Mutex<Vec<(Vec<String>, bool)>> = Mutex::new(Vec::new());
+    let said: Mutex<Vec<String>> = Mutex::new(Vec::new());
     let target = passes_lock_target(&w.data);
     let backup = |repos: &[String]| -> Result<Vec<RepoBackup>, CoreError> {
-        let free = FileLock::take(&target, Duration::ZERO).is_ok();
-        seen.lock().unwrap().push((repos.to_vec(), !free));
+        let taken = FileLock::take(&target, Duration::ZERO);
+        if let Err(e) = &taken {
+            said.lock().unwrap().push(e.to_string());
+        }
+        seen.lock().unwrap().push((repos.to_vec(), taken.is_err()));
         stub_backup(repos)
     };
     let env = |dry_run: bool| RunEnv {
@@ -439,6 +443,17 @@ fn the_weekly_backup_runs_inside_the_passes_lock() {
         [(vec!["iannitram/demo".to_string()], true)],
         "backed up once, with the passes lock held"
     );
+    // #431: another run that finds the passes held is told the weekly backup holds them, by
+    // which process, and to wait: never to remove a live lock.
+    let said = said.lock().unwrap();
+    assert!(said[0].contains("the weekly backup"), "{}", said[0]);
+    assert!(
+        said[0].contains(&format!("process {}", std::process::id())),
+        "{}",
+        said[0]
+    );
+    assert!(said[0].contains("wait"), "{}", said[0]);
+    assert!(!said[0].contains("remove"), "{}", said[0]);
     assert_eq!(real[0].backups.len(), 1, "{:?}", real[0]);
     assert_eq!(real[0].backups[0].outcome, "refused");
     assert!(!lock::held(&target));
