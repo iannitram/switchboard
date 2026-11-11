@@ -13,8 +13,8 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use switchboard_core::backup::{
-    restore_held_over_live_from, restore_issues, restore_over_live_from, write_json, FileSource,
-    IssuesReport, RecordedAnswers, Remote, RestoreReport,
+    restore_held_over_live_from, restore_issues, restore_over_live_from, write_json, Created,
+    FileSource, IssuesReport, Made, RecordedAnswers, Remote, RestoreReport,
 };
 use switchboard_core::fleet::FleetBridge;
 use switchboard_core::github::transport::{Recorded, RestAnswer};
@@ -22,9 +22,6 @@ use switchboard_core::rules::{Caller, Face, Role};
 use switchboard_core::CoreError;
 
 const NEW: &str = "owner/restored";
-/// When the restore over the live repo was asked for (2026-11-10T00:00:00Z): the held pass
-/// changes only what GitHub says was created at or after it.
-const SINCE: i64 = 1_794_268_800;
 
 /// No test here has a release file to fetch.
 struct NoFiles;
@@ -36,10 +33,14 @@ impl FileSource for NoFiles {
 }
 
 /// A fixture `fleet ghq`: logs each call, keeps every batch item in `items.json`, and answers
-/// `status` with counts: a repo named in `taken` is `exists`, an item whose kind is in `fail` is
+/// `status` with counts: a repo named in `taken`, or an issue titled in `found`, is `exists`, an item whose kind is in `fail` is
 /// `failed`, everything is `pending` while `ratelimit` exists (and `run` stops with exit 75),
-/// anything else is `done`.
-const STUB: &str = r#"import json, os, sys
+/// anything else is `done`. `add-batch` answers each item's key (kind, repo and title or name, as
+/// the queue's are) and whether it was new to the queue. Its own record, `queue.json` in the
+/// folder `status` names, holds each key once, with its status and, when done, the URL of what
+/// it made: `made.json` maps an issue's title, or `milestone:<title>`, to the number GitHub gave
+/// it; anything else done says only "created".
+const STUB: &str = r#"import hashlib, json, os, sys
 here = os.path.dirname(os.path.abspath(__file__))
 args = sys.argv[1:]
 with open(os.path.join(here, "calls.log"), "a") as f:
@@ -47,8 +48,16 @@ with open(os.path.join(here, "calls.log"), "a") as f:
 items_file = os.path.join(here, "items.json")
 items = json.load(open(items_file)) if os.path.exists(items_file) else []
 sub = args[1] if len(args) > 1 else ""
+def key_of(item):
+    what = item.get("title") or item.get("name") or json.dumps([item.get("number"), item.get("body")])
+    return hashlib.sha1(("%s|%s|%s" % (item["kind"], item["repo"].lower(), what)).encode()).hexdigest()[:16]
+added = []
 if sub == "add-batch":
-    items += json.load(open(args[2]))
+    seen = set(key_of(i) for i in items)
+    for item in json.load(open(args[2])):
+        added.append({"key": key_of(item), "added": key_of(item) not in seen, "status": "pending"})
+        seen.add(key_of(item))
+        items.append(item)
     json.dump(items, open(items_file, "w"))
 def flag(name):
     path = os.path.join(here, name)
@@ -56,18 +65,44 @@ def flag(name):
 taken = flag("taken")
 failing = flag("fail")
 limited = os.path.exists(os.path.join(here, "ratelimit"))
+made_file = os.path.join(here, "made.json")
+made = json.load(open(made_file)) if os.path.exists(made_file) else {}
 counts = {"pending": 0, "done": 0, "exists": 0, "failed": 0}
+record = {}
 for item in items:
     taken_repo = item["kind"] == "repo" and item["repo"] in taken
-    state = "exists" if taken_repo else "failed" if item["kind"] in failing else "done"
+    found = item["kind"] == "issue" and item["title"] in flag("found")
+    state = "exists" if taken_repo or found else "failed" if item["kind"] in failing else "done"
     if limited:
         state = "pending"
     counts[state] += 1
+    result = None
+    if state == "done":
+        result = "created"
+        if item["kind"] == "issue" and item["title"] in made:
+            result = "https://github.com/%s/issues/%d" % (item["repo"], made[item["title"]])
+        if item["kind"] == "milestone" and "milestone:" + item["title"] in made:
+            result = "https://github.com/%s/milestone/%d" % (item["repo"], made["milestone:" + item["title"]])
+    record.setdefault(key_of(item), {"key": key_of(item), "status": state, "result": result})
+json.dump({"version": 1, "items": list(record.values())}, open(os.path.join(here, "queue.json"), "w"))
+if sub == "add-batch":
+    print(json.dumps(added))
+    sys.exit(0)
 if sub == "run" and limited:
     print(json.dumps({"stopped": "rate limit"}))
     sys.exit(75)
-print(json.dumps({"counts": counts, "total": len(items)}))
+print(json.dumps({"counts": counts, "total": len(items), "dir": here}))
 "#;
+
+/// Says in the stub queue's own record which number GitHub gave each create it made: an
+/// issue's title, or `milestone:<title>`, to the number.
+fn made_as(f: &Fixture, numbers: &[(&str, u64)]) {
+    let map: serde_json::Map<String, Value> = numbers
+        .iter()
+        .map(|(what, n)| (what.to_string(), json!(n)))
+        .collect();
+    std::fs::write(f.stub.join("made.json"), Value::Object(map).to_string()).unwrap();
+}
 
 fn scratch(tag: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
@@ -265,25 +300,40 @@ fn listed(issues: &[(u64, &str)]) -> RestAnswer {
     )
 }
 
-/// As `listed`, for issues GitHub says were created after `SINCE` (by the restore's queue) or
-/// before it (the repo had them already).
-fn listed_made(issues: &[(u64, &str, bool)]) -> RestAnswer {
-    answer(
-        200,
-        Value::Array(
-            issues
-                .iter()
-                .map(|(number, title, made)| {
-                    let at = if *made {
-                        "2026-11-10T09:30:00Z"
-                    } else {
-                        "2026-11-09T23:59:59Z"
-                    };
-                    json!({"number": number, "title": title, "created_at": at})
-                })
-                .collect(),
-        ),
+/// A number the queue gave a create, by what it is in the backup; `None` while it waits.
+type Numbered<T> = Vec<(T, Option<u64>)>;
+
+/// The numbers a record gives its issues (by the backup's number) and milestones.
+fn numbers(made: &Made) -> (Numbered<u64>, Numbered<String>) {
+    (
+        made.issues
+            .iter()
+            .map(|(old, c)| (*old, c.number))
+            .collect(),
+        made.milestones
+            .iter()
+            .map(|(title, c)| (title.clone(), c.number))
+            .collect(),
     )
+}
+
+/// A record of what a restore made: these issues (backup number, number now) and no milestone.
+fn record(issues: &[(u64, u64)]) -> Made {
+    Made {
+        issues: issues
+            .iter()
+            .map(|(old, now)| {
+                (
+                    *old,
+                    Created {
+                        key: format!("key-{old}"),
+                        number: Some(*now),
+                    },
+                )
+            })
+            .collect(),
+        ..Made::default()
+    }
 }
 
 /// The PATCH requests in `api`'s log, in order.
@@ -492,6 +542,7 @@ fn a_guard_refusal_over_a_live_repo_writes_nothing() {
 #[test]
 fn a_confirmed_restore_over_a_live_repo_pushes_every_ref_and_queues_the_rest() {
     let f = fixture("live");
+    made_as(&f, &[("Bug", 1), ("Old", 2), ("milestone:1.0", 1)]);
     // The live repo has no labels, milestones, issues or comments yet.
     let api = Recorded::new(
         Vec::new(),
@@ -526,7 +577,16 @@ fn a_confirmed_restore_over_a_live_repo_pushes_every_ref_and_queues_the_rest() {
                 ..IssuesReport::default()
             },
             left_out: Vec::new(),
+            made: report.made.clone(),
         }
+    );
+    // What the restore made, with the numbers the queue says it gave them.
+    assert_eq!(
+        numbers(&report.made),
+        (
+            vec![(1, Some(1)), (2, Some(2))],
+            vec![("1.0".to_string(), Some(1))]
+        )
     );
     for pattern in ["refs/heads", "refs/tags"] {
         assert_eq!(refs_of(&f.target, pattern), refs_of(&f.source, pattern));
@@ -610,6 +670,7 @@ fn a_restore_over_a_repo_that_has_it_all_queues_nothing() {
 #[test]
 fn a_restore_over_a_repo_that_has_some_of_it_queues_only_the_rest() {
     let f = fixture("live-some");
+    made_as(&f, &[("Bug", 8)]);
     let api = Recorded::new(
         Vec::new(),
         vec![
@@ -649,6 +710,7 @@ fn a_restore_over_a_repo_that_has_some_of_it_queues_only_the_rest() {
 #[test]
 fn a_restore_over_a_live_repo_closes_only_what_it_made() {
     let f = fixture("live-made");
+    made_as(&f, &[("Bug", 8)]);
     edit_json(&f.backup, "issues.json", |issues| {
         for issue in issues.as_array_mut().unwrap() {
             issue["state"] = json!("closed");
@@ -706,25 +768,31 @@ fn a_restore_over_a_live_repo_closes_only_what_it_made() {
             closed: 1,
             renumbered: 1,
             left_out: vec![
-                "1 issues and 1 milestones closed in the backup are open in the repo, which had \
-                 them before the restore: left open"
-                    .to_string()
+                "1 issues closed in the backup are open in the repo and were left open, as this \
+                 restore did not make them: #7"
+                    .to_string(),
+                "1 milestones closed in the backup are open in the repo and were left open, as \
+                 this restore did not make them: 1.0"
+                    .to_string(),
+                "1 issue bodies keep the backup's #N, not rewritten: #7 (not made by this \
+                 restore)"
+                    .to_string(),
             ],
             ..IssuesReport::default()
         }
     );
 }
 
-/// #365: the held pass closes only what GitHub says was created since the restore was asked
-/// for; an issue the repo had before, open, stays open and is not counted as waiting.
+/// #365: the held pass closes only what the record of the whole pass says it made; an issue
+/// the repo had, open, stays open, is named, and is not counted as waiting.
 #[test]
-fn the_held_pass_closes_nothing_the_repo_had_before_the_restore() {
+fn the_held_pass_closes_nothing_the_restore_did_not_make() {
     let f = fixture("held-before");
     let api = Recorded::new(
         Vec::new(),
         vec![
             answer(200, json!({"private": true})),
-            listed_made(&[(1, "Bug", true), (2, "Old", false)]),
+            listed(&[(1, "Bug"), (2, "Old")]),
             answer(200, json!([])),
         ],
     );
@@ -734,7 +802,7 @@ fn the_held_pass_closes_nothing_the_repo_had_before_the_restore() {
         &f.backup,
         NEW,
         true,
-        SINCE,
+        &record(&[(1, 1)]),
         &remote(&f, &api),
     )
     .unwrap();
@@ -745,8 +813,8 @@ fn the_held_pass_closes_nothing_the_repo_had_before_the_restore() {
             issues_there: 2,
             comments: 1,
             left_out: vec![
-                "1 issues and 0 milestones closed in the backup are open in the repo, which had \
-                 them before the restore: left open"
+                "1 issues closed in the backup are open in the repo and were left open, as this \
+                 restore did not make them: #2"
                     .to_string()
             ],
             ..IssuesReport::default()
@@ -755,6 +823,388 @@ fn the_held_pass_closes_nothing_the_repo_had_before_the_restore() {
     assert!(
         !report.issues.held(),
         "nothing waits: the request can leave"
+    );
+    assert_eq!(report.made, record(&[(1, 1)]));
+}
+
+/// #365 (second check): the whole pass matches the repo's issues again after the queue has
+/// run, and with two issues of one title an exact number match would win. The restore closes
+/// only the number the queue says it made: the repo's own "Dup" (#7) is never touched.
+#[test]
+fn a_whole_pass_closes_the_issue_the_queue_made_not_one_with_the_same_title() {
+    let f = fixture("dup-swap");
+    edit_json(&f.backup, "issues.json", |issues| {
+        let a = issues.as_array_mut().unwrap();
+        a[0]["number"] = json!(8);
+        a[0]["title"] = json!("Dup");
+        a[0]["state"] = json!("open");
+        a[1]["number"] = json!(9);
+        a[1]["title"] = json!("Dup");
+        a[1]["state"] = json!("closed");
+    });
+    made_as(&f, &[("Dup", 8)]);
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            answer(200, json!({"private": true})),
+            answer(200, json!([{"name": "bug"}, {"name": "size:Easy"}])),
+            answer(200, json!([{"title": "1.0"}])),
+            // The repo had one "Dup" (#7), open, before the restore.
+            answer(
+                200,
+                json!([{"number": 7, "title": "Dup", "state": "open", "body": "mine"}]),
+            ),
+            // The queue made the missing one; GitHub gave it the next number, 8.
+            answer(
+                200,
+                json!([{"number": 7, "title": "Dup", "state": "open", "body": "mine"},
+                       {"number": 8, "title": "Dup", "state": "open", "body": ""}]),
+            ),
+            answer(200, json!([])),
+        ],
+    );
+    let report = restore_over_live_from(
+        &caller(Face::Gui, false),
+        &f.fleet,
+        &f.backup,
+        NEW,
+        true,
+        &remote(&f, &api),
+    )
+    .unwrap();
+    assert_eq!(
+        patch_bodies(&api),
+        vec![(format!("/repos/{NEW}/issues/8"), json!({"state": "closed"}))],
+        "the backup's closed #9 is the #8 the queue made; #7 was the repo's"
+    );
+    assert_eq!(numbers(&report.made).0, vec![(9, Some(8))]);
+    assert!(!report.issues.held());
+}
+
+/// #365: duplicate titles in the backup and in the repo. The queue holds one item per title, so
+/// of the two missing "Dup" only the first is the restore's; the other is not attributed, and
+/// stays as it is and named. The repo's own "Dup" (#5), open, is left open and named.
+#[test]
+fn duplicate_titles_on_both_sides_close_only_what_the_queue_made() {
+    let issue = |n: u64, state: &str| {
+        json!({"number": n, "title": "Dup", "body": "", "state": state,
+               "labels": [], "milestone": null})
+    };
+    let answers = RecordedAnswers {
+        repo: "owner/demo".to_string(),
+        issues: vec![issue(3, "open"), issue(2, "closed"), issue(1, "closed")],
+        ..RecordedAnswers::default()
+    };
+    let f = fixture_of("dup-both", &answers);
+    made_as(&f, &[("Dup", 6)]);
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            answer(200, json!({"private": true})),
+            answer(200, json!([])),
+            answer(200, json!([])),
+            answer(
+                200,
+                json!([{"number": 5, "title": "Dup", "state": "open", "body": ""}]),
+            ),
+            answer(
+                200,
+                json!([{"number": 5, "title": "Dup", "state": "open", "body": ""},
+                       {"number": 6, "title": "Dup", "state": "open", "body": ""}]),
+            ),
+        ],
+    );
+    let report = restore_over_live_from(
+        &caller(Face::Gui, false),
+        &f.fleet,
+        &f.backup,
+        NEW,
+        true,
+        &remote(&f, &api),
+    )
+    .unwrap();
+    let issues_queued = queued(&f)
+        .iter()
+        .filter(|item| item["kind"] == "issue")
+        .count();
+    assert_eq!(issues_queued, 2, "the backup's #2 and #3 were sent");
+    assert_eq!(
+        patch_bodies(&api),
+        vec![(format!("/repos/{NEW}/issues/6"), json!({"state": "closed"}))]
+    );
+    assert_eq!(numbers(&report.made).0, vec![(2, Some(6))]);
+    assert_eq!(
+        report.issues.left_out,
+        vec![
+            "1 issues closed in the backup are open in the repo and were left open, as this \
+             restore did not make them: #5"
+                .to_string(),
+            "1 issues or milestones of the backup are not in the repo and the create queue did \
+             not say this restore made them, so nothing was changed for them: backup #3"
+                .to_string(),
+        ]
+    );
+    assert!(!report.issues.held());
+}
+
+/// #365 (second check): an issue someone opened after the request, before the first confirm,
+/// is not the restore's: neither pass closes it, whatever its time.
+#[test]
+fn an_issue_someone_made_before_the_first_confirm_is_never_closed() {
+    let f = fixture("window");
+    made_as(&f, &[("Bug", 8)]);
+    let app = caller(Face::Gui, false);
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            answer(200, json!({"private": true})),
+            answer(200, json!([{"name": "bug"}, {"name": "size:Easy"}])),
+            answer(200, json!([{"title": "1.0"}])),
+            listed(&[(7, "Old")]),
+            listed(&[(7, "Old"), (8, "Bug")]),
+            answer(200, json!([])),
+        ],
+    );
+    let first =
+        restore_over_live_from(&app, &f.fleet, &f.backup, NEW, true, &remote(&f, &api)).unwrap();
+    assert_eq!(
+        patches(&api),
+        Vec::<String>::new(),
+        "the whole pass leaves #7"
+    );
+    assert!(
+        first.issues.left_out[0].ends_with("did not make them: #7"),
+        "{:?}",
+        first.issues.left_out
+    );
+    assert_eq!(numbers(&first.made).0, vec![(1, Some(8))]);
+    // A second confirm, with the record of the first.
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            answer(200, json!({"private": true})),
+            listed(&[(7, "Old"), (8, "Bug")]),
+            answer(200, json!([])),
+        ],
+    );
+    restore_held_over_live_from(
+        &app,
+        &f.fleet,
+        &f.backup,
+        NEW,
+        true,
+        &first.made,
+        &remote(&f, &api),
+    )
+    .unwrap();
+    assert_eq!(
+        patches(&api),
+        Vec::<String>::new(),
+        "the held pass leaves #7 too"
+    );
+}
+
+/// #365: someone opens an issue with a backed-up title while the restore's create waits in the
+/// queue; the queue finds it there (`exists`) and makes nothing. It is not the restore's.
+#[test]
+fn an_issue_the_queue_found_there_is_not_the_restores() {
+    let f = fixture("found");
+    made_as(&f, &[("Bug", 9)]);
+    std::fs::write(f.stub.join("found"), "Old").unwrap();
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            answer(200, json!({"private": true})),
+            answer(200, json!([{"name": "bug"}, {"name": "size:Easy"}])),
+            answer(200, json!([{"title": "1.0"}])),
+            listed(&[]),
+            listed(&[(8, "Old"), (9, "Bug")]),
+            answer(200, json!([])),
+        ],
+    );
+    let report = restore_over_live_from(
+        &caller(Face::Gui, false),
+        &f.fleet,
+        &f.backup,
+        NEW,
+        true,
+        &remote(&f, &api),
+    )
+    .unwrap();
+    assert_eq!(patches(&api), Vec::<String>::new(), "#8 is someone else's");
+    assert_eq!(numbers(&report.made).0, vec![(1, Some(9))]);
+    assert!(
+        report.issues.left_out[0].ends_with("did not make them: #8"),
+        "{:?}",
+        report.issues.left_out
+    );
+}
+
+/// #365 (second check): the held pass closes a closed milestone only by the number the queue
+/// says it made for the restore; a milestone the repo had, open, stays open and is named.
+#[test]
+fn the_held_pass_closes_only_the_milestone_the_restore_made() {
+    let f = fixture("held-milestone");
+    std::fs::write(
+        f.backup.join("milestones.json"),
+        r#"[{"title": "1.0", "state": "closed"}, {"title": "2.0", "state": "closed"}]"#,
+    )
+    .unwrap();
+    edit_json(&f.backup, "manifest.json", |m| m["milestones"] = json!(2));
+    std::fs::write(f.stub.join("ratelimit"), "").unwrap();
+    let app = caller(Face::Gui, false);
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            answer(200, json!({"private": true})),
+            answer(200, json!([])),
+            // The repo had "2.0", open.
+            answer(200, json!([{"number": 1, "title": "2.0", "state": "open"}])),
+            listed(&[]),
+            listed(&[]),
+            answer(200, json!([])),
+            answer(200, json!([{"number": 1, "title": "2.0", "state": "open"}])),
+        ],
+    );
+    let first =
+        restore_over_live_from(&app, &f.fleet, &f.backup, NEW, true, &remote(&f, &api)).unwrap();
+    assert_eq!(patches(&api), Vec::<String>::new());
+    assert_eq!(
+        numbers(&first.made),
+        (vec![(1, None), (2, None)], vec![("1.0".to_string(), None)]),
+        "all still in the queue"
+    );
+    assert!(first.issues.held());
+
+    // The queue has made them; the second confirm.
+    std::fs::remove_file(f.stub.join("ratelimit")).unwrap();
+    made_as(&f, &[("Bug", 1), ("Old", 2), ("milestone:1.0", 3)]);
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            answer(200, json!({"private": true})),
+            listed(&[(1, "Bug"), (2, "Old")]),
+            answer(200, json!([])),
+            answer(
+                200,
+                json!([{"number": 1, "title": "2.0", "state": "open"},
+                       {"number": 3, "title": "1.0", "state": "open"}]),
+            ),
+        ],
+    );
+    let second = restore_held_over_live_from(
+        &app,
+        &f.fleet,
+        &f.backup,
+        NEW,
+        true,
+        &first.made,
+        &remote(&f, &api),
+    )
+    .unwrap();
+    assert_eq!(
+        patch_bodies(&api),
+        vec![
+            (format!("/repos/{NEW}/issues/2"), json!({"state": "closed"})),
+            (
+                format!("/repos/{NEW}/milestones/3"),
+                json!({"state": "closed"})
+            ),
+        ],
+        "never the repo's own milestone 1"
+    );
+    assert_eq!(
+        second.issues.left_out,
+        vec![
+            "1 milestones closed in the backup are open in the repo and were left open, as \
+             this restore did not make them: 2.0"
+                .to_string()
+        ]
+    );
+    assert!(!second.issues.held());
+    assert_eq!(numbers(&second.made).1, vec![("1.0".to_string(), Some(3))]);
+}
+
+/// A closed milestone is closed by the number the queue made, never by its title: when that
+/// one is gone and the repo has another of the same title (#4), nothing is closed.
+#[test]
+fn a_milestone_is_closed_by_the_number_the_queue_made_not_by_title() {
+    let f = fixture("milestone-number");
+    std::fs::write(
+        f.backup.join("milestones.json"),
+        r#"[{"title": "1.0", "state": "closed"}]"#,
+    )
+    .unwrap();
+    let mut made = record(&[(1, 1), (2, 2)]);
+    made.milestones.insert(
+        "1.0".to_string(),
+        Created {
+            key: "key-1.0".to_string(),
+            number: Some(3),
+        },
+    );
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            answer(200, json!({"private": true})),
+            answer(
+                200,
+                json!([{"number": 1, "title": "Bug", "state": "open", "body": "broken"},
+                       {"number": 2, "title": "Old", "state": "closed", "body": ""}]),
+            ),
+            answer(200, json!([])),
+            answer(200, json!([{"number": 4, "title": "1.0", "state": "open"}])),
+        ],
+    );
+    restore_held_over_live_from(
+        &caller(Face::Gui, false),
+        &f.fleet,
+        &f.backup,
+        NEW,
+        true,
+        &made,
+        &remote(&f, &api),
+    )
+    .unwrap();
+    assert_eq!(patches(&api), Vec::<String>::new());
+}
+
+/// A rewrite of a `#N` the restore made but someone changed since is skipped, and named.
+#[test]
+fn a_skipped_number_rewrite_is_named() {
+    let f = fixture("skipped");
+    edit_json(&f.backup, "issues.json", |issues| {
+        issues.as_array_mut().unwrap()[0]["body"] = json!("see #2");
+    });
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            answer(200, json!({"private": true})),
+            answer(
+                200,
+                json!([{"number": 4, "title": "Bug", "state": "open", "body": "see #2, edited"},
+                       {"number": 5, "title": "Old", "state": "closed", "body": ""}]),
+            ),
+            answer(200, json!([])),
+        ],
+    );
+    let report = restore_held_over_live_from(
+        &caller(Face::Gui, false),
+        &f.fleet,
+        &f.backup,
+        NEW,
+        true,
+        &record(&[(1, 4), (2, 5)]),
+        &remote(&f, &api),
+    )
+    .unwrap();
+    assert_eq!(patches(&api), Vec::<String>::new());
+    assert_eq!(
+        report.issues.left_out,
+        vec![
+            "1 issue bodies keep the backup's #N, not rewritten: #4 (changed in the repo since)"
+                .to_string()
+        ]
     );
 }
 
@@ -1026,7 +1476,8 @@ fn old_issue_numbers_in_comments_and_bodies_get_the_new_numbers() {
     assert_eq!(queued(&f).len(), 4, "nothing more was queued");
 }
 
-/// A body someone changed in the repo is not the backup's any more: it is left as it is.
+/// A body someone changed in the repo is not the backup's any more: it is left as it is, and
+/// the report names it.
 #[test]
 fn a_body_that_was_changed_in_the_repo_is_not_rewritten() {
     let issue = |n: u64, title: &str, body: &str| {
@@ -1052,6 +1503,11 @@ fn a_body_that_was_changed_in_the_repo_is_not_rewritten() {
         report,
         IssuesReport {
             issues_there: 2,
+            left_out: vec![
+                "1 issue bodies keep the backup's #N, not rewritten: #8 (changed in the repo \
+                 since)"
+                    .to_string()
+            ],
             ..IssuesReport::default()
         }
     );
@@ -1167,11 +1623,12 @@ fn a_second_confirm_only_queues_what_was_held_back_and_pushes_no_ref() {
 
     // The queue has made the issues; the second confirm.
     std::fs::remove_file(f.stub.join("ratelimit")).unwrap();
+    made_as(&f, &[("Bug", 1), ("Old", 2), ("milestone:1.0", 1)]);
     let api = Recorded::new(
         Vec::new(),
         vec![
             answer(200, json!({"private": true})),
-            listed_made(&[(1, "Bug", true), (2, "Old", true)]),
+            listed(&[(1, "Bug"), (2, "Old")]),
             answer(200, json!([])),
         ],
     );
@@ -1181,7 +1638,7 @@ fn a_second_confirm_only_queues_what_was_held_back_and_pushes_no_ref() {
         &f.backup,
         NEW,
         true,
-        SINCE,
+        &first.made,
         &remote(&f, &api),
     )
     .unwrap();
@@ -1194,8 +1651,16 @@ fn a_second_confirm_only_queues_what_was_held_back_and_pushes_no_ref() {
                 closed: 1,
                 ..IssuesReport::default()
             },
+            made: second.made.clone(),
             ..RestoreReport::default()
         }
+    );
+    assert_eq!(
+        numbers(&second.made),
+        (
+            vec![(1, Some(1)), (2, Some(2))],
+            vec![("1.0".to_string(), Some(1))]
+        )
     );
     assert_eq!(
         refs_of(&f.target, "refs"),
@@ -1242,7 +1707,7 @@ fn a_second_confirm_only_queues_what_was_held_back_and_pushes_no_ref() {
         &f.backup,
         NEW,
         true,
-        SINCE,
+        &second.made,
         &remote(&f, &api),
     )
     .unwrap();
@@ -1271,7 +1736,7 @@ fn the_held_pass_queues_no_issue_the_repo_lacks() {
         &f.backup,
         NEW,
         true,
-        SINCE,
+        &Made::default(),
         &remote(&f, &api),
     )
     .unwrap();
@@ -1280,7 +1745,11 @@ fn the_held_pass_queues_no_issue_the_repo_lacks() {
         IssuesReport {
             issues_there: 1,
             comments: 1,
-            state_waiting: 1,
+            left_out: vec![
+                "1 issues or milestones of the backup are not in the repo and the create queue \
+                 did not say this restore made them, so nothing was changed for them: backup #2"
+                    .to_string()
+            ],
             ..IssuesReport::default()
         }
     );
@@ -1305,7 +1774,7 @@ fn a_refused_second_confirm_writes_nothing() {
             &f.backup,
             NEW,
             confirmed,
-            SINCE,
+            &Made::default(),
             &remote(&f, &api),
         ) {
             Err(CoreError::Refused(why)) => assert!(why.contains(NEW), "{why}"),
@@ -1322,6 +1791,7 @@ fn a_refused_second_confirm_writes_nothing() {
 #[test]
 fn a_label_that_is_there_with_another_colour_is_left_and_named() {
     let f = fixture("colour");
+    made_as(&f, &[("Bug", 1), ("Old", 2)]);
     std::fs::write(
         f.backup.join("labels.json"),
         r#"[{"name": "bug", "color": "d73a4a"}, {"name": "size:Easy", "color": "0E8A16"}]"#,

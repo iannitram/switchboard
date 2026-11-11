@@ -3,18 +3,16 @@
 //! private repo (BAK-3: history, labels and milestones in `restore_history`, issues and comments
 //! in `restore_issues`).
 
-use crate::clock::UnixSeconds;
 use crate::fleet::FleetBridge;
-use crate::github::queue::{self, Create, QueueStatus};
+use crate::github::queue::{self, Create, QueueStatus, Queued};
 use crate::github::transport::{GitHubTransport, HttpTransport};
 use crate::renumber::{renumber, Now};
-use crate::reports::parse_time;
 use crate::rules::{self, Caller, GuardedAction, Verdict};
 use crate::settings::Settings;
 use crate::CoreError;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
@@ -1119,6 +1117,10 @@ pub struct RestoreReport {
     pub issues: IssuesReport,
     /// What the backup holds that was not put back, one plain line each.
     pub left_out: Vec<String>,
+    /// What a restore over a live repo made, as far as the create queue has said
+    /// (`restore_over_live` and its held pass; empty for a new repo). The held pass changes
+    /// only these.
+    pub made: Made,
 }
 
 /// BAK-3: restore the history, labels and milestones of the backup in `backup_dir` to the new
@@ -1182,6 +1184,7 @@ pub fn restore_history_from(
         milestones: backup.milestones.len() as u64,
         issues: IssuesReport::default(),
         left_out,
+        made: Made::default(),
     })
 }
 
@@ -1467,15 +1470,15 @@ fn queue_labels(
     repo: &str,
     creates: &[Create],
     base: &QueueStatus,
-) -> Result<(), CoreError> {
-    let sent = queue::send(fleet, creates)?;
+) -> Result<Vec<Queued>, CoreError> {
+    let (sent, keyed) = queue::send_keyed(fleet, creates)?;
     if sent.failed > base.failed {
         return Err(CoreError::GitHub(format!(
             "{repo}: {} label or milestone creates failed in the queue",
             sent.failed - base.failed
         )));
     }
-    Ok(())
+    Ok(keyed)
 }
 
 /// The queue's counts now (`fleet ghq status`).
@@ -1554,8 +1557,6 @@ struct LiveIssue {
     title: String,
     closed: bool,
     body: String,
-    /// When GitHub says it was created; `None` when it does not say.
-    created: Option<UnixSeconds>,
 }
 
 /// The repo's issues now (PRs aside), lowest number first.
@@ -1569,7 +1570,6 @@ fn live_issues(api: &dyn GitHubTransport, repo: &str) -> Result<Vec<LiveIssue>, 
                 title: item["title"].as_str()?.to_string(),
                 closed: has_state(item, "closed"),
                 body: item["body"].as_str().unwrap_or("").to_string(),
-                created: item["created_at"].as_str().and_then(parse_time),
             })
         })
         .collect();
@@ -1612,44 +1612,93 @@ fn match_issues(backup: &[(u64, String)], live: &[(u64, String)]) -> HashMap<u64
     matched
 }
 
-/// Sends `creates` through the queue; a create the queue fails is an error.
-fn send_checked(fleet: &FleetBridge, repo: &str, creates: &[Create]) -> Result<(), CoreError> {
+/// Sends `creates` through the queue; a create the queue fails is an error. Answers what the
+/// queue said of each create (`queue::send_keyed`).
+fn send_checked(
+    fleet: &FleetBridge,
+    repo: &str,
+    creates: &[Create],
+) -> Result<Vec<Queued>, CoreError> {
     if creates.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let before = queue_counts(fleet)?;
-    let sent = queue::send(fleet, creates)?;
+    let (sent, keyed) = queue::send_keyed(fleet, creates)?;
     if sent.failed > before.failed {
         return Err(CoreError::GitHub(format!(
             "{repo}: {} issue or comment creates failed in the queue",
             sent.failed - before.failed
         )));
     }
-    Ok(())
+    Ok(keyed)
+}
+
+/// One create a restore over a live repo queued and the queue added as new: the queue's key
+/// for it, and the number GitHub gave it, once the queue's own record says it made it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Created {
+    pub key: String,
+    pub number: Option<u64>,
+}
+
+/// What a restore over a live repo made (#365): the issues, by the backup's number, and the
+/// milestones, by title in lower case, that it queued and the queue added as new. Only these
+/// are closed or given new `#N`; everything else in the repo is left as it is. The confirm step
+/// keeps the record beside the held Waiting item, so the second confirm changes the same ones.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Made {
+    pub issues: BTreeMap<u64, Created>,
+    pub milestones: BTreeMap<String, Created>,
 }
 
 /// Which part of a restore of issues runs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Pass {
     /// Everything: the issues the repo lacks are queued, then the comments, then the state.
     Whole,
     /// Only what an earlier pass held back until its issues were there: the comments, the
-    /// closes and the renumbered bodies. No issue is queued. `since` is when the restore was
-    /// asked for: only what GitHub says was created at or after it is closed or renumbered.
-    Held { since: UnixSeconds },
+    /// closes and the renumbered bodies. No issue is queued. The record is what the whole pass
+    /// made: only those issues and milestones are closed or renumbered.
+    Held(Made),
 }
 
-/// Which of the repo's issues and milestones a restore may close or give new numbers (#365):
-/// only what the restore made, never what the repo had before it.
-enum Made<'a> {
-    /// A new repo (`restore_issues`): everything in it is the restore's.
-    All,
-    /// A whole restore over a live repo: the issues this pass queues, and the milestones (titles
-    /// in lower case) it queued.
-    Queued(&'a HashSet<String>),
-    /// The held pass of a restore over a live repo: what GitHub says was created at or after
-    /// this time, the time the restore was asked for.
-    Since(UnixSeconds),
+/// The number after `part` in a created item's URL (`/issues/` or `/milestone/`).
+fn number_in(url: &str, part: &str) -> Option<u64> {
+    let at = url.find(part)? + part.len();
+    let digits: String = url[at..].chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
+}
+
+/// Gives each create in `made` that has no number yet the one the queue's own record says it
+/// made. One still `pending` keeps none. One the queue found there already (`exists`), made
+/// without saying which, failed, or no longer holds is not attributed to the restore: it leaves
+/// the record, and is named among what the restore did not make.
+fn resolve(fleet: &FleetBridge, made: &mut Made) -> Result<(), CoreError> {
+    let keys: Vec<String> = made
+        .issues
+        .values()
+        .chain(made.milestones.values())
+        .filter(|c| c.number.is_none())
+        .map(|c| c.key.clone())
+        .collect();
+    let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
+    let record = queue::records(fleet, &keys)?;
+    let settle = |created: &mut Created, part: &str| -> bool {
+        if created.number.is_some() {
+            return true;
+        }
+        match record.get(&created.key) {
+            Some(r) if r.status == "pending" => true,
+            Some(r) if r.status == "done" => {
+                created.number = r.result.as_deref().and_then(|url| number_in(url, part));
+                created.number.is_some()
+            }
+            _ => false,
+        }
+    };
+    made.issues.retain(|_, c| settle(c, "/issues/"));
+    made.milestones.retain(|_, c| settle(c, "/milestone/"));
+    Ok(())
 }
 
 /// PATCHes `path` with `body`. `Ok(true)` when GitHub answered 200; `Ok(false)` when it
@@ -1661,6 +1710,11 @@ fn patched(api: &dyn GitHubTransport, path: &str, body: &Value) -> Result<bool, 
         403 | 429 => Ok(false),
         other => Err(CoreError::GitHub(format!("PATCH {path}: status {other}"))),
     }
+}
+
+/// `n` items, then the names: `2 ...: #7, #9`.
+fn named(what: &str, names: &[String]) -> Option<String> {
+    (!names.is_empty()).then(|| format!("{} {what}: {}", names.len(), names.join(", ")))
 }
 
 /// BAK-3: puts the issues and comments of the backup in `backup_dir` on `repo` (`owner/name`),
@@ -1688,17 +1742,21 @@ pub fn restore_issues(
     repo: &str,
     remote: &Remote<'_>,
 ) -> Result<IssuesReport, CoreError> {
-    restore_issues_made(fleet, backup_dir, repo, remote, &Made::All)
+    restore_issues_made(fleet, backup_dir, repo, remote, true, None)
 }
 
-/// `restore_issues`, closing and renumbering only what `made` says the restore made.
-/// `Made::Since` is the held pass: it queues no issue, only what was held back.
+/// `restore_issues`. `whole` false is the held pass: it queues no issue, only what was held
+/// back. With `made` (a restore over a live repo) only the issues and milestones in that record
+/// are closed or renumbered: the issues this pass queues and the queue adds as new go into it,
+/// each with the number the queue's own record says it made (`resolve`), never one found by
+/// title. Without it (a new repo) everything in the repo is the restore's.
 fn restore_issues_made(
     fleet: &FleetBridge,
     backup_dir: &Path,
     repo: &str,
     remote: &Remote<'_>,
-    made: &Made<'_>,
+    whole: bool,
+    mut made: Option<&mut Made>,
 ) -> Result<IssuesReport, CoreError> {
     split_repo(repo)?;
     let manifest = manifest_in(backup_dir)?;
@@ -1728,16 +1786,13 @@ fn restore_issues_made(
     }
 
     let mut live = live_issues(remote.api, repo)?;
-    let mut now = match_issues(&titles, &titles_of(&live));
     let mut report = IssuesReport::default();
-    // The backup's numbers of the issues this pass queued.
-    let mut queued_now: HashSet<u64> = HashSet::new();
-    if !matches!(made, Made::Since(_)) {
+    if whole {
+        let there = match_issues(&titles, &titles_of(&live));
         let to_queue: Vec<&(u64, &Value)> = numbered
             .iter()
-            .filter(|(number, _)| !now.contains_key(number))
+            .filter(|(number, _)| !there.contains_key(number))
             .collect();
-        queued_now = to_queue.iter().map(|(number, _)| *number).collect();
         let issue_creates: Vec<Create> = to_queue
             .iter()
             .map(|(_, issue)| Create::Issue {
@@ -1756,11 +1811,56 @@ fn restore_issues_made(
         report.issues = issue_creates.len() as u64;
         report.issues_there = (numbered.len() - issue_creates.len()) as u64;
         if !issue_creates.is_empty() {
-            send_checked(fleet, repo, &issue_creates)?;
+            let keyed = send_checked(fleet, repo, &issue_creates)?;
+            // Only a create this batch added is the restore's: one the queue held already
+            // (another request, or a second issue with the same title) is not.
+            if let Some(made) = made.as_deref_mut() {
+                for ((old, _), queued) in to_queue.iter().zip(&keyed) {
+                    if queued.added {
+                        made.issues.insert(
+                            *old,
+                            Created {
+                                key: queued.key.clone(),
+                                number: None,
+                            },
+                        );
+                    }
+                }
+            }
             live = live_issues(remote.api, repo)?;
-            now = match_issues(&titles, &titles_of(&live));
         }
-    } else {
+    }
+    if let Some(made) = made.as_deref_mut() {
+        resolve(fleet, made)?;
+    }
+    // Which issue of the repo each backed-up issue is now: a recorded one is the number the
+    // queue made (none while it waits); any other is matched by title among the rest.
+    let now: HashMap<u64, u64> = match made.as_deref() {
+        None => match_issues(&titles, &titles_of(&live)),
+        Some(made) => {
+            let recorded: HashSet<u64> = made.issues.values().filter_map(|c| c.number).collect();
+            let others: Vec<(u64, String)> = titles
+                .iter()
+                .filter(|(old, _)| !made.issues.contains_key(old))
+                .cloned()
+                .collect();
+            let rest: Vec<(u64, String)> = titles_of(&live)
+                .into_iter()
+                .filter(|(number, _)| !recorded.contains(number))
+                .collect();
+            let mut now = match_issues(&others, &rest);
+            for (old, created) in &made.issues {
+                if let Some(number) = created
+                    .number
+                    .filter(|n| live.iter().any(|l| l.number == *n))
+                {
+                    now.insert(*old, number);
+                }
+            }
+            now
+        }
+    };
+    if !whole {
         report.issues_there = now.len() as u64;
     }
 
@@ -1816,12 +1916,11 @@ fn restore_issues_made(
     send_checked(fleet, repo, &comment_creates)?;
 
     // The state (#365). After a rate-limit answer nothing more is sent: the rest waits. Only
-    // what this restore made is changed: an issue or milestone the repo had before it is left.
-    let made_at = |created: Option<UnixSeconds>| match made {
-        Made::Since(since) => created.is_some_and(|at| at >= *since),
-        Made::All | Made::Queued(_) => false,
-    };
-    let mut left_open = 0;
+    // what this restore made is changed: any other issue or milestone is left, and named.
+    let ours = |old: &u64| made.as_deref().map_or(true, |m| m.issues.contains_key(old));
+    let mut left_open = Vec::new();
+    let mut not_made = Vec::new();
+    let mut kept_numbers = Vec::new();
     let mut limited = false;
     for (old, issue) in &numbered {
         let closed = has_state(issue, "closed");
@@ -1830,21 +1929,26 @@ fn restore_issues_made(
         let found = now
             .get(old)
             .and_then(|number| live.iter().find(|l| l.number == *number));
+        if !ours(old) {
+            match found {
+                Some(found) => {
+                    if closed && !found.closed {
+                        left_open.push(format!("#{}", found.number));
+                    }
+                    if renumbered.text != body && plain(&found.body) == plain(&body) {
+                        kept_numbers.push(format!("#{} (not made by this restore)", found.number));
+                    }
+                }
+                None => not_made.push(format!("backup #{old}")),
+            }
+            continue;
+        }
         let Some(found) = found else {
             if closed || renumbered.text != body || renumbered.waiting {
                 report.state_waiting += 1;
             }
             continue;
         };
-        let ours = match made {
-            Made::All => true,
-            Made::Queued(_) => queued_now.contains(old),
-            Made::Since(_) => made_at(found.created),
-        };
-        if !ours {
-            left_open += u64::from(closed && !found.closed);
-            continue;
-        }
         let mut change = serde_json::Map::new();
         // Only a body that still reads as the backup's is rewritten; what the queue put after
         // it (its marker) stays.
@@ -1855,6 +1959,9 @@ fn restore_issues_made(
             let kept = &found.body[plain(&found.body).len()..];
             let rewritten = format!("{}{kept}", plain(&renumbered.text));
             change.insert("body".to_string(), Value::String(rewritten));
+        } else if renumbered.text != body && plain(&found.body) != plain(&renumbered.text) {
+            // Neither the backup's text nor the rewritten one: changed by someone since.
+            kept_numbers.push(format!("#{} (changed in the repo since)", found.number));
         }
         if closed && !found.closed {
             change.insert("state".to_string(), Value::String("closed".to_string()));
@@ -1880,31 +1987,49 @@ fn restore_issues_made(
         report.renumbered += u64::from(rewrites);
     }
 
-    // A milestone is closed last, once every issue that may name it is there.
+    // A milestone is closed last, once every issue that may name it is there: over a live repo,
+    // every issue the restore made; over a new one, every issue of the backup.
     let closed_milestones: Vec<String> = milestones
         .iter()
         .filter(|m| has_state(m, "closed"))
         .map(|m| text(m, "title").to_lowercase())
         .collect();
-    let mut milestones_left_open = 0;
+    let mut milestones_left_open = Vec::new();
     if !closed_milestones.is_empty() {
-        let all_there = numbered.iter().all(|(old, _)| now.contains_key(old));
+        let all_there = match made.as_deref() {
+            None => numbered.iter().all(|(old, _)| now.contains_key(old)),
+            Some(made) => made.issues.keys().all(|old| now.contains_key(old)),
+        };
         let live_milestones = rest_all(remote.api, &format!("/repos/{repo}/milestones?state=all"))?;
         for title in &closed_milestones {
-            let found = live_milestones
-                .iter()
-                .find(|m| text(m, "title").to_lowercase() == *title);
-            let ours = |m: &Value| match made {
-                Made::All => true,
-                Made::Queued(queued) => queued.contains(title),
-                Made::Since(_) => made_at(m["created_at"].as_str().and_then(parse_time)),
+            let found = match made.as_deref() {
+                None => live_milestones
+                    .iter()
+                    .find(|m| text(m, "title").to_lowercase() == *title),
+                Some(made) => match made.milestones.get(title) {
+                    // The one the queue made, by its number.
+                    Some(created) => created.number.and_then(|number| {
+                        live_milestones
+                            .iter()
+                            .find(|m| m["number"].as_u64() == Some(number))
+                    }),
+                    None => {
+                        let there = live_milestones
+                            .iter()
+                            .find(|m| text(m, "title").to_lowercase() == *title);
+                        match there {
+                            Some(m) if !has_state(m, "closed") => {
+                                milestones_left_open.push(text(m, "title"));
+                            }
+                            Some(_) => {}
+                            None => not_made.push(format!("milestone {title}")),
+                        }
+                        continue;
+                    }
+                },
             };
             let number = match found {
                 Some(m) if has_state(m, "closed") => continue,
-                Some(m) if !ours(m) => {
-                    milestones_left_open += 1;
-                    continue;
-                }
                 Some(m) if all_there && !limited => m["number"].as_u64(),
                 _ => None,
             };
@@ -1925,12 +2050,31 @@ fn restore_issues_made(
         }
     }
 
-    if left_open > 0 || milestones_left_open > 0 {
-        report.left_out.push(format!(
-            "{left_open} issues and {milestones_left_open} milestones closed in the backup are \
-             open in the repo, which had them before the restore: left open"
-        ));
-    }
+    report.left_out.extend(
+        [
+            named(
+                "issues closed in the backup are open in the repo and were left open, as this \
+                 restore did not make them",
+                &left_open,
+            ),
+            named(
+                "milestones closed in the backup are open in the repo and were left open, as \
+                 this restore did not make them",
+                &milestones_left_open,
+            ),
+            named(
+                "issues or milestones of the backup are not in the repo and the create queue did \
+                 not say this restore made them, so nothing was changed for them",
+                &not_made,
+            ),
+            named(
+                "issue bodies keep the backup's #N, not rewritten",
+                &kept_numbers,
+            ),
+        ]
+        .into_iter()
+        .flatten(),
+    );
     if limited {
         report.left_out.push(
             "GitHub answered a close or a body change with 403 or 429 (a rate limit, or the \
@@ -2016,17 +2160,23 @@ pub fn restore_over_live_from(
             let refs = push_refs(remote, &work, repo).map_err(|e| about(repo, e))?;
             let before = queue_counts(fleet)?;
             let creates: Vec<Create> = labels.iter().chain(&milestones).cloned().collect();
-            queue_labels(fleet, repo, &creates, &before)?;
-            // Only what this restore queued is closed (#365): not what the repo had already.
-            let queued: HashSet<String> = milestones
-                .iter()
-                .filter_map(|c| match c {
-                    Create::Milestone { title, .. } => Some(title.to_lowercase()),
-                    _ => None,
-                })
-                .collect();
+            let keyed = queue_labels(fleet, repo, &creates, &before)?;
+            // Only what this restore made is closed (#365): the milestones this batch added to
+            // the queue, by the number the queue says it made, never what the repo had already.
+            let mut made = Made::default();
+            for (create, queued) in milestones.iter().zip(keyed.iter().skip(labels.len())) {
+                if let (Create::Milestone { title, .. }, true) = (create, queued.added) {
+                    made.milestones.insert(
+                        title.to_lowercase(),
+                        Created {
+                            key: queued.key.clone(),
+                            number: None,
+                        },
+                    );
+                }
+            }
             let issues =
-                restore_issues_made(fleet, backup_dir, repo, remote, &Made::Queued(&queued))?;
+                restore_issues_made(fleet, backup_dir, repo, remote, true, Some(&mut made))?;
             let mut left_out = left_out(&backup);
             if !other_colour.is_empty() {
                 left_out.push(format!(
@@ -2041,6 +2191,7 @@ pub fn restore_over_live_from(
                 milestones: milestones.len() as u64,
                 issues,
                 left_out,
+                made,
             })
         });
     let _ = std::fs::remove_dir_all(&work);
@@ -2091,32 +2242,35 @@ pub fn restore_held_over_live(
     backup_dir: &Path,
     repo: &str,
     confirmed: bool,
-    since: UnixSeconds,
+    made: &Made,
 ) -> Result<RestoreReport, CoreError> {
     with_github(|remote| {
-        restore_held_over_live_from(caller, fleet, backup_dir, repo, confirmed, since, remote)
+        restore_held_over_live_from(caller, fleet, backup_dir, repo, confirmed, made, remote)
     })
 }
 
 /// The second confirm of a restore over the live repo `repo` (#347): after the same checks as
 /// `restore_over_live_from`, only what the first restore held back is done
 /// (`Pass::Held`): the comments whose issues are there now are queued, and the closes and body
-/// changes that waited are sent, only to issues and milestones GitHub says were created at or
-/// after `since` (when the restore was asked for), so never to one the repo had before it. No
-/// ref is pushed and no label, milestone or issue is queued, so nothing pushed to the repo since
-/// the first confirm is overwritten. The report's `refs`, `labels` and `milestones` are 0.
+/// changes that waited are sent, only to the issues and milestones in `made` (what the whole
+/// pass made, with the numbers the create queue's own record gives them), so never to one the
+/// repo had or someone else made. No ref is pushed and no label, milestone or issue is queued,
+/// so nothing pushed to the repo since the first confirm is overwritten. The report's `refs`,
+/// `labels` and `milestones` are 0, and its `made` is the record with any new numbers.
 pub fn restore_held_over_live_from(
     caller: &Caller,
     fleet: &FleetBridge,
     backup_dir: &Path,
     repo: &str,
     confirmed: bool,
-    since: UnixSeconds,
+    made: &Made,
     remote: &Remote<'_>,
 ) -> Result<RestoreReport, CoreError> {
     live_backup(caller, backup_dir, repo, confirmed, remote)?;
+    let mut made = made.clone();
     Ok(RestoreReport {
-        issues: restore_issues_made(fleet, backup_dir, repo, remote, &Made::Since(since))?,
+        issues: restore_issues_made(fleet, backup_dir, repo, remote, false, Some(&mut made))?,
+        made,
         ..RestoreReport::default()
     })
 }

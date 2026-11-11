@@ -8,8 +8,10 @@
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
-use switchboard_core::backup::{IssuesReport, Pass, RestoreReport};
-use switchboard_core::confirm::{confirm_with, guarded_request, Actions, Done, HELD_ACTION};
+use switchboard_core::backup::{Created, IssuesReport, Made, Pass, RestoreReport};
+use switchboard_core::confirm::{
+    confirm_with, guarded_request, Actions, Done, HeldRecords, HELD_ACTION,
+};
 use switchboard_core::github::archive::Archived;
 use switchboard_core::rules::{Caller, Face, GuardedAction, Role};
 use switchboard_core::settings::Settings;
@@ -25,8 +27,31 @@ fn data_dir(name: &str) -> PathBuf {
     d
 }
 
-/// The held pass of the request `asked` leaves: it changes only what was made since the request.
-const HELD: Pass = Pass::Held { since: NOW };
+/// What the whole restore made, as its report says: the backup's issue 2 is the repo's 8, and
+/// one milestone still waits in the create queue.
+fn made() -> Made {
+    let mut made = Made::default();
+    made.issues.insert(
+        2,
+        Created {
+            key: "k-issue".to_string(),
+            number: Some(8),
+        },
+    );
+    made.milestones.insert(
+        "1.0".to_string(),
+        Created {
+            key: "k-milestone".to_string(),
+            number: None,
+        },
+    );
+    made
+}
+
+/// The held pass, given the record the whole restore kept beside its request.
+fn held_pass() -> Pass {
+    Pass::Held(made())
+}
 
 fn delete() -> GuardedAction {
     GuardedAction::DeleteRepo { repo: REPO.into() }
@@ -124,7 +149,7 @@ impl Restore {
                     self.calls
                         .borrow_mut()
                         .push((caller.clone(), repo.to_string()));
-                    self.passes.borrow_mut().push(pass);
+                    self.passes.borrow_mut().push(pass.clone());
                     self.report.borrow().clone()
                 },
                 archive: &|caller, repo| {
@@ -154,6 +179,7 @@ fn report() -> RestoreReport {
             ..IssuesReport::default()
         },
         left_out: vec!["the wiki is not restored".to_string()],
+        made: Made::default(),
     }
 }
 
@@ -335,6 +361,7 @@ fn a_second_confirm_of_a_restore_that_held_comments_back_only_runs_the_held_pass
     let mut held = report();
     held.issues.comments_waiting = 4;
     held.issues.state_waiting = 1;
+    held.made = made();
     let restore_run = Restore::answering(Ok(held.clone()));
     let app = caller(Face::Gui, None, false, true);
     let text = text_of(&asked(&restore()));
@@ -375,11 +402,16 @@ fn a_second_confirm_of_a_restore_that_held_comments_back_only_runs_the_held_pass
     assert_eq!(done.what, "restore over owner/alpha (what was held back)");
     assert_eq!(done.lines[0], "no ref was pushed again");
     assert!(!done.lines.iter().any(|l| l.contains("refs pushed")));
-    assert_eq!(*restore_run.passes.borrow(), vec![Pass::Whole, HELD]);
+    assert_eq!(
+        *restore_run.passes.borrow(),
+        vec![Pass::Whole, held_pass()],
+        "the held pass gets the record the whole restore made"
+    );
     assert_eq!(
         LocalItems::new(&data).load().unwrap()[1].action,
         HELD_ACTION
     );
+    assert_eq!(HeldRecords::new(&data).get(&text).unwrap(), Some(made()));
 
     // The third: nothing is held back any more, so the request leaves.
     *restore_run.report.borrow_mut() = Ok(RestoreReport {
@@ -402,8 +434,13 @@ fn a_second_confirm_of_a_restore_that_held_comments_back_only_runs_the_held_pass
     );
     assert_eq!(
         *restore_run.passes.borrow(),
-        vec![Pass::Whole, HELD, HELD],
+        vec![Pass::Whole, held_pass(), held_pass()],
         "the whole restore ran once only"
+    );
+    assert_eq!(
+        HeldRecords::new(&data).get(&text).unwrap(),
+        None,
+        "the record leaves with the request"
     );
     assert_eq!(
         LocalItems::new(&data).load().unwrap(),
@@ -431,7 +468,10 @@ fn a_refused_second_confirm_runs_nothing_and_the_request_stays_held() {
     // A held pass that fails keeps the request held too.
     *restore_run.report.borrow_mut() = Err(CoreError::GitHub("down".to_string()));
     assert!(restore_run.run(&data, &text, &app).is_err());
-    assert_eq!(*restore_run.passes.borrow(), vec![Pass::Whole, HELD]);
+    assert_eq!(
+        *restore_run.passes.borrow().last().unwrap(),
+        Pass::Held(Made::default())
+    );
     unchanged(&data, &before);
 }
 

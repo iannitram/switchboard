@@ -9,13 +9,16 @@
 //! one. A restore over a live repo runs `backup::restore_over_live` from the repo's backup
 //! folder. When that restore held something back (comments, closes) until its issues are
 //! there, its item stays with the action `HELD_ACTION`, and the confirm of such an item only
-//! does what was held back: it pushes no ref again.
+//! does what was held back: it pushes no ref again. What the first restore made (the issues and
+//! milestones the create queue made for it) is kept beside the item, in
+//! `<data>/waiting/held-restores.json`, and the second confirm closes and renumbers only those.
 
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::backup::{self, Pass, RestoreReport};
+use crate::backup::{self, Made, Pass, RestoreReport};
 use crate::backup_run;
 use crate::fleet::FleetBridge;
 use crate::github::archive::{self, Archived};
@@ -91,7 +94,7 @@ fn worded(action: &GuardedAction) -> String {
 
 /// The restore's report as plain lines; a `Pass::Held` report has no refs, labels or issues to
 /// speak of.
-fn lines_of(report: &RestoreReport, pass: Pass) -> Vec<String> {
+fn lines_of(report: &RestoreReport, pass: &Pass) -> Vec<String> {
     let issues = &report.issues;
     let mut lines = match pass {
         Pass::Whole => vec![
@@ -105,12 +108,12 @@ fn lines_of(report: &RestoreReport, pass: Pass) -> Vec<String> {
                 issues.issues, issues.comments
             ),
         ],
-        Pass::Held { .. } => vec![
+        Pass::Held(_) => vec![
             "no ref was pushed again".to_string(),
             format!("{} comments queued", issues.comments),
         ],
     };
-    if pass == Pass::Whole && (issues.issues_there > 0 || issues.comments_there > 0) {
+    if *pass == Pass::Whole && (issues.issues_there > 0 || issues.comments_there > 0) {
         lines.push(format!(
             "{} issues and {} comments were there already",
             issues.issues_there, issues.comments_there
@@ -150,7 +153,7 @@ fn held_back(report: &RestoreReport) -> String {
 /// What a confirm runs, so tests can stand in for GitHub.
 pub struct Actions<'a> {
     /// A restore over the live repo it is given: the whole restore, or only what was held back.
-    pub restore: &'a dyn Fn(&Caller, &str, Pass) -> Result<RestoreReport, CoreError>,
+    pub restore: &'a dyn Fn(&Caller, &str, &Pass) -> Result<RestoreReport, CoreError>,
     /// Archives the repo it is given on GitHub.
     pub archive: &'a dyn Fn(&Caller, &str) -> Result<Archived, CoreError>,
 }
@@ -168,7 +171,9 @@ pub struct Actions<'a> {
 ///   its item leaves the list; when it held something back the item stays, with `HELD_ACTION`
 ///   and what waits in its `why`;
 /// - a restore request whose item has `HELD_ACTION` runs `actions.restore` with `Pass::Held`
-///   only, and leaves the list once nothing is held back.
+///   and the record of what the restore made, kept beside the item (`HeldRecords`; an item
+///   with no record gets an empty one, so nothing is closed), and leaves the list once nothing
+///   is held back. Each time the item stays, the report's record is kept beside it.
 ///
 /// Every refusal and every failed action leaves the file untouched.
 pub fn confirm_with(
@@ -179,6 +184,7 @@ pub fn confirm_with(
     actions: &Actions<'_>,
 ) -> Result<Done, CoreError> {
     let local = LocalItems::new(data_dir);
+    let records = HeldRecords::new(data_dir);
     let source = Source::GuardedAction {
         text: text.to_string(),
     };
@@ -198,15 +204,17 @@ pub fn confirm_with(
         GuardedAction::RestoreOverLive { repo } => {
             typed_is(&what, repo, typed)?;
             let pass = if item.action == HELD_ACTION {
-                Pass::Held { since: item.since }
+                Pass::Held(records.get(text)?.unwrap_or_default())
             } else {
                 Pass::Whole
             };
-            let report = (actions.restore)(caller, repo, pass)?;
+            let report = (actions.restore)(caller, repo, &pass)?;
             let cleared = !report.issues.held();
             if cleared {
                 local.remove(&source)?;
+                records.set(text, None)?;
             } else {
+                records.set(text, Some(&report.made))?;
                 local.add(Item {
                     why: format!(
                         "The restore over {repo} pushed the backup's refs; {}. A confirm now \
@@ -220,9 +228,9 @@ pub fn confirm_with(
             Ok(Done {
                 what: match pass {
                     Pass::Whole => what,
-                    Pass::Held { .. } => format!("{what} (what was held back)"),
+                    Pass::Held(_) => format!("{what} (what was held back)"),
                 },
-                lines: lines_of(&report, pass),
+                lines: lines_of(&report, &pass),
                 cleared,
             })
         }
@@ -243,6 +251,58 @@ pub fn confirm_with(
         }
         // `guarded_request` never answers a merge.
         GuardedAction::Merge { .. } => Err(CoreError::Refused(what)),
+    }
+}
+
+/// What each held restore made (`RestoreReport::made`), by its request's text, in
+/// `<data>/waiting/held-restores.json`, beside the Waiting item it belongs to.
+pub struct HeldRecords {
+    path: PathBuf,
+}
+
+impl HeldRecords {
+    pub fn new(data_dir: &Path) -> Self {
+        Self {
+            path: data_dir.join("waiting").join("held-restores.json"),
+        }
+    }
+
+    fn load(&self) -> Result<BTreeMap<String, Made>, CoreError> {
+        let text = match std::fs::read_to_string(&self.path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+            Err(e) => return Err(CoreError::Io(format!("{}: {e}", self.path.display()))),
+        };
+        serde_json::from_str(&text)
+            .map_err(|e| CoreError::Parse(format!("{}: {e}", self.path.display())))
+    }
+
+    /// The record kept for the request `text`, `None` when there is none.
+    pub fn get(&self, text: &str) -> Result<Option<Made>, CoreError> {
+        Ok(self.load()?.remove(text))
+    }
+
+    /// Keeps `made` for the request `text`, or drops its record (`None`). Pretty JSON to
+    /// `held-restores.json.tmp`, then renamed over the file; no change writes nothing.
+    fn set(&self, text: &str, made: Option<&Made>) -> Result<(), CoreError> {
+        let mut all = self.load()?;
+        let changed = match made {
+            Some(made) => all.insert(text.to_string(), made.clone()).as_ref() != Some(made),
+            None => all.remove(text).is_some(),
+        };
+        if !changed {
+            return Ok(());
+        }
+        let io = |e: std::io::Error| CoreError::Io(format!("{}: {e}", self.path.display()));
+        if let Some(dir) = self.path.parent() {
+            std::fs::create_dir_all(dir).map_err(io)?;
+        }
+        let mut body = serde_json::to_string_pretty(&all)
+            .map_err(|e| CoreError::Parse(format!("{}: {e}", self.path.display())))?;
+        body.push('\n');
+        let tmp = self.path.with_extension("json.tmp");
+        std::fs::write(&tmp, body).map_err(io)?;
+        std::fs::rename(&tmp, &self.path).map_err(io)
     }
 }
 
@@ -268,7 +328,7 @@ pub fn confirm(
     typed: &str,
     caller: &Caller,
 ) -> Result<Done, CoreError> {
-    let restore = |caller: &Caller, repo: &str, pass: Pass| {
+    let restore = |caller: &Caller, repo: &str, pass: &Pass| {
         let backups = match settings.nextcloud_backups.as_deref() {
             Some(path) if !path.as_os_str().is_empty() => path,
             _ => return Err(CoreError::MissingPath("nextcloud_backups")),
@@ -278,8 +338,8 @@ pub fn confirm(
         let confirmed = caller.confirmed_in_app;
         match pass {
             Pass::Whole => backup::restore_over_live(caller, &fleet, &folder, repo, confirmed),
-            Pass::Held { since } => {
-                backup::restore_held_over_live(caller, &fleet, &folder, repo, confirmed, since)
+            Pass::Held(made) => {
+                backup::restore_held_over_live(caller, &fleet, &folder, repo, confirmed, made)
             }
         }
     };
