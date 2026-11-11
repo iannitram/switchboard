@@ -106,9 +106,9 @@ pub enum ChatPick {
         service: String,
         model: String,
     },
-    /// `model`: the Claude tier the handoff goes to (#428): the thread's earlier Claude model,
-    /// else the kind's `ok.claude` tier, else `DEFAULT_CLAUDE_MODEL`. None only before the route
-    /// functions or `answer` fill it in.
+    /// `model`: the Claude tier the handoff goes to (#428, #433), only when one was chosen: the
+    /// tier the message names, the kind's `ok.claude` tier, or the thread's earlier Claude
+    /// model. None: Switchboard chose no model (`CLAUDE_MODEL_NOT_CHOSEN`).
     ClaudeHandoff {
         reason: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -235,19 +235,38 @@ fn route_message_gated(
     }
     let index = AbilitiesIndex::load_with(fleet, machine)?;
     let picked = route(message, &index, gate, complexity);
-    Ok(with_claude_model(ChatRoute::from(&picked), &index, None))
+    Ok(with_claude_model(
+        ChatRoute::from(&picked),
+        &index,
+        message,
+        None,
+    ))
 }
 
 /// #430: a budget gate over the snapshot on disk (`budget::read`, `fleet budget --json`),
 /// which never refreshes a reading: a pool is in budget when its verdict is `push` or
 /// `on-pace`; a pool the snapshot does not list is not. A dry run routes with it.
+///
+/// #433: it mirrors `fleet budget allow <lane>` as the real ask calls it (no `--machine`): the
+/// local Qwen lane has no paid pool and is allowed whatever its snapshot verdict says (every
+/// Qwen machine busy only brakes a job placed on a machine). It records the pools it was asked
+/// about, so a dry run can say which stale auto-read reading a real ask would refresh first
+/// (`refresh_lines`).
 pub struct SnapshotGate {
     rows: Vec<PoolRow>,
+    asked: RefCell<Vec<String>>,
 }
+
+/// #433: the pools whose reading `fleet budget allow` refreshes first when it is stale (fleet's
+/// `AUTO_POOLS` and its agy-derived pool).
+pub const AUTO_READ_POOLS: [&str; 4] = ["gemini", "chatgpt", "deepseek", "agy-claude"];
 
 impl SnapshotGate {
     pub fn new(rows: Vec<PoolRow>) -> Self {
-        Self { rows }
+        Self {
+            rows,
+            asked: RefCell::new(Vec::new()),
+        }
     }
 
     /// Read the snapshot. A fleet failure is the error.
@@ -269,25 +288,83 @@ impl SnapshotGate {
             .collect();
         (!stale.is_empty()).then(|| format!("stale ({})", stale.join(", ")))
     }
+
+    /// #433: one line per auto-read pool this gate was asked about whose reading is stale, in
+    /// the order asked: `a real ask would refresh <pool> first; this answer uses the reading
+    /// from <N> min ago`.
+    pub fn refresh_lines(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        for pool in self.asked.borrow().iter() {
+            let Some(row) = self.rows.iter().find(|row| &row.pool == pool) else {
+                continue;
+            };
+            if !row.stale || !AUTO_READ_POOLS.contains(&pool.as_str()) {
+                continue;
+            }
+            let age = match row.reading_age_min {
+                Some(age) => format!("from {age} min ago"),
+                None => "of unrecorded age".to_string(),
+            };
+            lines.push(format!(
+                "a real ask would refresh {pool} first; this answer uses the reading {age}"
+            ));
+        }
+        lines
+    }
 }
 
 impl BudgetGate for SnapshotGate {
     fn allows(&self, service: &str) -> bool {
+        {
+            let mut asked = self.asked.borrow_mut();
+            if !asked.iter().any(|pool| pool == service) {
+                asked.push(service.to_string());
+            }
+        }
+        if service == QWEN {
+            return true;
+        }
         self.rows
             .iter()
             .any(|row| row.pool == service && matches!(row.verdict.as_str(), "push" | "on-pace"))
     }
 }
 
-/// #428: the Claude model a handoff goes to when nothing else names one.
-pub const DEFAULT_CLAUDE_MODEL: &str = "sonnet";
+/// FD-5 (#428, #433): the label a Claude handoff's model shows as, in the CLI's text, the reply
+/// and the app: `Claude <model>`, or this when Switchboard chose none.
+pub const CLAUDE_MODEL_NOT_CHOSEN: &str = "Claude (model not chosen by Switchboard)";
 
-/// #428: a Claude handoff route with its model filled in: `thread_model` (the model the
-/// thread's earlier Claude handoff went to, so a thread stays on one model), else the route
-/// kind's `ok.claude` tier, else `DEFAULT_CLAUDE_MODEL`. Any other route is returned as it is.
+/// #433: how a Claude handoff to `model` is shown.
+pub fn claude_label(model: Option<&str>) -> String {
+    match model {
+        Some(model) => format!("Claude {model}"),
+        None => CLAUDE_MODEL_NOT_CHOSEN.to_string(),
+    }
+}
+
+/// #433: the Claude tier `message` names: a tier word (`haiku`, `sonnet`, `opus`) right after
+/// the word `claude` (`ask Claude Opus`, `claude-sonnet`), the first such pair; case-insensitive,
+/// whole words. A tier word alone (`write a sonnet`) names no model.
+pub fn named_claude_tier(message: &str) -> Option<String> {
+    let words: Vec<String> = message
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_lowercase)
+        .collect();
+    words
+        .windows(2)
+        .find(|pair| pair[0] == "claude" && matches!(pair[1].as_str(), "haiku" | "sonnet" | "opus"))
+        .map(|pair| pair[1].clone())
+}
+
+/// #428, #433: a Claude handoff route with its model filled in only when one was chosen: the
+/// tier `message` names (`named_claude_tier`), else a model the route already carries, else the
+/// route kind's `ok.claude` tier, else `thread_model` (the model the thread's earlier Claude
+/// handoff went to); None when nothing names one. Any other route is returned as it is.
 pub(crate) fn with_claude_model(
     mut route: ChatRoute,
     index: &AbilitiesIndex,
+    message: &str,
     thread_model: Option<String>,
 ) -> ChatRoute {
     if let ChatPick::ClaudeHandoff { model, .. } = &mut route.pick {
@@ -295,10 +372,10 @@ pub(crate) fn with_claude_model(
             .kind
             .as_deref()
             .and_then(|kind| index.claude_tiers.get(kind).cloned());
-        *model = thread_model
+        *model = named_claude_tier(message)
             .or_else(|| model.take())
             .or(tier)
-            .or_else(|| Some(DEFAULT_CLAUDE_MODEL.to_string()));
+            .or(thread_model);
     }
     route
 }
@@ -483,7 +560,7 @@ pub(crate) fn route_in_thread_gated(
             service: leaves_the_model(&found).then_some(open.service.as_str()),
         };
         let picked = ChatRoute::from(&route(message, &index, &without, complexity));
-        with_claude_model(picked, &index, claude_model_of(&rows))
+        with_claude_model(picked, &index, message, claude_model_of(&rows))
     };
     Ok(chat)
 }

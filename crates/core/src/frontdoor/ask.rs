@@ -8,10 +8,11 @@ use super::chat;
 use super::labeller::SmallLabeller;
 use super::router;
 use super::thread::ThreadStore;
-use crate::abilities::FleetModels;
+use crate::abilities::{AbilitiesIndex, FleetModels};
 use crate::fleet::FleetBridge;
+use crate::it::Loadout;
 use crate::CoreError;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// What one ask came to: the Chat view's reply (the route, and the answer when one was made),
@@ -25,6 +26,11 @@ pub struct Asked {
     /// `stale (<pool> <age> min old, ...)` (`chat::SnapshotGate::stale_line`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub budget_snapshot: Option<String>,
+    /// #433: on a dry run, one line per stale auto-read pool the route asked about, which a real
+    /// ask would refresh before trusting (`chat::SnapshotGate::refresh_lines`): `a real ask would
+    /// refresh <pool> first; this answer uses the reading from <N> min ago`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub refresh_first: Vec<String>,
 }
 
 /// What an ask reads from outside the core; `ask` passes the real ones.
@@ -50,6 +56,8 @@ pub struct Seams<'a> {
 /// #430: a dry run never asks `fleet budget allow` (which may refresh a stale paid pool's
 /// reading) and writes nothing: it routes over the budget snapshot on disk
 /// (`chat::SnapshotGate`) and says how old the snapshot is when a reading in it is stale.
+/// #433: it says which stale auto-read pool a real ask would refresh first, and lets the
+/// local Qwen lane through as `fleet budget allow qwen` does.
 pub fn ask_on(
     fleet: &FleetBridge,
     data_dir: &Path,
@@ -87,6 +95,7 @@ pub fn ask_on(
             reply,
             dry_run,
             budget_snapshot: snapshot.stale_line(),
+            refresh_first: snapshot.refresh_lines(),
         });
     }
     let route = chat::route_in_thread_on(
@@ -114,6 +123,7 @@ pub fn ask_on(
         reply,
         dry_run,
         budget_snapshot: None,
+        refresh_first: Vec::new(),
     })
 }
 
@@ -207,4 +217,71 @@ pub fn job_why(unmet: &[String]) -> String {
     } else {
         format!("I sent it as a fleet job (needs {})", unmet.join(", "))
     }
+}
+
+/// FD-12 (#429): a request this machine holds, which the Chat view offers to send as a fleet
+/// job: its kind, the request text, and the needs this machine's loadout does not meet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Held {
+    pub kind: String,
+    pub request: String,
+    pub unmet: Vec<String>,
+}
+
+/// FD-12 (#429, #433): the needs of request kind `kind` that `loadout` does not meet
+/// (`it::unmet`). A kind the abilities index does not list as a request kind is refused.
+pub fn unmet_needs(
+    fleet: &FleetBridge,
+    machine: Option<&str>,
+    kind: &str,
+    loadout: &Loadout,
+) -> Result<Vec<String>, CoreError> {
+    let index = AbilitiesIndex::load_with(fleet, machine)?;
+    let ability = index
+        .get(kind)
+        .filter(|ability| ability.request)
+        .ok_or_else(|| CoreError::Refused(format!("no request kind {kind}")))?;
+    Ok(crate::it::unmet(&ability.needs, loadout))
+}
+
+/// FD-12 (#429): the request the Chat view holds for `reply`: its kind and the message, with
+/// the needs `loadout` (this machine's, as last read) does not meet. None when the loadout has
+/// not been read, the route names no kind or not a request kind, or every need is met.
+pub fn held_request(
+    fleet: &FleetBridge,
+    machine: Option<&str>,
+    reply: &ChatReply,
+    message: &str,
+    loadout: Option<&Loadout>,
+) -> Option<Held> {
+    let loadout = loadout?;
+    let kind = reply.route.kind.as_deref()?;
+    let unmet = unmet_needs(fleet, machine, kind, loadout).ok()?;
+    (!unmet.is_empty()).then(|| Held {
+        kind: kind.to_string(),
+        request: message.to_string(),
+        unmet,
+    })
+}
+
+/// FD-12 (#433): the unmet needs for `ask_as_job` when the caller names none: request kind
+/// `kind`'s needs against this machine's loadout, read now (`it::read_this_machine`). A kind
+/// whose needs this machine meets is refused: there is nothing to hold.
+pub fn infer_unmet(
+    fleet: &FleetBridge,
+    kind: &str,
+    loadout: &Loadout,
+) -> Result<Vec<String>, CoreError> {
+    let unmet = unmet_needs(
+        fleet,
+        FleetModels::local_machine().as_deref(),
+        kind,
+        loadout,
+    )?;
+    if unmet.is_empty() {
+        return Err(CoreError::Refused(format!(
+            "this machine meets every need of {kind}: nothing to send as a job"
+        )));
+    }
+    Ok(unmet)
 }

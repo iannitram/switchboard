@@ -65,6 +65,11 @@ pub struct JobRow {
     /// then summarises only those. None on every other row, and on a summary stored before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub covers_turns: Option<u32>,
+    /// #433: on a summary row, the content hash of the turns it covers
+    /// (`answer::turns_hash`), so it is reused only while they are unchanged. None on every
+    /// other row, and on a summary stored before (a cache miss).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub covers_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -159,6 +164,7 @@ pub fn row_from_ledger(event: &Value) -> JobRow {
         moved_why: None,
         fallback: None,
         covers_turns: None,
+        covers_hash: None,
     }
 }
 

@@ -1,8 +1,9 @@
 //! #384: the front door from the CLI, each a thin call into the core the Chat view calls.
 //! `ask "<text>" [--dry-run] [--thread <id>]` routes one message and answers it
 //! (`frontdoor::ask::ask_headless`); `--dry-run` prints the route and its reason and sends,
-//! stores and spends nothing, so it needs no role. `ask_as_job <kind> "<text>" --unmet
-//! <need>[,<need>] [--thread <id>]` is the Chat view's "Send as a fleet job"
+//! stores and spends nothing, so it needs no role. `ask_as_job <kind> "<text>" [--unmet
+//! <need>[,<need>]] [--thread <id>]` is the Chat view's "Send as a fleet job"; with no
+//! `--unmet` the kind's needs this machine's loadout does not meet are read at the call (#433)
 //! (`ask::send_as_job`; with `--thread` the job carries that chat's packet, FD-6); `rate
 //! <thread> <turn> <up|down>` is its thumbs (`rating_log::rate_turn`). The three writes go
 //! through `rules::guard_front_door`: the project-manager role, never in a job worktree.
@@ -12,11 +13,13 @@ use std::io::Write;
 use std::process::ExitCode;
 
 use serde_json::Value;
+use switchboard_core::clock::{Clock, SystemClock};
 use switchboard_core::error::CoreError;
 use switchboard_core::fleet::FleetBridge;
 use switchboard_core::frontdoor::ask::{self, Asked};
-use switchboard_core::frontdoor::chat::ChatPick;
+use switchboard_core::frontdoor::chat::{self, ChatPick};
 use switchboard_core::frontdoor::rating_log;
+use switchboard_core::it;
 use switchboard_core::rules::{self, Caller, Verdict};
 
 use super::{data_or_fail, emit_to, pipeline_or_fail, refuse, terminal_safe, Fail, USAGE};
@@ -81,7 +84,9 @@ enum Call {
     AskAsJob {
         kind: String,
         request: String,
-        unmet: Vec<String>,
+        /// #433: None when `--unmet` is not given: the kind's needs this machine does not
+        /// meet, read at the call (`ask::infer_unmet`).
+        unmet: Option<Vec<String>>,
         thread: Option<String>,
     },
     Rate {
@@ -102,18 +107,22 @@ fn call_from(words: &[String], flags: &Flags) -> Result<Call, String> {
         }),
         ("ask", _) => Err("ask needs one \"<text>\" (quote it)".to_string()),
         ("ask_as_job", [kind, request]) => {
-            let unmet: Vec<String> = flags
-                .unmet
-                .as_deref()
-                .unwrap_or_default()
-                .split(',')
-                .map(str::trim)
-                .filter(|need| !need.is_empty())
-                .map(str::to_string)
-                .collect();
-            if unmet.is_empty() {
-                return Err("ask_as_job needs --unmet <need>[,<need>]".to_string());
-            }
+            // #433: with no `--unmet` the needs are inferred; one given must name a need.
+            let unmet = match flags.unmet.as_deref() {
+                None => None,
+                Some(list) => {
+                    let unmet: Vec<String> = list
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|need| !need.is_empty())
+                        .map(str::to_string)
+                        .collect();
+                    if unmet.is_empty() {
+                        return Err("ask_as_job needs --unmet <need>[,<need>]".to_string());
+                    }
+                    Some(unmet)
+                }
+            };
             Ok(Call::AskAsJob {
                 kind: kind.clone(),
                 request: request.clone(),
@@ -159,11 +168,9 @@ fn ask_text(asked: &Asked) -> String {
     let reply = &asked.reply;
     let (to, why) = match &reply.route.pick {
         ChatPick::Service { service, model } => (format!("{service} {model}"), None),
+        // #433: the model shows as `chat::claude_label` names it; none chosen says so.
         ChatPick::ClaudeHandoff { reason, model } => (
-            match model {
-                Some(model) => format!("claude handoff {model}"),
-                None => "claude handoff".to_string(),
-            },
+            format!("claude handoff: {}", chat::claude_label(model.as_deref())),
             Some(reason),
         ),
         ChatPick::Wait { reason } => ("wait".to_string(), Some(reason)),
@@ -184,6 +191,10 @@ fn ask_text(asked: &Asked) -> String {
     }
     if let Some(snapshot) = &asked.budget_snapshot {
         lines.push(format!("budget snapshot: {}", terminal_safe(snapshot)));
+    }
+    // #433: a stale auto-read pool the dry run used as it was, which a real ask refreshes first.
+    for line in &asked.refresh_first {
+        lines.push(terminal_safe(line));
     }
     let mut line = |name: &str, value: &Option<String>| {
         if let Some(value) = value {
@@ -233,8 +244,15 @@ fn run_call(call: &Call) -> Result<(String, Value), Fail> {
                 Some(_) => Some(data_or_fail()?),
                 None => None,
             };
+            let unmet = match unmet {
+                Some(unmet) => unmet.clone(),
+                None => {
+                    let loadout = it::read_this_machine(&it::SystemProbeRunner, SystemClock.now());
+                    ask::infer_unmet(&fleet, kind, &loadout).map_err(|e| core("ask_as_job", e))?
+                }
+            };
             let chat = data.as_deref().zip(thread.as_deref());
-            let job = ask::send_as_job(&fleet, kind, request, unmet, chat)
+            let job = ask::send_as_job(&fleet, kind, request, &unmet, chat)
                 .map_err(|e| core("ask_as_job", e))?;
             let text = terminal_safe(&format!(
                 "ask_as_job: queued {kind} for another machine (needs {})",
