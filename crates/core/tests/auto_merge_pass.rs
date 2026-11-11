@@ -325,6 +325,47 @@ fn one_refusal_keeps_the_merges_before_and_after_it() {
 }
 
 #[test]
+fn a_refusal_in_one_repo_does_not_stop_the_repos_after_it() {
+    // #380, #419: the refusal is in the FIRST repo (its only PR), so nothing merged before it;
+    // the pass must still go on to the repos after it, and read only the ones that merged.
+    let w = world("first-repo-refused");
+    for repo in ["first", "second", "third"] {
+        std::fs::create_dir_all(w.dev.join(repo)).unwrap();
+    }
+    std::fs::write(w.stub_dir.join("exit-pr-21"), "1").unwrap();
+    let snaps = vec![
+        snap("owner/first", vec![pr(21, Some(HEAD), "success", &[5])]),
+        snap("owner/second", vec![pr(31, Some(HEAD), "success", &[3])]),
+        snap("owner/third", vec![pr(41, Some(HEAD), "success", &[4])]),
+    ];
+    let (pass, reads) = run_pass(&w, &snaps);
+    assert_eq!(
+        pass.refused,
+        vec![RefusedMerge {
+            repo: "owner/first".to_string(),
+            pr: 21,
+            why: "branch is behind main".to_string(),
+        }]
+    );
+    assert_eq!(
+        pass.merged,
+        vec![
+            ("owner/second".to_string(), vec![31], vec![3]),
+            ("owner/third".to_string(), vec![41], vec![4]),
+        ]
+    );
+    assert_eq!(reads, vec!["owner/second", "owner/third"]);
+    let tried: Vec<String> = calls(&w.stub_dir)
+        .iter()
+        .map(|args| args[args.iter().position(|a| a == "--pr").unwrap() + 1].clone())
+        .collect();
+    assert!(
+        tried.contains(&"31".to_string()) && tried.contains(&"41".to_string()),
+        "{tried:?}"
+    );
+}
+
+#[test]
 fn each_refusal_lands_in_waiting_once() {
     let w = world("waiting");
     let data = w.pipeline.join("data");
