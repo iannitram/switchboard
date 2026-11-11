@@ -1022,11 +1022,14 @@ pub fn pool_command(
     let saved = match budget::save_pool_edit(&FleetBridge::new(&root), &edit, &data, &clock) {
         Ok(saved) => saved,
         Err(e) => {
-            let _ = writeln!(
-                err,
-                "{}",
-                terminal_safe(&format!("{command} {}: {e}", edit.pool))
-            );
+            // An empty pool name leaves no gap before the colon (#416).
+            let who = [command, edit.pool.as_str()]
+                .iter()
+                .filter(|w| !w.is_empty())
+                .copied()
+                .collect::<Vec<_>>()
+                .join(" ");
+            let _ = writeln!(err, "{}", terminal_safe(&format!("{who}: {e}")));
             return ExitCode::from(1);
         }
     };

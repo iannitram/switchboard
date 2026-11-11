@@ -16,7 +16,7 @@ reuses:
 ```
 Cargo.toml                    one Rust workspace (core, cli, app/src-tauri)
 crates/core/                  switchboard-core: every rule, read and write
-  src/{settings,fleet,abilities,joblog,rules,platform,clock,error}.rs
+  src/{settings,fleet,abilities,joblog,rules,platform,clock,error,lock}.rs
   src/github/                 snapshot, transport, poll, queue, merge
   src/sky/                    features, layout, drift, chain, codemap, priority, labels, jobs
   src/{waiting,reports,budget,backup,it}.rs
@@ -83,6 +83,9 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 
 ### core-clock, core-error
 `crates/core/src/clock.rs`, `error.rs` · present. The injected clock (`Clock`, `SystemClock`, `FixedClock`) and `CoreError`, the one error faces see.
+
+### core-lock
+`crates/core/src/lock.rs` · BUD-2, CORE-2 · present. One writer at a time for a file the core reads, changes and writes back, across threads and processes on every OS, no extra crate (#416): `FileLock::take(target, wait)` makes `<target>.switchboard-lock` with `create_new`, waits up to `wait`, takes over a lock older than `STALE_LOCK` (10 min, a dead run's), and removes it on drop. `run_tag` and `temp_path` give each run its own temp file names, as the backup's `run_tag` does (#363).
 
 ### github-snapshot
 `crates/core/src/github/snapshot.rs` · GH-1 · present. `RepoSnapshot` (issues, PRs with verdicts and CI on head, milestones, labels, ROADMAP.md, the code map) and `SnapshotStore`: one JSON file per repo under the app's data folder, with its age.
@@ -162,6 +165,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - BUD-1 panel (`BudgetPanel`, `Budget`): present.
 - BUD-2 save (`save_edit`, `parse_reset`, `budget_save_edit`): present.
 - BUD-2 save for the CLI and MCP (`save_pool_edit`: file, ledger row in `<data>/pool-edits.jsonl` and Waiting item, all or nothing; `edit_summary`, the reply text naming each new value and the old one): present.
+- BUD-2 edits at the same time (#416): the save holds `lock::FileLock` on `config.json`, then on the ledger, for the read, the writes, the Waiting item and any undo; a second edit waits up to `EDIT_LOCK_WAIT` (10 s), then is refused with what to do. Temp files are named per run (`lock::temp_path`). A cap is at least `MIN_CAP_USD` (a cent): present.
 - BUD-2 editor (`PoolEditor`): present.
 
 ### backup

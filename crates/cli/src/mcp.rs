@@ -73,8 +73,14 @@ impl WriteCore for CoreWrites<'_> {
             .as_ref()
             .ok_or_else(|| format!("{tool}: set SWITCHBOARD_DATA to the app data folder"))?;
         let pool = &edit.pool;
+        // An empty pool name leaves no gap before the colon (#416).
+        let who = if pool.is_empty() {
+            tool.to_string()
+        } else {
+            format!("{tool} {pool}")
+        };
         let saved = budget::save_pool_edit(fleet, edit, data, self.clock)
-            .map_err(|e| format!("{tool} {pool}: {e}"))?;
+            .map_err(|e| format!("{who}: {e}"))?;
         Ok(format!(
             "{tool} {pool}: {}",
             budget::edit_summary(&saved.ledger_row)
