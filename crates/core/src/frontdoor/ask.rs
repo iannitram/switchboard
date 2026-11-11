@@ -80,9 +80,7 @@ pub fn ask_on(
         transport: seams.transport,
     };
     let reply = match fallback {
-        Some(fallback) => {
-            answer::answer_fallback(fallback.route, &fallback.reason, message, handoff_id, &ctx)?
-        }
+        Some(fallback) => answer::answer_fallback(fallback, message, handoff_id, &ctx)?,
         None => answer::answer_route(route, message, handoff_id, &ctx)?,
     };
     Ok(Asked { reply, dry_run })

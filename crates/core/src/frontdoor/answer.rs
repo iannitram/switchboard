@@ -10,7 +10,7 @@ use super::adapters::{
     log_row, Answer, ChatAdapter, ChatGptAdapter, ChatTransport, ClaudeApiAdapter, DeepSeekAdapter,
     GeminiAdapter, QwenAdapter,
 };
-use super::chat::{ChatPick, ChatRoute};
+use super::chat::{qwen_failed_line, ChatPick, ChatRoute, Fallback};
 use super::packet::{self, Packet, Turn};
 use super::rating_log::rating_id;
 use super::sticky::{handoff_step, open_chat, signals, with_move, OpenChat, Signal};
@@ -459,6 +459,40 @@ pub fn queued_asks(data_dir: &Path) -> Result<Vec<(String, JobRow)>, CoreError> 
     Ok(out)
 }
 
+/// #427: a thumbs down on an answer the local Qwen lane gave as a fallback holds the same ask
+/// for Claude: the question before turn `answer_turn` is queued again at the thread's end (the
+/// held queue, `queued_asks`), unless it is already the thread's last turn, held. True when it
+/// was queued. Sending it stays manual; the chat is not moved.
+pub fn hold_fallback_ask(
+    store: &ThreadStore,
+    handoff_id: &str,
+    answer_turn: u32,
+) -> Result<bool, CoreError> {
+    let turns = store.turns(handoff_id)?;
+    let Some(ask) = answer_turn
+        .checked_sub(1)
+        .and_then(|at| turns.get(at as usize))
+        .filter(|row| row.role.as_deref() == Some("user"))
+    else {
+        return Ok(false);
+    };
+    let Some(text) = ask.text.as_deref() else {
+        return Ok(false);
+    };
+    let row = JobRow {
+        outcome: Some(QUEUED.to_string()),
+        ..user_row(text, ask.kind.as_deref(), handoff_id)
+    };
+    store.append_if(handoff_id, &row, |rows| {
+        let last = rows.iter().rev().find(|row| is_turn(row));
+        !last.is_some_and(|last| {
+            last.role.as_deref() == Some("user")
+                && last.outcome.as_deref() == Some(QUEUED)
+                && last.text.as_deref() == Some(text)
+        })
+    })
+}
+
 /// The user turn's row in the thread.
 fn user_row(message: &str, kind: Option<&str>, handoff_id: &str) -> JobRow {
     JobRow {
@@ -505,18 +539,49 @@ pub fn answer_route(
 }
 
 /// FD-3 (#377): `answer_route` for a route the local Qwen lane took because the picked pool
-/// was braked or over budget (`chat::qwen_fallback`): `reason` says so in the reply
-/// (`fallback`) and on the answer's row. It is one answer, not a move: Qwen is sent the
-/// thread's turns as any turn is, no summary is asked for, no move is stored, and an open chat
-/// stays open on its own model (`sticky::open_chat` passes over a fallback's answer).
+/// was braked or over budget, or Claude's budget was spent (`chat::qwen_fallback_on`): its
+/// `reason` says so in the reply (`fallback`) and on the answer's row. It is one answer, not a
+/// move: Qwen is sent the thread's turns as any turn is, no summary is asked for, no move is
+/// stored, and an open chat stays open on its own model (`sticky::open_chat` passes over a
+/// fallback's answer). #427: when Qwen fails mid-answer the ask is held for Claude exactly as
+/// if Qwen had been down: the reply is the wait (`fallback.waited`) with the ask queued and
+/// `queued` saying Qwen failed mid-answer (`chat::qwen_failed_line`); nothing of the failed
+/// answer is kept, and sending the held ask stays manual.
 pub fn answer_fallback(
-    route: ChatRoute,
-    reason: &str,
+    fallback: Fallback,
     message: &str,
     handoff_id: Option<&str>,
     ctx: &AnswerContext,
 ) -> Result<ChatReply, CoreError> {
-    answer(route, Some(reason), message, handoff_id, ctx)
+    answer(
+        fallback.route,
+        Some((&fallback.reason, fallback.waited)),
+        message,
+        handoff_id,
+        ctx,
+    )
+}
+
+/// FD-3 (#377, #427): queue `message` in its thread (a new one when `handoff_id` is None):
+/// the user turn marked `queued`; the reply is `route` with the thread and `why`.
+fn hold(
+    route: ChatRoute,
+    why: String,
+    message: &str,
+    handoff_id: Option<&str>,
+    ctx: &AnswerContext,
+) -> Result<ChatReply, CoreError> {
+    let id = handoff_id.map_or_else(new_handoff_id, str::to_string);
+    let row = JobRow {
+        outcome: Some(QUEUED.to_string()),
+        ..user_row(message, route.kind.as_deref(), &id)
+    };
+    ThreadStore::new(ctx.data_dir).append(&id, &row)?;
+    Ok(ChatReply {
+        handoff_id: Some(id),
+        queued: Some(why),
+        ..route_alone(route)
+    })
 }
 
 /// A reply that is the route alone.
@@ -536,26 +601,17 @@ pub(crate) fn route_alone(route: ChatRoute) -> ChatReply {
     }
 }
 
+/// `fallback`: the fallback's reason and the route it waited on (#377, #427).
 fn answer(
     route: ChatRoute,
-    fallback: Option<&str>,
+    fallback: Option<(&str, ChatRoute)>,
     message: &str,
     handoff_id: Option<&str>,
     ctx: &AnswerContext,
 ) -> Result<ChatReply, CoreError> {
     if let ChatPick::Wait { reason } = &route.pick {
-        let id = handoff_id.map_or_else(new_handoff_id, str::to_string);
-        let row = JobRow {
-            outcome: Some(QUEUED.to_string()),
-            ..user_row(message, route.kind.as_deref(), &id)
-        };
-        ThreadStore::new(ctx.data_dir).append(&id, &row)?;
-        let queued = Some(reason.clone());
-        return Ok(ChatReply {
-            handoff_id: Some(id),
-            queued,
-            ..route_alone(route)
-        });
+        let why = reason.clone();
+        return hold(route, why, message, handoff_id, ctx);
     }
     let store = ThreadStore::new(ctx.data_dir);
     let open = match handoff_id {
@@ -600,7 +656,21 @@ fn answer(
         role: "user".to_string(),
         text: message.to_string(),
     });
-    let answer = adapter.send(model, &system, &turns)?;
+    let answer = match adapter.send(model, &system, &turns) {
+        Ok(answer) => answer,
+        Err(e) => match fallback {
+            // #427: Qwen failed mid-answer: held for Claude, as if Qwen had been down.
+            Some((_, waited)) => {
+                let why = match &waited.pick {
+                    ChatPick::Wait { reason } => qwen_failed_line(reason),
+                    _ => qwen_failed_line("no answer"),
+                };
+                return hold(waited, why, message, handoff_id, ctx);
+            }
+            None => return Err(e),
+        },
+    };
+    let fallback = fallback.map(|(reason, _)| reason);
     let kind = route.kind.as_deref();
     if let Some(planned) = &planned {
         record_move(&store, &id, planned, (service, Some(model)))?;

@@ -3,6 +3,7 @@
 Newest first. One line per change of stage, release or decision that the next session needs.
 
 
+- 2026-11-11 Front door ruling (#427, FD-3): only a kind with a Qwen row falls back to Qwen (a braked pool or an ask waiting for Claude's budget); a Qwen failure mid-answer holds the ask for Claude with no partial answer kept; a thumbs down on a fallback answer holds the same ask; thumbs on a fallback never teach routing.
 - 2026-11-11 Docs: machine paths in SPEC.md and docs/code-map.md replaced with placeholders (R01); repo-lint clean.
 - 2026-11-11 Front door ruling (#377, FD-3): a queued ask stays manual; an ask whose pool is braked or over budget is answered by the local Qwen lane when it is up, and the route reason says so; it is queued only when Qwen is down too.
 - 2026-11-09 Roadmap brought in line with the code (R03): re-dated, and the live loops added to the stages (the poll, the autopilot passes, the loadout timer, IT tickets, the CLI and MCP writes are tested functions nothing runs yet); stage stays Dev Loop (R26). Milestones and every label RUBRIC lists were already in place.

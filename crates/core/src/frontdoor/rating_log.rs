@@ -2,6 +2,7 @@
 //! The shell's `chat_rate` command is a thin call into `log_rating`.
 
 use super::adapters::Answer;
+use super::answer::hold_fallback_ask;
 use super::sticky::rating_row;
 use super::thread::ThreadStore;
 use crate::joblog::JobRow;
@@ -64,6 +65,10 @@ pub fn rating_entry(
 /// turn must be an answer, and `service` and `model` must be the ones that answered it; else it
 /// is refused (#372). A second rating of a turn replaces the first (`ThreadStore::upsert`).
 /// A refusal returns before any file is touched.
+///
+/// #427: on an answer the local Qwen lane gave as a fallback, the rating row carries that
+/// answer's `fallback` (so FD-4 never learns from it, `router::learned_pick`), and a thumbs
+/// down holds the same ask for Claude (`answer::hold_fallback_ask`); it never moves the chat.
 pub fn log_rating(
     data_dir: &Path,
     handoff_id: &str,
@@ -85,7 +90,14 @@ pub fn log_rating(
             "turn {turn_index} of thread {handoff_id} was answered by {lane} {answered_by}, not {service} {model}"
         )));
     }
+    let row = JobRow {
+        fallback: turn.fallback.clone(),
+        ..row
+    };
     store.upsert(handoff_id, &row)?;
+    if turn.fallback.is_some() && row.rating.as_deref() == Some("down") {
+        hold_fallback_ask(&store, handoff_id, turn_index)?;
+    }
     Ok(row)
 }
 

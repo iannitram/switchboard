@@ -825,6 +825,20 @@ fn an_ask_whose_pool_is_braked_is_answered_by_qwen_and_says_so() {
     const EDIT: &str = "proofread this note";
     let w = world("fallback");
     let braked = [("STUB_BRAKED", "gemini,claudeapi")];
+
+    // #427: a kind with no Qwen row in the routing table never falls back; it is queued.
+    let out = w.run_with(&pm(&["--json", "ask", EDIT]), &braked);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let reply = json_out(&out);
+    assert_eq!(reply["queued"], "waiting for budget: writing-editing");
+    assert!(reply.get("fallback").is_none(), "{reply}");
+
+    // Give writing-editing a Qwen row: now a braked pool falls back to Qwen.
+    let actions = w.root.join("answers/actions.json");
+    let mut table: Value =
+        serde_json::from_str(&std::fs::read_to_string(&actions).unwrap()).unwrap();
+    table["writing-editing"]["ok"]["qwen"] = json!(true);
+    std::fs::write(&actions, table.to_string()).unwrap();
     let out = w.run_with(&pm(&["ask", EDIT]), &braked);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     let text = stdout(&out);

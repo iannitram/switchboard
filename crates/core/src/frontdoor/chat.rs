@@ -387,34 +387,59 @@ pub struct Fallback {
     pub route: ChatRoute,
     /// Why Qwen answers, said plainly: what the route waited for.
     pub reason: String,
+    /// The route as the router left it (the wait): what the ask is held under when Qwen fails
+    /// mid-answer (#427).
+    pub waited: ChatRoute,
 }
 
-/// FD-3 (#377): an ask whose picked pool is braked or over budget falls back to the local Qwen
-/// lane when that lane is up, and is queued only when Qwen is down too. `waited` is the route
-/// as the router left it; anything but a wait for budget is None (the route stands). A wait
-/// for Claude's budget stays a wait (FD-3: Claude is not swapped for another model without
-/// being asked), and so does an unknown kind. The Qwen lane is up when the fleet config names
-/// this machine's Qwen model and server, `fleet budget allow qwen` allows it, and the server
-/// answers `qwen_up` (asked with its `qwen_server_url`, as Autopilot's probe is). A fleet error from the budget check is the error.
+/// FD-3 (#377, #427): an ask that waits (its picked pool braked or over budget, or waiting for
+/// Claude's budget) falls back to the local Qwen lane when that lane is up and its request kind
+/// has a Qwen row in the routing table; otherwise it is queued for Claude. `waited` is the route
+/// as the router left it; anything but a wait is None (the route stands). A route with no kind,
+/// an unknown kind and a kind with no Qwen row are not answered by Qwen (#427). The Qwen lane is
+/// up when the fleet config names this machine's Qwen model and server, `fleet budget allow
+/// qwen` allows it, and the server answers `qwen_up` (asked with its `qwen_server_url`, as
+/// Autopilot's probe is). A fleet error from the budget check is the error.
 pub fn qwen_fallback_on(
     fleet: &FleetBridge,
     machine: Option<&str>,
     waited: &ChatRoute,
     qwen_up: &dyn Fn(&str) -> bool,
 ) -> Result<Option<Fallback>, CoreError> {
+    let gate = FleetGate::new(fleet);
+    let fallback = qwen_fallback_gated(fleet, machine, waited, &gate, qwen_up);
+    match gate.into_error() {
+        Some(err) => Err(err),
+        None => fallback,
+    }
+}
+
+/// `qwen_fallback_on` asking `gate` whether the Qwen lane may spend (a dry run's gate reads the
+/// budget snapshot, #430). The caller takes the gate's error.
+pub(crate) fn qwen_fallback_gated(
+    fleet: &FleetBridge,
+    machine: Option<&str>,
+    waited: &ChatRoute,
+    gate: &dyn BudgetGate,
+    qwen_up: &dyn Fn(&str) -> bool,
+) -> Result<Option<Fallback>, CoreError> {
     let ChatPick::Wait { reason } = &waited.pick else {
         return Ok(None);
     };
-    if !reason.starts_with("waiting for budget") {
+    let Some(kind) = waited.kind.as_deref() else {
         return Ok(None);
-    }
+    };
     let Some((model, _)) = FleetModels::read_qwen_endpoint(fleet, machine) else {
         return Ok(None);
     };
     let Some(url) = FleetModels::read_qwen_server_url(fleet, machine) else {
         return Ok(None);
     };
-    if !may_spend(fleet, QWEN)? || !qwen_up(&url) {
+    let index = AbilitiesIndex::load_with(fleet, machine)?;
+    if index.model(kind, QWEN).is_none() {
+        return Ok(None);
+    }
+    if !gate.allows(QWEN) || !qwen_up(&url) {
         return Ok(None);
     }
     Ok(Some(Fallback {
@@ -427,7 +452,14 @@ pub fn qwen_fallback_on(
             },
         },
         reason: format!("nothing else is in budget ({reason}), so the local Qwen lane answers"),
+        waited: waited.clone(),
     }))
+}
+
+/// #427: the line a chat shows when Qwen, answering as the fallback, failed mid-answer: the ask
+/// is held (queued) for Claude, as if Qwen had been down. `waited` is the route's wait reason.
+pub fn qwen_failed_line(waited: &str) -> String {
+    format!("Qwen failed mid-answer, so the ask is held for Claude ({waited})")
 }
 
 /// The local lane's service name.

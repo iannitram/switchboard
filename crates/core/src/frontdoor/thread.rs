@@ -118,6 +118,22 @@ impl ThreadStore {
         self.append_unlocked(handoff_id, rows)
     }
 
+    /// Append `row` when `wanted` says so of the thread's rows as they are now, under one hold of
+    /// the thread's lock, so two writers cannot both append it. True when it was appended.
+    pub fn append_if(
+        &self,
+        handoff_id: &str,
+        row: &JobRow,
+        wanted: impl FnOnce(&[JobRow]) -> bool,
+    ) -> Result<bool, CoreError> {
+        let _lock = self.locked(handoff_id)?;
+        if !wanted(&self.read(handoff_id)?) {
+            return Ok(false);
+        }
+        self.append_unlocked(handoff_id, std::slice::from_ref(row))?;
+        Ok(true)
+    }
+
     /// Put `row` in the thread in place of the row with the same id, or append it when no row
     /// has that id (or it has none). The read, the change and the write happen under the
     /// thread's lock (#419), so a row another writer appends meanwhile is not lost; the file is
