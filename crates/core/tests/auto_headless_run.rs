@@ -145,6 +145,9 @@ impl JobStarter for FakeStarter {
 #[derive(Default)]
 struct FakeGitHub {
     reads: Mutex<Vec<String>>,
+    /// REST paths answered as a closed PR; every other REST read fails. Each one asked is logged.
+    closed: Vec<String>,
+    rest: Mutex<Vec<String>>,
 }
 
 impl GitHubTransport for FakeGitHub {
@@ -157,7 +160,15 @@ impl GitHubTransport for FakeGitHub {
         Ok(json!({ "repository": {} }))
     }
 
-    fn rest_get(&self, _path: &str, _etag: Option<&str>) -> Result<RestAnswer, CoreError> {
+    fn rest_get(&self, path: &str, _etag: Option<&str>) -> Result<RestAnswer, CoreError> {
+        self.rest.lock().unwrap().push(path.to_string());
+        if self.closed.iter().any(|p| p == path) {
+            return Ok(RestAnswer {
+                status: 200,
+                etag: None,
+                body: json!({ "state": "closed", "merged": true }),
+            });
+        }
         Err(CoreError::GitHub("no REST here".to_string()))
     }
 }
@@ -373,6 +384,32 @@ fn the_merge_pass_clears_the_waiting_item_of_a_pr_it_merges() {
     assert_eq!(real.merged[0].prs, [8], "{real:?}");
     assert!(!real.failed(), "{real:?}");
     assert!(local.load().unwrap().is_empty());
+}
+
+/// #433: the merge pass looks up the PR of a refused item that is in no snapshot (it fell off
+/// the poll's 50) and clears the item once that PR merged or closed.
+#[test]
+fn the_merge_pass_clears_the_item_of_a_refused_pr_that_left_the_poll() {
+    use switchboard_core::autopilot::passes::{record_refused_merges, RefusedMerge};
+    use switchboard_core::waiting::LocalItems;
+    let w = demo_world("merge-vanished");
+    let refused = RefusedMerge {
+        repo: "iannitram/demo".into(),
+        pr: 99,
+        why: "branch is behind main".into(),
+    };
+    record_refused_merges(&w.data, &[refused], 50).unwrap();
+    let github = FakeGitHub {
+        closed: vec!["/repos/iannitram/demo/pulls/99".to_string()],
+        ..FakeGitHub::default()
+    };
+    let real = run_one(&w, Pass::Merge, false, &mut FakeStarter::default(), &github).unwrap();
+    assert!(!real.failed(), "{real:?}");
+    assert_eq!(
+        *github.rest.lock().unwrap(),
+        ["/repos/iannitram/demo/pulls/99"]
+    );
+    assert!(LocalItems::new(&w.data).load().unwrap().is_empty());
 }
 
 #[test]
