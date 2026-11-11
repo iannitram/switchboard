@@ -31,7 +31,7 @@ pub const REPO_QUERY: &str = r#"query($owner: String!, $name: String!) {
     }
     pullRequests(first: 50, orderBy: {field: UPDATED_AT, direction: DESC}) {
       nodes {
-        number title state headRefName headRefOid
+        number title state isDraft headRefName headRefOid
         labels(first: 20) { nodes { name } }
         closingIssuesReferences(first: 10) { nodes { number } }
         comments(last: 100) { nodes { body createdAt } }
@@ -146,6 +146,7 @@ pub fn parse_repo(
                         .and_then(Value::as_str),
                 )
                 .to_string(),
+                draft: n.get("isDraft").and_then(Value::as_bool).unwrap_or(false),
             }
         })
         .collect();

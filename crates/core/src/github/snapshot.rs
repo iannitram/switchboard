@@ -53,6 +53,9 @@ pub struct PullRequest {
     pub verdicts: Vec<ReviewVerdict>,
     /// The combined check state on the head: `success`, `failure`, `pending` or `none`.
     pub ci_on_head: String,
+    /// A draft PR (#432: the merge pass skips it). Snapshots written before have none: false.
+    #[serde(default)]
+    pub draft: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

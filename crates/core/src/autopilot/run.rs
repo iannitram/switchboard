@@ -11,8 +11,9 @@
 use super::driver::{self, ChildRunner, LaneRunner, SatelliteConfig, SATELLITE_FILE};
 use super::loops;
 use super::passes::{
-    after_poll_with, job_exit_file, job_timed_out, merge_pass, merge_would, record_refused_merges,
-    AfterPoll, AutopilotState, JobStarter, Merged, PollPasses, RefusedMerge, STATE_FILE,
+    after_poll_with, clear_settled_merges, job_exit_file, job_timed_out, merge_pass, merge_would,
+    record_refused_merges, AfterPoll, AutopilotState, JobStarter, Merged, PollPasses, RefusedMerge,
+    STATE_FILE,
 };
 use super::weekly::weekly_due;
 use crate::backup::{BackupOutcome, RepoBackup};
@@ -356,7 +357,7 @@ fn merged_rows(merged: Vec<Merged>) -> Vec<MergedRow> {
 }
 
 /// AUTO-4 (#380): every passed PR is tried, each merge followed by a read of its repo (GH-3);
-/// each refusal lands in Waiting on you.
+/// each refusal lands in Waiting on you, and leaves it once its PR has merged or closed (#432).
 fn merge_report(env: &RunEnv<'_>) -> PassReport {
     let mut report = PassReport::new(Pass::Merge, env.dry_run);
     let store = SnapshotStore::new(env.data_dir);
@@ -378,11 +379,15 @@ fn merge_report(env: &RunEnv<'_>) -> PassReport {
         repos: Vec::new(),
     };
     let pass = merge_pass(&snaps, &poller, env.pipeline_root, env.dev_root);
-    report.merged = merged_rows(pass.merged);
-    report.refused = pass.refused;
-    if let Err(e) = record_refused_merges(env.data_dir, &report.refused, env.clock.now()) {
+    if let Err(e) = record_refused_merges(env.data_dir, &pass.refused, env.clock.now()) {
         report.fail("waiting", e);
     }
+    // #432 (ruling 6): a refused PR that has merged or closed since leaves Waiting on you.
+    if let Err(e) = clear_settled_merges(env.data_dir, &snaps, &pass.merged) {
+        report.fail("waiting", e);
+    }
+    report.merged = merged_rows(pass.merged);
+    report.refused = pass.refused;
     report
 }
 

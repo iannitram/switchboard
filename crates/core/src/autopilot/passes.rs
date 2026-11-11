@@ -672,7 +672,8 @@ pub fn merge_pass(
 type ReadyRepo<'a> = (&'a RepoSnapshot, PathBuf, Vec<(&'a PullRequest, bool)>);
 
 /// The PRs a `merge_pass` would try: each repo that is not archived and has a clone under
-/// `dev_root`, with its open, eligible PRs (and their patch-id answer), smallest number first.
+/// `dev_root`, with its open, eligible PRs that are not drafts (and their patch-id answer),
+/// smallest number first.
 fn ready_by_repo<'a>(snaps: &'a [RepoSnapshot], dev_root: &Path) -> Vec<ReadyRepo<'a>> {
     let mut out = Vec::new();
     for snap in snaps.iter().filter(|s| !s.archived) {
@@ -684,7 +685,8 @@ fn ready_by_repo<'a>(snaps: &'a [RepoSnapshot], dev_root: &Path) -> Vec<ReadyRep
         let mut ready: Vec<(&PullRequest, bool)> = snap
             .pulls
             .iter()
-            .filter(|pr| pr.state == "open")
+            // #432 (ruling 7): a draft is not offered for merging; it is skipped, not refused.
+            .filter(|pr| pr.state == "open" && !pr.draft)
             .map(|pr| (pr, carried_over_by_patch_id(&clone, pr)))
             .filter(|(pr, carried)| eligibility(pr, *carried) == MergeEligibility::Eligible)
             .collect();
@@ -728,17 +730,60 @@ pub fn refused_merge_item(refused: &RefusedMerge, at: UnixSeconds) -> Item {
     }
 }
 
-/// Put each refused merge of a pass in Waiting on you (`<data>/waiting/local.json`).
+/// Put each refused merge of a pass in Waiting on you (`<data>/waiting/local.json`). #432
+/// (ruling 5): a PR refused again keeps the `since` of its first refusal; the reason is the
+/// latest.
 pub fn record_refused_merges(
     data_dir: &Path,
     refused: &[RefusedMerge],
     at: UnixSeconds,
 ) -> Result<(), CoreError> {
     let local = LocalItems::new(data_dir);
+    if refused.is_empty() {
+        return Ok(());
+    }
+    let there = local.load()?;
     for r in refused {
-        local.add(refused_merge_item(r, at))?;
+        let mut item = refused_merge_item(r, at);
+        if let Some(old) = there.iter().find(|old| old.source == item.source) {
+            item.since = old.since;
+        }
+        local.add(item)?;
     }
     Ok(())
+}
+
+/// #432 (ruling 6): take out of Waiting on you the item of each refused merge whose PR has
+/// merged or closed since: merged by this pass (`merged`), or `merged` or `closed` in its
+/// repo's snapshot. Answers the PRs cleared, as `(repo, pr)`; with none, nothing is written.
+pub fn clear_settled_merges(
+    data_dir: &Path,
+    snaps: &[RepoSnapshot],
+    merged: &[Merged],
+) -> Result<Vec<(String, u64)>, CoreError> {
+    let local = LocalItems::new(data_dir);
+    let there = local.load()?;
+    let mut settled: Vec<(String, u64)> = Vec::new();
+    for snap in snaps {
+        for pr in snap.pulls.iter().filter(|pr| pr.state != "open") {
+            settled.push((snap.repo.clone(), pr.number));
+        }
+    }
+    for (repo, prs, _) in merged {
+        settled.extend(prs.iter().map(|pr| (repo.clone(), *pr)));
+    }
+    settled.sort();
+    settled.dedup();
+    let mut cleared = Vec::new();
+    for (repo, pr) in settled {
+        let source = Source::GuardedAction {
+            text: format!("Merge {repo}#{pr}"),
+        };
+        if there.iter().any(|item| item.source == source) && local.remove(&source)? {
+            cleared.push((repo, pr));
+        }
+    }
+    Ok(cleared)
 }
 
 /// Write `job` and its brief for `fleet run`: the brief to `<jobs_dir>/<id>.md`, the job to

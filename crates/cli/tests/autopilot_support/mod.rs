@@ -98,6 +98,7 @@ pub fn world(tag: &str) -> World {
 
 fn demo() -> RepoSnapshot {
     let pr = |number: u64, passed: bool| PullRequest {
+        draft: false,
         number,
         title: format!("PR {number}"),
         state: "open".into(),

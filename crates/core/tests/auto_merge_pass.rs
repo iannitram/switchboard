@@ -7,10 +7,12 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use switchboard_core::autopilot::passes::{
-    autopilot_caller, merge_pass, record_refused_merges, MergePass, Merged, RefusedMerge,
+    autopilot_caller, clear_settled_merges, merge_pass, merge_would, record_refused_merges,
+    MergePass, Merged, RefusedMerge,
 };
 use switchboard_core::clock::FixedClock;
 use switchboard_core::github::poll::Poller;
+use switchboard_core::github::poll::{parse_repo, REPO_QUERY};
 use switchboard_core::github::snapshot::SnapshotStore;
 use switchboard_core::github::transport::{GitHubTransport, RestAnswer};
 use switchboard_core::github::{PullRequest, RepoSnapshot, ReviewVerdict};
@@ -355,7 +357,7 @@ fn a_refusal_in_one_repo_does_not_stop_the_repos_after_it() {
         ]
     );
     assert_eq!(reads, vec!["owner/second", "owner/third"]);
-    let tried: Vec<String> = calls(&w.stub_dir)
+    let mut tried: Vec<String> = calls(&w.stub_dir)
         .iter()
         .map(|args| args[args.iter().position(|a| a == "--pr").unwrap() + 1].clone())
         .collect();
@@ -388,7 +390,127 @@ fn each_refusal_lands_in_waiting_once() {
     assert_eq!(item.what, "Merge owner/throwaway#21");
     assert!(item.why.contains("branch is behind main"), "{}", item.why);
     assert_eq!(item.link, "https://github.com/owner/throwaway/pull/21");
-    assert_eq!(item.since, 200);
+    // #432 (ruling 5): `since` is the first refusal's, kept across the later ones.
+    assert_eq!(item.since, 100);
+}
+
+fn refused(repo: &str, pr: u64) -> RefusedMerge {
+    RefusedMerge {
+        repo: repo.to_string(),
+        pr,
+        why: "branch is behind main".to_string(),
+    }
+}
+
+#[test]
+fn a_later_refusal_keeps_the_first_since_and_a_new_pr_gets_its_own() {
+    let w = world("since");
+    let data = w.pipeline.join("data");
+    record_refused_merges(&data, &[refused("o/r", 1)], 100).unwrap();
+    record_refused_merges(&data, &[refused("o/r", 1), refused("o/r", 2)], 300).unwrap();
+    let mut why = refused("o/r", 1);
+    why.why = "CI went red".to_string();
+    record_refused_merges(&data, &[why], 500).unwrap();
+    let items = switchboard_core::waiting::LocalItems::new(&data)
+        .load()
+        .unwrap();
+    let since: Vec<(&str, i64)> = items.iter().map(|i| (i.what.as_str(), i.since)).collect();
+    assert_eq!(since, [("Merge o/r#1", 100), ("Merge o/r#2", 300)]);
+    assert!(
+        items[0].why.contains("CI went red"),
+        "the reason is the latest"
+    );
+}
+
+#[test]
+fn a_refused_merge_item_goes_when_its_pr_merges_or_closes() {
+    let w = world("settled");
+    let data = w.pipeline.join("data");
+    let local = switchboard_core::waiting::LocalItems::new(&data);
+    record_refused_merges(
+        &data,
+        &[
+            refused("o/r", 21),
+            refused("o/r", 22),
+            refused("o/r", 23),
+            refused("o/r", 24),
+            refused("o/other", 21),
+        ],
+        100,
+    )
+    .unwrap();
+    let handoff = switchboard_core::waiting::handoff_item("h-1", "a handoff", 50);
+    local.add(handoff.clone()).unwrap();
+    let with = |number: u64, state: &str| PullRequest {
+        number,
+        state: state.to_string(),
+        ..Default::default()
+    };
+    let snaps = [snap(
+        "o/r",
+        vec![with(21, "merged"), with(22, "closed"), with(23, "open")],
+    )];
+    // Ruling 6: merged or closed on GitHub, or merged by this pass, clears the item.
+    let merged: Vec<Merged> = vec![("o/r".to_string(), vec![24], vec![])];
+    let cleared = clear_settled_merges(&data, &snaps, &merged).unwrap();
+    assert_eq!(
+        cleared,
+        [
+            ("o/r".to_string(), 21),
+            ("o/r".to_string(), 22),
+            ("o/r".to_string(), 24)
+        ]
+    );
+    let left: Vec<String> = local.load().unwrap().into_iter().map(|i| i.what).collect();
+    assert_eq!(
+        left,
+        ["Merge o/r#23", "Merge o/other#21", handoff.what.as_str()]
+    );
+    // Nothing more to clear writes nothing.
+    let before = std::fs::read(local.path()).unwrap();
+    assert!(clear_settled_merges(&data, &snaps, &merged)
+        .unwrap()
+        .is_empty());
+    assert_eq!(std::fs::read(local.path()).unwrap(), before);
+}
+
+#[test]
+fn a_draft_pr_is_skipped_by_the_merge_pass() {
+    let w = world("draft");
+    let mut draft = pr(30, Some(HEAD), "success", &[3]);
+    draft.draft = true;
+    let ready = pr(31, Some(HEAD), "success", &[4]);
+    let snaps = [snap("iannitram/demo", vec![draft, ready])];
+    // Ruling 7: not tried, not refused, nothing in Waiting; the dry run agrees.
+    assert_eq!(
+        merge_would(&snaps, &w.dev),
+        [("iannitram/demo".to_string(), vec![31], vec![4])]
+    );
+    let (pass, _) = run_pass(&w, &snaps);
+    assert_eq!(pass.refused, []);
+    assert_eq!(
+        pass.merged,
+        [("iannitram/demo".to_string(), vec![31], vec![4])]
+    );
+    let mut tried: Vec<String> = calls(&w.stub_dir)
+        .iter()
+        .map(|args| args[args.iter().position(|a| a == "--pr").unwrap() + 1].clone())
+        .collect();
+    tried.dedup();
+    assert_eq!(tried, ["31"]);
+}
+
+#[test]
+fn the_poll_reads_whether_a_pr_is_a_draft() {
+    assert!(REPO_QUERY.contains("isDraft"));
+    let data = json!({ "repository": { "pullRequests": { "nodes": [
+        { "number": 1, "state": "OPEN", "isDraft": true },
+        { "number": 2, "state": "OPEN", "isDraft": false },
+        { "number": 3, "state": "OPEN" }
+    ] } } });
+    let s = parse_repo("o/r", &data, 0).unwrap();
+    let drafts: Vec<bool> = s.pulls.iter().map(|p| p.draft).collect();
+    assert_eq!(drafts, [true, false, false]);
 }
 
 #[test]

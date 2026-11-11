@@ -17,6 +17,7 @@ fn verdict(v: &str, sha: &str) -> ReviewVerdict {
 
 fn pr(verdicts: Vec<ReviewVerdict>, ci: &str) -> PullRequest {
     PullRequest {
+        draft: false,
         number: 61,
         title: "Merge gate".to_string(),
         state: "open".to_string(),

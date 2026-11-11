@@ -156,6 +156,7 @@ impl GitHubTransport for FakeGitHub {
 /// yet, PR 8 with a PASS on its head and green CI, and a ROADMAP.md.
 fn demo() -> RepoSnapshot {
     let pr = |number: u64, passed: bool| PullRequest {
+        draft: false,
         number,
         title: format!("PR {number}"),
         state: "open".into(),
@@ -333,6 +334,26 @@ fn the_merge_pass_merges_what_passed_and_a_dry_run_says_which() {
         "{merges:?}"
     );
     assert_eq!(*github.reads.lock().unwrap(), ["iannitram/demo"]);
+}
+
+/// #432 (ruling 6): the merge pass takes out of Waiting the item of a refused PR it has now
+/// merged; a dry run leaves it.
+#[test]
+fn the_merge_pass_clears_the_waiting_item_of_a_pr_it_merges() {
+    use switchboard_core::autopilot::passes::{record_refused_merges, RefusedMerge};
+    use switchboard_core::waiting::LocalItems;
+    let w = demo_world("merge-clears");
+    let refused = RefusedMerge {
+        repo: "iannitram/demo".into(),
+        pr: 8,
+        why: "branch is behind main".into(),
+    };
+    record_refused_merges(&w.data, &[refused], 50).unwrap();
+    let local = LocalItems::new(&w.data);
+    let (_, real, _, _) = dry_then_real(&w, Pass::Merge);
+    assert_eq!(real.merged[0].prs, [8], "{real:?}");
+    assert!(!real.failed(), "{real:?}");
+    assert!(local.load().unwrap().is_empty());
 }
 
 #[test]
