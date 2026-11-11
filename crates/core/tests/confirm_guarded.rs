@@ -10,8 +10,8 @@ use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use switchboard_core::backup::{Created, IssuesReport, Made, Pass, RestoreReport};
 use switchboard_core::confirm::{
-    confirm_into_with, drop_request, drop_requests_for, guarded_request, Actions, Done, Dropped,
-    HeldRecords, HELD_ACTION,
+    confirm_into_with, drop_request, drop_requests_for, guarded_request, request_text_for, Actions,
+    Done, Dropped, HeldRecords, HELD_ACTION,
 };
 use switchboard_core::github::archive::Archived;
 use switchboard_core::rules::{Caller, Face, GuardedAction, Role};
@@ -1033,4 +1033,99 @@ fn what_a_restore_into_a_new_repo_held_back_is_done_in_that_repo() {
     );
     assert!(run.calls.borrow().is_empty(), "nothing over the live repo");
     assert_eq!(HeldRecords::new(&data).get(&text).unwrap(), None);
+}
+
+/// #426: the CLI confirms a restore into a new private repo with the repo's name typed and no
+/// role; the same typed-name guard as the app, and nothing else of the app's confirms.
+#[test]
+fn the_cli_confirms_a_restore_into_a_new_repo_with_the_name_typed() {
+    let (data, before) = seeded("cli-new");
+    let run = Restore::answering(Ok(report()));
+    let text = text_of(&asked(&restore()));
+    let cli = |role| caller(Face::Cli, role, false, true);
+    // A role, a worktree, no typed name, a bad new name: refused, nothing runs, nothing changes.
+    for who in [
+        cli(Some(Role::ProjectManager)),
+        caller(Face::Cli, None, true, true),
+        caller(Face::Cli, None, false, false),
+    ] {
+        refused(run.run_into(&data, &text, REPO, Some(NEW), &who));
+    }
+    for typed in ["", NEW, "owner/alph", "Owner/Alpha"] {
+        let why = refused(run.run_into(&data, &text, typed, Some(NEW), &cli(None)));
+        assert!(why.contains("type owner/alpha to confirm"), "{why}");
+    }
+    let why = refused(run.run_into(&data, &text, REPO, Some(REPO), &cli(None)));
+    assert!(why.contains("is the repo itself"), "{why}");
+    // Over the live repo, and an archive, stay the app's.
+    let why = refused(run.run_into(&data, &text, REPO, None, &cli(None)));
+    assert!(why.contains("needs a confirm in the app"), "{why}");
+    let why = refused(run.run_into(&data, &text_of(&asked(&delete())), REPO, None, &cli(None)));
+    assert!(why.contains("needs a confirm in the app"), "{why}");
+    let why = refused(run.run_into(
+        &data,
+        &text_of(&asked(&delete())),
+        REPO,
+        Some(NEW),
+        &cli(None),
+    ));
+    assert!(why.contains("needs a confirm in the app"), "{why}");
+    assert!(run.idle());
+    unchanged(&data, &before);
+
+    let done = run
+        .run_into(&data, &text, REPO, Some(NEW), &cli(None))
+        .unwrap();
+    assert_eq!(
+        *run.news.borrow(),
+        vec![(REPO.to_string(), NEW.to_string(), Pass::Whole)]
+    );
+    assert!(run.calls.borrow().is_empty(), "nothing over the live repo");
+    assert!(done.cleared);
+    assert_eq!(
+        LocalItems::new(&data).load().unwrap(),
+        vec![asked(&delete())]
+    );
+}
+
+/// What such a restore held back is finished from the CLI too, in the repo the record names.
+#[test]
+fn the_cli_finishes_what_a_restore_into_a_new_repo_held_back() {
+    let (data, _) = seeded("cli-new-held");
+    let mut held = report();
+    held.issues.comments_waiting = 2;
+    let run = Restore::answering(Ok(held));
+    let text = text_of(&asked(&restore()));
+    let cli = caller(Face::Cli, None, false, true);
+    assert!(
+        !run.run_into(&data, &text, REPO, Some(NEW), &cli)
+            .unwrap()
+            .cleared
+    );
+    *run.report.borrow_mut() = Ok(RestoreReport::default());
+    let done = run.run(&data, &text, &cli).unwrap();
+    assert!(done.cleared);
+    assert_eq!(run.news.borrow().len(), 2);
+    assert!(run.calls.borrow().is_empty());
+}
+
+/// The CLI finds the request by what it asks, whichever face filed it.
+#[test]
+fn a_waiting_request_is_found_by_what_it_asks() {
+    let (data, _) = seeded("by-action");
+    assert_eq!(
+        request_text_for(&data, &restore()).unwrap(),
+        Some(text_of(&asked(&restore())))
+    );
+    let other = GuardedAction::RestoreOverLive {
+        repo: "OWNER/Alpha".into(),
+    };
+    assert_eq!(
+        request_text_for(&data, &other).unwrap(),
+        Some(text_of(&asked(&restore())))
+    );
+    let nothing = GuardedAction::RestoreOverLive {
+        repo: "owner/beta".into(),
+    };
+    assert_eq!(request_text_for(&data, &nothing).unwrap(), None);
 }

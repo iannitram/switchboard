@@ -6,8 +6,8 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use switchboard_core::backup::{
-    restore_history_from, restore_to_new_from, write_json, FileSource, Made, Pass, RecordedAnswers,
-    Remote, RestoreReport,
+    restore_history_from, restore_to_new_from, restore_to_new_marked_from, write_json, FileSource,
+    Made, Marks, Pass, RecordedAnswers, Remote, RestoreReport,
 };
 use switchboard_core::fleet::FleetBridge;
 use switchboard_core::github::transport::{Recorded, RestAnswer};
@@ -864,4 +864,262 @@ fn the_held_pass_of_a_restore_to_a_new_repo_queues_no_issue() {
     .unwrap();
     assert_eq!(report.issues.issues, 0);
     assert_eq!(queued(&f), Vec::<Value>::new());
+}
+
+/// #426: a restore to a new repo as the confirm runs it, with the repo it makes recorded under
+/// `data`.
+fn marked(
+    f: &Fixture,
+    data: &Path,
+    api: &Recorded,
+    from: &str,
+) -> Result<RestoreReport, CoreError> {
+    restore_to_new_marked_from(
+        &who(Face::Gui, false),
+        &f.fleet,
+        &f.backup,
+        (from, NEW),
+        true,
+        &Pass::Whole,
+        &remote(f, api),
+        Some(&Marks::new(data)),
+    )
+}
+
+fn repo_creates(f: &Fixture) -> usize {
+    queued(f)
+        .iter()
+        .filter(|item| item["kind"] == "repo")
+        .count()
+}
+
+/// #426: the repo Switchboard made is recorded, a failure after that leaves the record, and the
+/// retry into that same repo finishes only what did not finish: no second repo, no ref pushed
+/// again, no label queued again. The record is gone once it got through.
+#[test]
+fn a_retry_into_the_repo_switchboard_made_finishes_the_restore_and_clears_the_record() {
+    let f = fixture("to-new-resume");
+    let data = scratch("to-new-resume-data");
+    let marks = Marks::new(&data);
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            answer(404, json!({"message": "Not Found"})),
+            answer(200, json!({"full_name": NEW, "private": true, "id": 7})),
+            answer(502, json!({"message": "Bad Gateway"})),
+        ],
+    );
+    assert!(marked(&f, &data, &api, "owner/demo").is_err());
+    let mark = marks.get(NEW).unwrap().expect("the made repo is recorded");
+    assert_eq!(mark.from, "owner/demo");
+    assert_eq!(mark.done, vec!["refs".to_string(), "labels".to_string()]);
+    let creates = queued(&f).len();
+    let pushed = refs_of(&f.target, "refs");
+    assert!(!pushed.is_empty());
+
+    // The retry: GitHub has the repo (private), and the issues read now.
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            answer(200, json!({"full_name": NEW, "private": true, "id": 7})),
+            answer(200, json!([])),
+        ],
+    );
+    let report = marked(&f, &data, &api, "owner/demo").unwrap();
+    assert_eq!((report.refs, report.labels, report.milestones), (0, 0, 0));
+    assert_eq!(report.made.into.as_deref(), Some(NEW));
+    assert_eq!(queued(&f).len(), creates, "nothing was queued again");
+    assert_eq!(repo_creates(&f), 1);
+    assert_eq!(refs_of(&f.target, "refs"), pushed);
+    assert_eq!(marks.get(NEW).unwrap(), None, "the record is cleared");
+    assert!(!data.join("waiting").join("new-repo-restores.json").exists());
+}
+
+/// #426: a retry runs only the steps not recorded as done: the refs went, the labels did not.
+#[test]
+fn a_retry_runs_only_the_steps_that_did_not_finish() {
+    let f = fixture("to-new-resume-steps");
+    let data = scratch("to-new-resume-steps-data");
+    // The queue fails the labels, after the repo and the refs went.
+    std::fs::write(f.stub.join("fail"), "label").unwrap();
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            answer(404, json!({})),
+            answer(200, json!({"full_name": NEW, "private": true, "id": 7})),
+        ],
+    );
+    assert!(marked(&f, &data, &api, "owner/demo").is_err());
+    let mark = Marks::new(&data).get(NEW).unwrap().unwrap();
+    assert_eq!(mark.done, vec!["refs".to_string()]);
+    let pushed = refs_of(&f.target, "refs");
+
+    std::fs::write(f.stub.join("fail"), "").unwrap();
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            answer(200, json!({"full_name": NEW, "private": true, "id": 7})),
+            answer(200, json!([])),
+        ],
+    );
+    let report = marked(&f, &data, &api, "owner/demo").unwrap();
+    assert_eq!((report.refs, report.labels, report.milestones), (0, 2, 1));
+    assert_eq!(repo_creates(&f), 1);
+    assert_eq!(refs_of(&f.target, "refs"), pushed);
+    assert_eq!(Marks::new(&data).get(NEW).unwrap(), None);
+}
+
+/// #426: any other repo that exists is still refused: one Switchboard did not make, and one it
+/// made for another repo's backup. Nothing is queued, pushed or recorded.
+#[test]
+fn any_other_existing_repo_is_still_refused_with_the_same_message() {
+    let f = fixture("to-new-resume-refused");
+    let data = scratch("to-new-resume-refused-data");
+    let there = || {
+        Recorded::new(
+            Vec::new(),
+            vec![answer(
+                200,
+                json!({"full_name": NEW, "private": true, "id": 7}),
+            )],
+        )
+    };
+    // No record at all: a pre-existing repo.
+    match marked(&f, &data, &there(), "owner/demo") {
+        Err(CoreError::Refused(why)) => assert_eq!(
+            why,
+            format!("{NEW} already exists; restore goes to a new repo only")
+        ),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    // A record made for another repo's restore.
+    std::fs::create_dir_all(data.join("waiting")).unwrap();
+    std::fs::write(
+        data.join("waiting").join("new-repo-restores.json"),
+        json!({ NEW: {"from": "owner/else", "id": 7, "done": ["refs"]} }).to_string(),
+    )
+    .unwrap();
+    match marked(&f, &data, &there(), "owner/demo") {
+        Err(CoreError::Refused(why)) => assert!(why.contains("already exists"), "{why}"),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    assert!(queued(&f).is_empty());
+    assert!(refs_of(&f.target, "refs").is_empty());
+    assert!(!f.stub.join("calls.log").exists(), "no fleet call at all");
+}
+
+/// #426: a record of a repo that is gone from GitHub says nothing: the restore makes a new one.
+#[test]
+fn a_record_of_a_repo_that_is_gone_starts_the_restore_over() {
+    let f = fixture("to-new-resume-gone");
+    let data = scratch("to-new-resume-gone-data");
+    std::fs::create_dir_all(data.join("waiting")).unwrap();
+    std::fs::write(
+        data.join("waiting").join("new-repo-restores.json"),
+        json!({ NEW: {"from": "owner/demo", "id": 7, "done": ["refs", "labels"]} }).to_string(),
+    )
+    .unwrap();
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            answer(404, json!({})),
+            answer(200, json!({"full_name": NEW, "private": true, "id": 7})),
+            answer(200, json!([])),
+        ],
+    );
+    let report = marked(&f, &data, &api, "owner/demo").unwrap();
+    assert_eq!((report.refs, report.labels, report.milestones), (3, 2, 1));
+    assert_eq!(repo_creates(&f), 1);
+    assert_eq!(Marks::new(&data).get(NEW).unwrap(), None);
+}
+
+/// A restore that gets through at once leaves no record behind.
+#[test]
+fn a_restore_that_gets_through_leaves_no_record() {
+    let f = fixture("to-new-no-record");
+    let data = scratch("to-new-no-record-data");
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            answer(404, json!({})),
+            answer(200, json!({"full_name": NEW, "private": true, "id": 7})),
+            answer(200, json!([])),
+        ],
+    );
+    marked(&f, &data, &api, "owner/demo").unwrap();
+    assert_eq!(Marks::new(&data).get(NEW).unwrap(), None);
+    assert!(!data.join("waiting").join("new-repo-restores.json").exists());
+}
+
+/// #426: a record names the repo Switchboard made by its GitHub id, not by its name. The same
+/// name made again by someone else (another id), or Switchboard's repo made public since, is
+/// refused: nothing is queued, pushed or recorded, and the record stays as it was.
+#[test]
+fn a_record_finishes_only_the_private_repo_with_the_id_it_made() {
+    let f = fixture("to-new-resume-id");
+    let data = scratch("to-new-resume-id-data");
+    let file = data.join("waiting").join("new-repo-restores.json");
+    std::fs::create_dir_all(data.join("waiting")).unwrap();
+    let record = json!({ NEW: {"from": "owner/demo", "id": 7, "done": ["refs"]} }).to_string();
+    std::fs::write(&file, &record).unwrap();
+    let there = |body: Value| Recorded::new(Vec::new(), vec![answer(200, body)]);
+    let other = there(json!({"full_name": NEW, "private": true, "id": 8}));
+    match marked(&f, &data, &other, "owner/demo") {
+        Err(CoreError::Refused(why)) => assert_eq!(
+            why,
+            format!("{NEW} already exists; restore goes to a new repo only")
+        ),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    let public = there(json!({"full_name": NEW, "private": false, "id": 7}));
+    match marked(&f, &data, &public, "owner/demo") {
+        Err(CoreError::Refused(why)) => assert!(why.contains("not private"), "{why}"),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    assert!(queued(&f).is_empty());
+    assert!(refs_of(&f.target, "refs").is_empty());
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), record);
+}
+
+/// #426: the record is found whatever case the new repo's name is typed in.
+#[test]
+fn a_retry_finds_the_record_whatever_the_case_of_the_name() {
+    let f = fixture("to-new-resume-case");
+    let data = scratch("to-new-resume-case-data");
+    std::fs::create_dir_all(data.join("waiting")).unwrap();
+    std::fs::write(
+        data.join("waiting").join("new-repo-restores.json"),
+        format!(
+            r#"{{"{}": {{"from": "OWNER/Demo", "id": 7, "done": ["refs", "labels"]}}}}"#,
+            NEW.to_uppercase()
+        ),
+    )
+    .unwrap();
+    assert!(
+        Marks::new(&data).get(NEW).unwrap().is_none(),
+        "keys are lower case"
+    );
+    std::fs::write(
+        data.join("waiting").join("new-repo-restores.json"),
+        format!(
+            r#"{{"{}": {{"from": "OWNER/Demo", "id": 7, "done": ["refs", "labels"]}}}}"#,
+            NEW.to_lowercase()
+        ),
+    )
+    .unwrap();
+    assert!(Marks::new(&data)
+        .get(&NEW.to_uppercase())
+        .unwrap()
+        .is_some());
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            answer(200, json!({"full_name": NEW, "private": true, "id": 7})),
+            answer(200, json!([])),
+        ],
+    );
+    let report = marked(&f, &data, &api, "owner/demo").unwrap();
+    assert_eq!((report.refs, report.labels), (0, 0));
+    assert!(queued(&f).is_empty());
+    assert_eq!(Marks::new(&data).get(NEW).unwrap(), None);
 }

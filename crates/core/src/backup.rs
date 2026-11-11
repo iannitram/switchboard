@@ -1153,6 +1153,20 @@ pub fn restore_history_from(
     new_repo: &str,
     remote: &Remote<'_>,
 ) -> Result<RestoreReport, CoreError> {
+    restore_history_tracked(fleet, backup_dir, new_repo, remote, None)
+}
+
+/// `restore_history_from`, and with `track` (#426) the repo it creates is recorded the moment
+/// the queue made it, each step that finishes is recorded, and a repo that is there already is
+/// finished instead of refused when the record says Switchboard made it for this restore: only
+/// the steps not recorded as done run.
+fn restore_history_tracked(
+    fleet: &FleetBridge,
+    backup_dir: &Path,
+    new_repo: &str,
+    remote: &Remote<'_>,
+    track: Option<&Track<'_>>,
+) -> Result<RestoreReport, CoreError> {
     let (owner, name) = split_repo(new_repo)?;
     let backup = read_backup(backup_dir)?;
     let creates: Vec<Create> = label_creates(&backup, new_repo)
@@ -1163,9 +1177,10 @@ pub fn restore_history_from(
     let work = work_dir(owner, name);
     let restored = clone_mirror(remote, &backup.bundle.to_string_lossy(), &work)
         .and_then(|()| check_refs(&work, &backup))
-        .and_then(|()| restore_into(fleet, &work, new_repo, remote, &creates));
+        .and_then(|()| restore_into(fleet, &work, new_repo, remote, &creates, track));
     let _ = std::fs::remove_dir_all(&work);
-    let refs = restored?;
+    let ran = restored?;
+    let refs = ran.refs;
     let mut left_out = left_out(&backup);
     let closed = backup
         .milestones
@@ -1180,58 +1195,268 @@ pub fn restore_history_from(
     }
     Ok(RestoreReport {
         refs,
-        labels: backup.labels.len() as u64,
-        milestones: backup.milestones.len() as u64,
+        labels: if ran.labels {
+            backup.labels.len() as u64
+        } else {
+            0
+        },
+        milestones: if ran.labels {
+            backup.milestones.len() as u64
+        } else {
+            0
+        },
         issues: IssuesReport::default(),
         left_out,
         made: Made::default(),
     })
 }
 
-/// The writes of `restore_history_from`, the bundle already cloned into `work`; returns how many
-/// refs it pushed.
+/// What `restore_into` did: the refs it pushed, and whether it sent the labels and milestones
+/// (a finished retry skips the steps already done).
+struct Ran {
+    refs: u64,
+    labels: bool,
+}
+
+/// The step of a restore to a new repo that pushes the refs, as `Mark::done` names it.
+const STEP_REFS: &str = "refs";
+/// The step that queues the labels and milestones.
+const STEP_LABELS: &str = "labels";
+
+/// The writes of `restore_history_from`, the bundle already cloned into `work`.
 fn restore_into(
     fleet: &FleetBridge,
     work: &Path,
     new_repo: &str,
     remote: &Remote<'_>,
     creates: &[Create],
-) -> Result<u64, CoreError> {
+    track: Option<&Track<'_>>,
+) -> Result<Ran, CoreError> {
     let taken = format!("{new_repo} already exists; restore goes to a new repo only");
     let path = format!("/repos/{new_repo}");
-    match remote.api.rest_get(&path, None)?.status {
-        404 => {}
-        200 => return Err(CoreError::Refused(taken)),
+    let there = remote.api.rest_get(&path, None)?;
+    // #426: the repo Switchboard made for this restore and did not finish is finished, never
+    // any other repo that is there.
+    let mut resume: Option<Mark> = None;
+    match there.status {
+        404 => {
+            if let Some(track) = track {
+                // A record of a repo that is gone says nothing: start over.
+                track.marks.clear(new_repo)?;
+            }
+        }
+        200 => match track.and_then(|t| t.marks.get(new_repo).transpose()) {
+            // The same name is not the same repo: one deleted or renamed away and made again by
+            // someone else has another GitHub id, and is refused like any other.
+            Some(Ok(mark))
+                if track.is_some_and(|t| mark.made_for(t.from))
+                    && there.body["id"].as_u64() == Some(mark.id) =>
+            {
+                if there.body["private"] != Value::Bool(true) {
+                    return Err(CoreError::Refused(format!(
+                        "{new_repo} is not private any more; it is not finished by a restore"
+                    )));
+                }
+                resume = Some(mark);
+            }
+            Some(Err(e)) => return Err(e),
+            _ => return Err(CoreError::Refused(taken)),
+        },
         other => return Err(CoreError::GitHub(format!("GET {path}: status {other}"))),
     }
-    let before = queue_counts(fleet)?;
-    let made = queue::send(
-        fleet,
-        &[Create::Repo {
-            repo: new_repo.to_string(),
-            private: true,
-        }],
-    )?;
-    if made.exists > before.exists {
-        return Err(CoreError::Refused(taken));
+    let base = match &resume {
+        Some(_) => queue_counts(fleet)?,
+        None => {
+            let before = queue_counts(fleet)?;
+            let made = queue::send(
+                fleet,
+                &[Create::Repo {
+                    repo: new_repo.to_string(),
+                    private: true,
+                }],
+            )?;
+            if made.exists > before.exists {
+                return Err(CoreError::Refused(taken));
+            }
+            if made.failed > before.failed || made.pending > before.pending {
+                return Err(CoreError::GitHub(format!(
+                    "{new_repo}: the create queue did not create the repo (pending {}, failed {})",
+                    made.pending, made.failed
+                )));
+            }
+            let answer = remote.api.rest_get(&path, None)?;
+            if answer.status != 200 || answer.body["private"] != Value::Bool(true) {
+                return Err(CoreError::GitHub(format!(
+                    "{new_repo}: not there as a private repo after the create (status {})",
+                    answer.status
+                )));
+            }
+            // Written before anything is pushed: the repo with this GitHub id is Switchboard's
+            // own from here on. Without an id there is nothing to tie a retry to: none is made.
+            if let Some(track) = track {
+                let Some(id) = answer.body["id"].as_u64() else {
+                    return Err(CoreError::GitHub(format!(
+                        "{new_repo}: GitHub gave no id for the repo it made"
+                    )));
+                };
+                track.marks.begin(new_repo, track.from, id)?;
+            }
+            made
+        }
+    };
+    let done = |step: &str| {
+        resume
+            .as_ref()
+            .is_some_and(|m| m.done.iter().any(|d| d == step))
+    };
+    let mut refs = 0;
+    if !done(STEP_REFS) {
+        refs = push_refs(remote, work, new_repo).map_err(|e| about(new_repo, e))?;
+        if let Some(track) = track {
+            track.marks.finished(new_repo, STEP_REFS)?;
+        }
     }
-    if made.failed > before.failed || made.pending > before.pending {
-        return Err(CoreError::GitHub(format!(
-            "{new_repo}: the create queue did not create the repo (pending {}, failed {})",
-            made.pending, made.failed
-        )));
+    let labels = !done(STEP_LABELS);
+    if labels {
+        queue_labels(fleet, new_repo, creates, &base)?;
+        if let Some(track) = track {
+            track.marks.finished(new_repo, STEP_LABELS)?;
+        }
     }
-    let answer = remote.api.rest_get(&path, None)?;
-    if answer.status != 200 || answer.body["private"] != Value::Bool(true) {
-        return Err(CoreError::GitHub(format!(
-            "{new_repo}: not there as a private repo after the create (status {})",
-            answer.status
-        )));
+    Ok(Ran { refs, labels })
+}
+
+/// #426: what a restore to a new repo needs to record what it made: where, and for which repo's
+/// backup.
+struct Track<'a> {
+    marks: &'a Marks,
+    /// The repo whose backup is restored (`owner/name`).
+    from: &'a str,
+}
+
+/// #426: a new private repo a restore made, and the steps of that restore that finished.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Mark {
+    /// The repo whose backup the restore is of.
+    pub from: String,
+    /// The GitHub id of the repo made: a retry finishes that repo, not another one of its name.
+    pub id: u64,
+    /// Steps finished so far: `refs`, `labels`.
+    pub done: Vec<String>,
+}
+
+impl Mark {
+    fn made_for(&self, repo: &str) -> bool {
+        self.from.eq_ignore_ascii_case(repo)
+    }
+}
+
+/// How long a change to the record of new repos waits for another one to finish.
+const MARKS_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// #426: the new repos Switchboard itself made for a restore and has not finished, by the new
+/// repo's name in lower case, in `<data>/waiting/new-repo-restores.json`. A retry of a restore
+/// is allowed into a repo that is here and into no other one that exists; the record goes when
+/// the restore is through (`restore_to_new_marked_from`).
+pub struct Marks {
+    path: PathBuf,
+}
+
+impl Marks {
+    pub fn new(data_dir: &Path) -> Self {
+        Self {
+            path: data_dir.join("waiting").join("new-repo-restores.json"),
+        }
     }
 
-    let refs = push_refs(remote, work, new_repo).map_err(|e| about(new_repo, e))?;
-    queue_labels(fleet, new_repo, creates, &made)?;
-    Ok(refs)
+    fn load(&self) -> Result<BTreeMap<String, Mark>, CoreError> {
+        let text = match std::fs::read_to_string(&self.path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+            Err(e) => return Err(CoreError::Io(format!("{}: {e}", self.path.display()))),
+        };
+        serde_json::from_str(&text)
+            .map_err(|e| CoreError::Parse(format!("{}: {e}", self.path.display())))
+    }
+
+    /// The record of `new_repo`, `None` when Switchboard made none.
+    pub fn get(&self, new_repo: &str) -> Result<Option<Mark>, CoreError> {
+        Ok(self.load()?.remove(&new_repo.to_lowercase()))
+    }
+
+    fn save(&self, all: &BTreeMap<String, Mark>) -> Result<(), CoreError> {
+        let io = |e: std::io::Error| CoreError::Io(format!("{}: {e}", self.path.display()));
+        if all.is_empty() {
+            return match std::fs::remove_file(&self.path) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(io(e)),
+                _ => Ok(()),
+            };
+        }
+        if let Some(dir) = self.path.parent() {
+            std::fs::create_dir_all(dir).map_err(io)?;
+        }
+        let mut body = serde_json::to_string_pretty(all)
+            .map_err(|e| CoreError::Parse(format!("{}: {e}", self.path.display())))?;
+        body.push('\n');
+        let tmp = crate::lock::temp_path(&self.path, ".tmp");
+        std::fs::write(&tmp, body).map_err(io)?;
+        std::fs::rename(&tmp, &self.path).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            io(e)
+        })
+    }
+
+    /// Reads the record, lets `change` change it and writes it back, holding the record's lock
+    /// the whole time (#416): two restores at once never lose each other's marks.
+    fn change(&self, change: impl FnOnce(&mut BTreeMap<String, Mark>)) -> Result<(), CoreError> {
+        if let Some(dir) = self.path.parent() {
+            std::fs::create_dir_all(dir)
+                .map_err(|e| CoreError::Io(format!("{}: {e}", self.path.display())))?;
+        }
+        let _lock = crate::lock::FileLock::take(&self.path, MARKS_LOCK_WAIT)?;
+        let mut all = self.load()?;
+        let before = all.clone();
+        change(&mut all);
+        if all == before {
+            return Ok(());
+        }
+        self.save(&all)
+    }
+
+    /// Records that Switchboard made `new_repo` for a restore of `from`'s backup.
+    fn begin(&self, new_repo: &str, from: &str, id: u64) -> Result<(), CoreError> {
+        self.change(|all| {
+            all.insert(
+                new_repo.to_lowercase(),
+                Mark {
+                    from: from.to_string(),
+                    id,
+                    done: Vec::new(),
+                },
+            );
+        })
+    }
+
+    /// Records that `step` of the restore into `new_repo` finished.
+    fn finished(&self, new_repo: &str, step: &str) -> Result<(), CoreError> {
+        self.change(|all| {
+            if let Some(mark) = all.get_mut(&new_repo.to_lowercase()) {
+                if !mark.done.iter().any(|d| d == step) {
+                    mark.done.push(step.to_string());
+                }
+            }
+        })
+    }
+
+    /// Drops the record of `new_repo`; none is no change.
+    fn clear(&self, new_repo: &str) -> Result<(), CoreError> {
+        if self.get(new_repo)?.is_none() {
+            return Ok(());
+        }
+        self.change(|all| {
+            all.remove(&new_repo.to_lowercase());
+        })
+    }
 }
 
 /// A backup folder read and checked against its manifest, before a restore writes anything.
@@ -2271,8 +2496,22 @@ fn confirmed_restore(caller: &Caller, repo: &str, confirmed: bool) -> Result<(),
     split_repo(repo).map(|_| ())
 }
 
+/// The guarded confirm of a restore of `repo`'s backup into a new private repo (#426):
+/// `rules::guard_restore_new` allows it for `caller`, `confirmed` is set and `repo` is an
+/// `owner/name`. Nothing is read or written.
+fn confirmed_restore_new(caller: &Caller, repo: &str, confirmed: bool) -> Result<(), CoreError> {
+    rules::guard_restore_new(caller, repo).into_result()?;
+    if !confirmed {
+        return Err(CoreError::Refused(format!(
+            "restore over {repo}: needs a confirm in the app"
+        )));
+    }
+    split_repo(repo).map(|_| ())
+}
+
 /// BAK-3 (#347): restore `repo`'s backup in `backup_dir` to the new private repo `new_repo`, as
-/// `restore_to_new_from` does, against GitHub.
+/// `restore_to_new_marked_from` does, against GitHub. `marks` (#426) keeps what the restore made
+/// on disk so a retry can finish it.
 pub fn restore_to_new(
     caller: &Caller,
     fleet: &FleetBridge,
@@ -2280,21 +2519,17 @@ pub fn restore_to_new(
     names: (&str, &str),
     confirmed: bool,
     pass: &Pass,
+    marks: Option<&Marks>,
 ) -> Result<RestoreReport, CoreError> {
     with_github(|remote| {
-        restore_to_new_from(caller, fleet, backup_dir, names, confirmed, pass, remote)
+        restore_to_new_marked_from(
+            caller, fleet, backup_dir, names, confirmed, pass, remote, marks,
+        )
     })
 }
 
-/// `restore_to_new` against `remote`; `names` is `(repo, new_repo)`, each `owner/name`. It
-/// needs the same guarded confirm as a restore over the live repo (`rules::guard` allows
-/// `RestoreOverLive` on `repo` for `caller`, and `confirmed` is set), and `new_repo` must be
-/// another name than `repo`. Then `Pass::Whole` is `restore_history_from` (the repo is created
-/// private through the create queue; a name that is there already is `Refused` before anything
-/// is queued or pushed) followed by `restore_issues` on the new repo. `Pass::Held` is the held
-/// pass of `restore_issues` alone, for what the first pass held back: no repo is created, no
-/// ref pushed and no issue queued. The live repo `repo` is never read or written. The report's `made.into` names the
-/// new repo.
+/// `restore_to_new_marked_from` with nothing recorded: a name that is there already is always
+/// refused.
 pub fn restore_to_new_from(
     caller: &Caller,
     fleet: &FleetBridge,
@@ -2304,8 +2539,40 @@ pub fn restore_to_new_from(
     pass: &Pass,
     remote: &Remote<'_>,
 ) -> Result<RestoreReport, CoreError> {
+    restore_to_new_marked_from(
+        caller, fleet, backup_dir, names, confirmed, pass, remote, None,
+    )
+}
+
+/// `restore_to_new` against `remote`; `names` is `(repo, new_repo)`, each `owner/name`. It
+/// needs `rules::guard_restore_new` to allow it for `caller` (the app's confirm, or the CLI's
+/// typed name, never a role) and `confirmed` to be set, and `new_repo` must be
+/// another name than `repo`. Then `Pass::Whole` is `restore_history_from` (the repo is created
+/// private through the create queue; a name that is there already is `Refused` before anything
+/// is queued or pushed) followed by `restore_issues` on the new repo. `Pass::Held` is the held
+/// pass of `restore_issues` alone, for what the first pass held back: no repo is created, no
+/// ref pushed and no issue queued. The live repo `repo` is never read or written. The report's `made.into` names the
+/// new repo.
+///
+/// With `marks` (#426) the repo the queue made is recorded at once, and each step that finishes
+/// (the refs, the labels and milestones). A whole pass that stops after the repo was made leaves
+/// the record; its retry into that same repo finishes it, running only the steps not recorded
+/// (the issues are matched by title, so none is made twice). Any other name that exists is still
+/// refused, and so is a record made for another repo's backup. The record goes when the whole
+/// pass got through.
+#[allow(clippy::too_many_arguments)]
+pub fn restore_to_new_marked_from(
+    caller: &Caller,
+    fleet: &FleetBridge,
+    backup_dir: &Path,
+    names: (&str, &str),
+    confirmed: bool,
+    pass: &Pass,
+    remote: &Remote<'_>,
+    marks: Option<&Marks>,
+) -> Result<RestoreReport, CoreError> {
     let (repo, new_repo) = names;
-    confirmed_restore(caller, repo, confirmed)?;
+    confirmed_restore_new(caller, repo, confirmed)?;
     split_repo(new_repo)?;
     if new_repo.eq_ignore_ascii_case(repo) {
         return Err(CoreError::Refused(format!(
@@ -2313,7 +2580,10 @@ pub fn restore_to_new_from(
         )));
     }
     let mut report = match pass {
-        Pass::Whole => restore_history_from(fleet, backup_dir, new_repo, remote)?,
+        Pass::Whole => {
+            let track = marks.map(|marks| Track { marks, from: repo });
+            restore_history_tracked(fleet, backup_dir, new_repo, remote, track.as_ref())?
+        }
         Pass::Held(_) => RestoreReport::default(),
     };
     // The held pass queues no issue: a second confirm does only what was held back (CORE-3).
@@ -2323,11 +2593,14 @@ pub fn restore_to_new_from(
             match pass {
                 Pass::Whole => CoreError::GitHub(format!(
                     "{new_repo} was created and the history pushed, but its issues were not \
-                 restored: {e}"
+                 restored: {e}; confirm again to finish it in {new_repo}"
                 )),
                 Pass::Held(_) => e,
             }
         })?;
+    if let (Some(marks), true) = (marks, whole) {
+        marks.clear(new_repo)?;
+    }
     report.made.into = Some(new_repo.to_string());
     Ok(report)
 }
@@ -2397,5 +2670,42 @@ mod tests {
         let first = work_dir("owner", "demo");
         let second = work_dir("owner", "demo");
         assert_ne!(first, second);
+    }
+
+    /// #426: restores into new repos at once each keep their record and every step they
+    /// finished: none is lost to another's read-change-write.
+    #[test]
+    fn restores_at_once_keep_every_record_and_step() {
+        let data = std::env::temp_dir().join(format!("marks-at-once-{}", crate::lock::run_tag()));
+        const RESTORES: u64 = 8;
+        let running: Vec<_> = (0..RESTORES)
+            .map(|n| {
+                let data = data.clone();
+                std::thread::spawn(move || {
+                    let marks = Marks::new(&data);
+                    let repo = format!("owner/new-{n}");
+                    marks.begin(&repo, "owner/demo", n).unwrap();
+                    marks.finished(&repo, STEP_REFS).unwrap();
+                    marks.finished(&repo, STEP_LABELS).unwrap();
+                })
+            })
+            .collect();
+        for thread in running {
+            thread.join().unwrap();
+        }
+        let marks = Marks::new(&data);
+        for n in 0..RESTORES {
+            let mark = marks.get(&format!("owner/new-{n}")).unwrap();
+            assert_eq!(
+                mark,
+                Some(Mark {
+                    from: "owner/demo".into(),
+                    id: n,
+                    done: vec![STEP_REFS.into(), STEP_LABELS.into()],
+                }),
+                "owner/new-{n}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&data);
     }
 }

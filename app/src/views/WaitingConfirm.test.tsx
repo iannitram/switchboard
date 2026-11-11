@@ -99,6 +99,8 @@ test("Confirm sends the request's text with confirmed true and the name typed, s
   render(<Waiting />);
   await screen.findAllByRole("article");
   fireEvent.click(screen.getByRole("button", { name: "Confirm in the app" }));
+  // The new-repo box is ticked by default (BAK-3); this is the over-live path.
+  fireEvent.click(screen.getByRole("checkbox", { name: "Restore to a new private repo instead" }));
   type("owner/alpha");
   fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
   const status = await screen.findByRole("status");
@@ -161,13 +163,13 @@ test("Confirm is enabled only while the repo's name is typed letter for letter",
     type(wrong);
     expect(confirmButton().disabled).toBe(true);
     fireEvent.click(confirmButton());
-    fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter", code: "Enter" });
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "Type owner/alpha to confirm" }), { key: "Enter", code: "Enter" });
   }
   expect(confirmCalls()).toEqual([]);
   type("owner/alpha");
   expect(confirmButton().disabled).toBe(false);
   // Enter in the box confirms nothing: only the button does.
-  fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter", code: "Enter" });
+  fireEvent.keyDown(screen.getByRole("textbox", { name: "Type owner/alpha to confirm" }), { key: "Enter", code: "Enter" });
   expect(confirmCalls()).toEqual([]);
 });
 
@@ -248,13 +250,13 @@ test("a drop the core refuses shows its text and the request stays listed", asyn
 const newBox = () => screen.getByRole("checkbox", { name: "Restore to a new private repo instead" }) as HTMLInputElement;
 const newName = () => screen.getByRole("textbox", { name: "New private repo" }) as HTMLInputElement;
 
-test("a restore goes over the live repo unless the new-repo box is ticked, and only a restore has the box", async () => {
+test("a restore goes to a new private repo unless the new-repo box is unticked (BAK-3), and only a restore has the box", async () => {
   core([[GUARDED, GUARDED_DELETE, HELD]], { ok: { what: "", lines: [], cleared: true } });
   render(<Waiting />);
   await screen.findAllByRole("article");
   fireEvent.click(screen.getAllByRole("button", { name: "Confirm in the app" })[0]);
-  expect(newBox().checked).toBe(false);
-  expect(screen.queryByRole("textbox", { name: "New private repo" })).toBeNull();
+  expect(newBox().checked).toBe(true);
+  expect(newName().value).toBe("owner/alpha-restored");
   fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
   fireEvent.click(screen.getAllByRole("button", { name: "Confirm in the app" })[1]);
   expect(screen.queryByRole("checkbox")).toBeNull();
@@ -269,7 +271,7 @@ test("a restore to a new private repo sends its name as into, with the same type
   render(<Waiting />);
   await screen.findAllByRole("article");
   fireEvent.click(screen.getByRole("button", { name: "Confirm in the app" }));
-  fireEvent.click(newBox());
+  expect(newBox().checked).toBe(true);
   expect(newName().value).toBe("owner/alpha-restored");
   const step = screen.getByRole("group", { name: "Confirm" });
   expect(
@@ -302,12 +304,44 @@ test("the new-repo box does not carry over to the next request", async () => {
   await screen.findAllByRole("article");
   fireEvent.click(screen.getByRole("button", { name: "Confirm in the app" }));
   fireEvent.click(newBox());
+  expect(newBox().checked).toBe(false);
+  fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  fireEvent.click(screen.getByRole("button", { name: "Confirm in the app" }));
+  // An untick does not carry over: the box is ticked again, with the default name.
+  expect(newBox().checked).toBe(true);
   fireEvent.change(newName(), { target: { value: "owner/other" } });
   fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
   fireEvent.click(screen.getByRole("button", { name: "Confirm in the app" }));
-  expect(newBox().checked).toBe(false);
+  expect(newName().value).toBe("owner/alpha-restored");
+});
+
+test("unticking the box restores over the live repo and sends no into (BAK-3)", async () => {
+  core([[GUARDED]], { ok: { what: "", lines: [], cleared: true } });
+  render(<Waiting />);
+  await screen.findAllByRole("article");
+  fireEvent.click(screen.getByRole("button", { name: "Confirm in the app" }));
+  fireEvent.click(newBox());
+  expect(screen.queryByRole("textbox", { name: "New private repo" })).toBeNull();
   type("owner/alpha");
   fireEvent.click(confirmButton());
   await screen.findByRole("status");
   expect(confirmCalls()).toEqual([["confirm_guarded", { text: RESTORE, confirmed: true, typed: "owner/alpha" }]]);
+});
+
+test("an old 'to delete' request shows as 'to archive' in the list and the confirm step", async () => {
+  const old = "I was asked from the CLI to delete owner/alpha";
+  const item = { ...GUARDED_DELETE, what: old, source: { GuardedAction: { text: old } } };
+  core([[item]], { ok: { what: "", lines: [], cleared: true } });
+  render(<Waiting />);
+  await screen.findAllByRole("article");
+  expect(screen.queryByText(old)).toBeNull();
+  expect(screen.getByText(DELETE)).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Confirm in the app" }));
+  const step = screen.getByRole("group", { name: "Confirm" });
+  expect(within(step).getByText(DELETE)).toBeTruthy();
+  type("owner/alpha");
+  fireEvent.click(confirmButton());
+  await screen.findByRole("status");
+  // The core still gets the request's own text.
+  expect(confirmCalls()).toEqual([["confirm_guarded", { text: old, confirmed: true, typed: "owner/alpha" }]]);
 });

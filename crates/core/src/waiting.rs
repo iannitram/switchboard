@@ -353,9 +353,24 @@ impl LocalItems {
     }
 }
 
-/// WAIT-1: merge every source's items into one list, newest first; ties by `what`.
+/// #426: an archive request filed before the wording changed says `... to delete <owner/name>`;
+/// it is shown as `... to archive <owner/name>`. Only the shown `what` changes: the request's
+/// source text, which the confirm finds it by, stays as it was filed.
+fn shown(mut item: Item) -> Item {
+    if matches!(item.source, Source::GuardedAction { .. }) {
+        if let Some((head, repo)) = item.what.rsplit_once(" to delete ") {
+            if !repo.is_empty() && !repo.contains(' ') {
+                item.what = format!("{head} to archive {repo}");
+            }
+        }
+    }
+    item
+}
+
+/// WAIT-1: merge every source's items into one list, newest first; ties by `what`. An old
+/// `to delete` request is shown as `to archive` (#426).
 pub fn merge(lists: Vec<Vec<Item>>) -> Vec<Item> {
-    let mut items: Vec<Item> = lists.into_iter().flatten().collect();
+    let mut items: Vec<Item> = lists.into_iter().flatten().map(shown).collect();
     items.sort_by(|a, b| b.since.cmp(&a.since).then_with(|| a.what.cmp(&b.what)));
     items
 }
