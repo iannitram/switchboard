@@ -2,7 +2,8 @@
 //! MCP-1: without a role flag, six read tools only: `sky`, `constellation`, `star`, `waiting`,
 //! `reports`, `budget`, their schemas under about 2,000 tokens together.
 //! MCP-2: with a role flag, that role's write tools, each through CORE-3: project-manager
-//! `merge`; budget-manager `set_pool_cap`, `pool_edit` (plan, cap, reset, cost, #374) and
+//! `merge`, `request_archive`, `request_restore`, `drop_request` (#347: these file or turn down
+//! a Waiting on you request and can never confirm one); budget-manager `set_pool_cap`, `pool_edit` (plan, cap, reset, cost, #374) and
 //! `budget_refresh` (#374), the pool edits through `rules::guard_pool_edit` and
 //! `budget::save_pool_edit`, as the CLI's commands of the same names.
 //! `reports` takes the CLI's `project`, `outcome` and `pool` filters (#358).
@@ -16,9 +17,12 @@ use std::path::PathBuf;
 use serde_json::{json, Value};
 use switchboard_core::budget::{self, PoolEdit};
 use switchboard_core::clock::Clock;
+use switchboard_core::confirm;
+use switchboard_core::error::CoreError;
 use switchboard_core::fleet::FleetBridge;
+use switchboard_core::github::snapshot::SnapshotStore;
 use switchboard_core::rules::{self, Caller, Face, GuardedAction, Role, Verdict};
-use switchboard_core::waiting::{Item, LocalItems, Source};
+use switchboard_core::waiting::{guarded_item, Item, LocalItems, Source};
 
 /// The core behind the tools. `serve` passes a read tool's name and arguments here and returns
 /// the answer as text. The real core is a thin struct in main.rs.
@@ -47,6 +51,28 @@ pub trait WriteCore {
     fn budget_refresh(&self) -> Result<Value, String>;
     /// A guarded request the CLI or MCP may not run becomes a Waiting on you item.
     fn waiting(&self, text: &str) -> Result<(), String>;
+    /// #347: the `owner/name` that `repo` names among the repos Switchboard knows; `Ok(None)`
+    /// when it knows none, an error when it cannot tell. The default knows no repo list.
+    fn full_repo(&self, repo: &str) -> Result<Option<String>, String> {
+        let _ = repo;
+        Err("no repo list here".to_string())
+    }
+    /// #347: file the request for `action` (an archive or a restore over a live repo) as a
+    /// Waiting on you item whose text is `text`. It files only: nothing here confirms.
+    fn request(&self, action: &GuardedAction, text: &str) -> Result<(), String> {
+        let _ = action;
+        self.waiting(text)
+    }
+    /// #347: turn down every waiting request for `action` (`confirm::drop_requests_for`); one
+    /// line for each request dropped, or the refusal text.
+    fn drop_requests(
+        &self,
+        action: &GuardedAction,
+        caller: &Caller,
+    ) -> Result<Vec<String>, String> {
+        let _ = (action, caller);
+        Err("drop_request: no Waiting on you list here".to_string())
+    }
 }
 
 /// MCP-2: the real write core. `merge` is the CLI's merge (CLI-3, #242); `set_pool_cap` is
@@ -117,6 +143,64 @@ impl WriteCore for CoreWrites<'_> {
             .add(item)
             .map_err(|e| format!("waiting: {e}"))
     }
+
+    /// The stored snapshots' repos. A snapshot file that does not read stops the answer: the
+    /// request is never filed from a view that may be missing the repo it names.
+    fn full_repo(&self, repo: &str) -> Result<Option<String>, String> {
+        let data = self.data_dir()?;
+        let (snaps, bad) = SnapshotStore::new(data)
+            .load_each()
+            .map_err(|e| e.to_string())?;
+        if let Some(file) = bad.first() {
+            return Err(format!("{}; run switchboard refresh", file.error));
+        }
+        if snaps.iter().any(|snap| snap.repo == repo) {
+            return Ok(Some(repo.to_string()));
+        }
+        if repo.contains('/') {
+            return Ok(None);
+        }
+        let named: Vec<&str> = snaps
+            .iter()
+            .map(|snap| snap.repo.as_str())
+            .filter(|full| full.rsplit_once('/').is_some_and(|(_, name)| name == repo))
+            .collect();
+        match named.as_slice() {
+            [] => Ok(None),
+            [one] => Ok(Some(one.to_string())),
+            many => Err(format!(
+                "{repo} matches {}; name it as <owner>/{repo}",
+                many.join(" and ")
+            )),
+        }
+    }
+
+    fn request(&self, action: &GuardedAction, text: &str) -> Result<(), String> {
+        LocalItems::new(self.data_dir()?)
+            .add(guarded_item(action, text, self.clock.now()))
+            .map_err(|e| format!("waiting: {e}"))
+    }
+
+    fn drop_requests(
+        &self,
+        action: &GuardedAction,
+        caller: &Caller,
+    ) -> Result<Vec<String>, String> {
+        confirm::drop_requests_for(self.data_dir()?, action, caller)
+            .map(|dropped| dropped.lines)
+            .map_err(|e| match e {
+                CoreError::Refused(why) => why,
+                other => format!("drop_request: {other}"),
+            })
+    }
+}
+
+impl CoreWrites<'_> {
+    fn data_dir(&self) -> Result<&std::path::Path, String> {
+        self.data
+            .as_deref()
+            .ok_or_else(|| "set SWITCHBOARD_DATA to the app data folder".to_string())
+    }
 }
 
 /// MCP-1: the read tools, in this order.
@@ -132,7 +216,12 @@ pub const READ_TOOLS: [&str; 6] = [
 /// MCP-2: the write tools a role holds, in this order. No role, or a role with none, holds none.
 pub fn write_tools(role: &Role) -> Vec<&'static str> {
     match role {
-        Role::ProjectManager => vec!["merge"],
+        Role::ProjectManager => vec![
+            "merge",
+            "request_archive",
+            "request_restore",
+            "drop_request",
+        ],
         Role::BudgetManager => vec!["set_pool_cap", "pool_edit", "budget_refresh"],
         Role::Satellite => vec![],
     }
@@ -450,6 +539,25 @@ fn write_call(
             };
             guard_pool(&caller, &edit.pool).and_then(|()| write.pool_edit(name, &edit))
         }
+        "request_archive" | "request_restore" | "drop_request" => {
+            let kind = match name {
+                "request_archive" => Some("archive"),
+                "request_restore" => Some("restore"),
+                _ => args["kind"].as_str(),
+            };
+            match (kind, args["repo"].as_str()) {
+                (Some(kind @ ("archive" | "restore")), Some(repo)) => {
+                    guarded_request(name, kind == "archive", repo, &caller, write)
+                }
+                _ => {
+                    return error(
+                        id,
+                        INVALID_PARAMS,
+                        "drop_request needs kind (archive or restore) and repo (string)",
+                    )
+                }
+            }
+        }
         // `budget_refresh`: a re-read, held by the role alone (`write_tools`).
         _ => write.budget_refresh().map(|rows| rows.to_string()),
     };
@@ -470,6 +578,47 @@ fn guard_pool(caller: &Caller, pool: &str) -> Result<(), String> {
     match rules::guard_pool_edit(caller, pool) {
         Verdict::Allow => Ok(()),
         Verdict::Refuse(text) | Verdict::ToWaiting(text) => Err(text),
+    }
+}
+
+/// #347: `request_archive` and `request_restore` file the request in Waiting on you and
+/// `drop_request` turns it down. None of them confirms: the guard never allows an archive or a
+/// restore from MCP (CORE-3), and the typed confirm stays with me in the app. A repo
+/// Switchboard does not know files nothing; `drop_request` takes an `owner/name` it no longer
+/// knows as written, so its request can still be dropped.
+fn guarded_request(
+    tool: &str,
+    archive: bool,
+    repo: &str,
+    caller: &Caller,
+    write: &dyn WriteCore,
+) -> Result<String, String> {
+    let dropping = tool == "drop_request";
+    let repo = match write.full_repo(repo).map_err(|e| format!("{tool}: {e}"))? {
+        Some(full) => full,
+        None if dropping && repo.contains('/') => repo.to_string(),
+        None => return Err(format!("{tool}: no such repo: {repo}")),
+    };
+    let (action, what) = if archive {
+        let what = format!("archive {repo}");
+        (GuardedAction::DeleteRepo { repo }, what)
+    } else {
+        let what = format!("restore over {repo}");
+        (GuardedAction::RestoreOverLive { repo }, what)
+    };
+    if dropping {
+        return write
+            .drop_requests(&action, caller)
+            .map(|lines| lines.join("\n"));
+    }
+    match rules::guard(caller, &action) {
+        Verdict::ToWaiting(text) => {
+            write.request(&action, &format!("I was asked from MCP to {what}"))?;
+            Ok(format!("{text}; the request is in Waiting on you"))
+        }
+        Verdict::Refuse(text) => Err(text),
+        // The guard allows neither from MCP; were that to change, this still runs nothing.
+        Verdict::Allow => Err(format!("{what}: needs a confirm in the app")),
     }
 }
 
@@ -537,7 +686,8 @@ fn role_read_schemas() -> [(&'static str, Value); 1] {
 }
 
 /// MCP-2: every write tool's `(name, schema)`; `tools` lists the ones a role holds.
-fn write_schemas() -> [(&'static str, Value); 4] {
+fn write_schemas() -> [(&'static str, Value); 7] {
+    let repo = json!({ "type": "string", "description": "The repo's name or owner/name" });
     [
         (
             "merge",
@@ -551,6 +701,37 @@ fn write_schemas() -> [(&'static str, Value); 4] {
                         "pr": { "type": "integer", "minimum": 1 }
                     },
                     "required": ["repo", "pr"]
+                }
+            }),
+        ),
+        (
+            "request_archive",
+            json!({
+                "name": "request_archive",
+                "description": "Ask to archive a repo (read-only on GitHub). This only files a Waiting on you request; the owner confirms it in the app.",
+                "inputSchema": { "type": "object", "properties": { "repo": repo }, "required": ["repo"] }
+            }),
+        ),
+        (
+            "request_restore",
+            json!({
+                "name": "request_restore",
+                "description": "Ask to restore a repo's backup over the live repo. This only files a Waiting on you request; the owner confirms it in the app.",
+                "inputSchema": { "type": "object", "properties": { "repo": repo }, "required": ["repo"] }
+            }),
+        ),
+        (
+            "drop_request",
+            json!({
+                "name": "drop_request",
+                "description": "Turn down a waiting archive or restore request: it leaves Waiting on you and nothing else happens.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "kind": { "type": "string", "description": "archive or restore" },
+                        "repo": repo
+                    },
+                    "required": ["kind", "repo"]
                 }
             }),
         ),

@@ -142,7 +142,12 @@ fn no_role_merge_is_an_unknown_tool() {
 fn project_manager_lists_merge_after_the_read_tools() {
     assert_eq!(
         tool_names(Some(Role::ProjectManager)),
-        with_extra(&["merge"])
+        with_extra(&[
+            "merge",
+            "request_archive",
+            "request_restore",
+            "drop_request"
+        ])
     );
 }
 
