@@ -11,7 +11,7 @@ use std::cell::RefCell;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-use mcp::{serve, ReadCore, WriteCore};
+use mcp::{serve_outside_job_worktree as serve, ReadCore, WriteCore};
 use serde_json::{json, Value};
 use switchboard_core::budget::PoolEdit;
 use switchboard_core::rules::Role;

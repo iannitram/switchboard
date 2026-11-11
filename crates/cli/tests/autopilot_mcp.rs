@@ -11,7 +11,7 @@ mod autopilot_support;
 use std::time::Duration;
 
 use app::autopilot::{Headless, McpCore};
-use app::mcp::{serve, ReadCore, WriteCore};
+use app::mcp::{serve_outside_job_worktree as serve, ReadCore, WriteCore};
 use autopilot_support::{fake_backup, fake_github, headless, world, Seams, World};
 use serde_json::{json, Value};
 use switchboard_core::autopilot::run::{passes_lock_target, satellite_lock_target};
