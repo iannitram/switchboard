@@ -2291,9 +2291,9 @@ pub fn restore_to_new(
 /// `RestoreOverLive` on `repo` for `caller`, and `confirmed` is set), and `new_repo` must be
 /// another name than `repo`. Then `Pass::Whole` is `restore_history_from` (the repo is created
 /// private through the create queue; a name that is there already is `Refused` before anything
-/// is queued or pushed) followed by `restore_issues` on the new repo. `Pass::Held` is
-/// `restore_issues` alone, for what the first pass held back: no repo is created and no ref
-/// pushed. The live repo `repo` is never read or written. The report's `made.into` names the
+/// is queued or pushed) followed by `restore_issues` on the new repo. `Pass::Held` is the held
+/// pass of `restore_issues` alone, for what the first pass held back: no repo is created, no
+/// ref pushed and no issue queued. The live repo `repo` is never read or written. The report's `made.into` names the
 /// new repo.
 pub fn restore_to_new_from(
     caller: &Caller,
@@ -2316,12 +2316,17 @@ pub fn restore_to_new_from(
         Pass::Whole => restore_history_from(fleet, backup_dir, new_repo, remote)?,
         Pass::Held(_) => RestoreReport::default(),
     };
+    // The held pass queues no issue: a second confirm does only what was held back (CORE-3).
+    let whole = matches!(pass, Pass::Whole);
     report.issues =
-        restore_issues(fleet, backup_dir, new_repo, remote).map_err(|e| match pass {
-            Pass::Whole => CoreError::GitHub(format!(
-            "{new_repo} was created and the history pushed, but its issues were not restored: {e}"
-        )),
-            Pass::Held(_) => e,
+        restore_issues_made(fleet, backup_dir, new_repo, remote, whole, None).map_err(|e| {
+            match pass {
+                Pass::Whole => CoreError::GitHub(format!(
+                    "{new_repo} was created and the history pushed, but its issues were not \
+                 restored: {e}"
+                )),
+                Pass::Held(_) => e,
+            }
         })?;
     report.made.into = Some(new_repo.to_string());
     Ok(report)

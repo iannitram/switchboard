@@ -758,3 +758,110 @@ fn the_held_pass_of_a_restore_to_a_new_repo_creates_and_pushes_nothing() {
         )]
     );
 }
+
+/// A failure after the new repo was made says what is there and what is not, and the retry is
+/// refused before a second repo is asked for or anything is pushed again.
+#[test]
+fn a_failure_after_the_new_repo_is_made_is_named_and_a_retry_creates_and_pushes_nothing() {
+    let f = fixture("to-new-fails-late");
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            answer(404, json!({"message": "Not Found"})),
+            answer(200, json!({"full_name": NEW, "private": true})),
+            // `restore_issues` cannot read the new repo's issues.
+            answer(502, json!({"message": "Bad Gateway"})),
+        ],
+    );
+    let run = |api: &Recorded| {
+        restore_to_new_from(
+            &who(Face::Gui, false),
+            &f.fleet,
+            &f.backup,
+            ("owner/demo", NEW),
+            true,
+            &Pass::Whole,
+            &remote(&f, api),
+        )
+    };
+    match run(&api) {
+        Err(CoreError::GitHub(why)) => assert!(
+            why.contains(&format!(
+                "{NEW} was created and the history pushed, but its issues were not restored"
+            )),
+            "{why}"
+        ),
+        other => panic!("expected a GitHub error, got {other:?}"),
+    }
+    let pushed = refs_of(&f.target, "refs");
+    assert!(!pushed.is_empty());
+    let creates = queued(&f).len();
+
+    // The retry: GitHub has the repo now.
+    let api = Recorded::new(
+        Vec::new(),
+        vec![answer(200, json!({"full_name": NEW, "private": true}))],
+    );
+    match run(&api) {
+        Err(CoreError::Refused(why)) => assert!(why.contains("already exists"), "{why}"),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    assert_eq!(queued(&f).len(), creates, "nothing more was queued");
+    assert_eq!(
+        queued(&f)
+            .iter()
+            .filter(|item| item["kind"] == "repo")
+            .count(),
+        1
+    );
+    assert_eq!(refs_of(&f.target, "refs"), pushed);
+}
+
+/// An owner the queue cannot create in: the repo is not made and nothing is pushed.
+#[test]
+fn a_new_repo_the_queue_cannot_create_pushes_nothing() {
+    let f = fixture("to-new-no-owner");
+    std::fs::write(f.stub.join("fail"), "repo").unwrap();
+    let api = Recorded::new(Vec::new(), vec![answer(404, json!({}))]);
+    match restore_to_new_from(
+        &who(Face::Gui, false),
+        &f.fleet,
+        &f.backup,
+        ("owner/demo", NEW),
+        true,
+        &Pass::Whole,
+        &remote(&f, &api),
+    ) {
+        Err(CoreError::GitHub(why)) => assert!(why.contains("did not create the repo"), "{why}"),
+        other => panic!("expected a queue failure, got {other:?}"),
+    }
+    assert!(refs_of(&f.target, "refs").is_empty());
+    assert!(queued(&f).iter().all(|item| item["kind"] == "repo"));
+}
+
+/// The held pass of a restore to a new repo queues no issue: a second confirm does only what
+/// was held back (CORE-3), even when an issue the first pass queued is not there yet.
+#[test]
+fn the_held_pass_of_a_restore_to_a_new_repo_queues_no_issue() {
+    let f = fixture("to-new-held-issue");
+    let issue = json!({"number": 1, "title": "first", "body": "", "state": "open"});
+    std::fs::write(f.backup.join("issues.json"), json!([issue]).to_string()).unwrap();
+    set_manifest(&f.backup, |m| m["issues"] = json!(1));
+    // The new repo's issues, read once (a pass that queued an issue would read them again).
+    let api = Recorded::new(
+        Vec::new(),
+        vec![answer(200, json!([])), answer(200, json!([]))],
+    );
+    let report = restore_to_new_from(
+        &who(Face::Gui, false),
+        &f.fleet,
+        &f.backup,
+        ("owner/demo", NEW),
+        true,
+        &Pass::Held(Made::default()),
+        &remote(&f, &api),
+    )
+    .unwrap();
+    assert_eq!(report.issues.issues, 0);
+    assert_eq!(queued(&f), Vec::<Value>::new());
+}
