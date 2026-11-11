@@ -43,7 +43,7 @@ sys.exit(code)
 "#;
 
 /// #346: a bare name is stored as the `owner/name` it names, so the link is the repo's.
-const ITEM_LINE: &str = "I was asked from the CLI to delete o/switchboard | Asked for from the CLI or MCP; only the app can do it, after I confirm (CORE-3). | Confirm in the app | https://github.com/o/switchboard\n";
+const ITEM_LINE: &str = "I was asked from the CLI to archive o/switchboard | Asked for from the CLI or MCP; only the app can do it, after I confirm (CORE-3). | Confirm in the app | https://github.com/o/switchboard\n";
 const ISSUE_LINE: &str =
     "o/r#5: Pick the sync rule | Labelled needs-ian. | Open issue | https://github.com/o/r/issues/5\n";
 
@@ -299,14 +299,14 @@ fn delete_adds_one_item_to_the_local_items() {
     save_switchboard(&s);
     let w = writes(&s);
     let (code, err) = run(&["delete", "switchboard"], &s, &w);
-    assert_eq!(err, "delete o/switchboard: needs a confirm in the app\n");
+    assert_eq!(err, "archive o/switchboard: needs a confirm in the app\n");
     assert_eq!(code, ExitCode::from(1));
     let items = LocalItems::new(&s.data).load().unwrap();
     assert_eq!(items.len(), 1);
     assert_eq!(
         items[0].source,
         Source::GuardedAction {
-            text: "I was asked from the CLI to delete o/switchboard".to_string()
+            text: "I was asked from the CLI to archive o/switchboard".to_string()
         }
     );
     assert_eq!(items[0].link, "https://github.com/o/switchboard");
@@ -370,7 +370,7 @@ fn the_binary_delete_writes_the_item_and_waiting_lists_it_first() {
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(
         text(&out.stderr),
-        "delete o/switchboard: needs a confirm in the app\n"
+        "archive o/switchboard: needs a confirm in the app\n"
     );
     let out = switchboard(&["waiting"], &s);
     assert_eq!(out.status.code(), Some(0), "stderr: {}", text(&out.stderr));

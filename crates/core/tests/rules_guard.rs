@@ -48,7 +48,7 @@ fn nothing_is_allowed_inside_a_job_worktree_from_any_face() {
         );
         assert_eq!(
             guard(&c, &delete()),
-            refuse("delete owner/app: refused inside a job worktree")
+            refuse("archive owner/app: refused inside a job worktree")
         );
         assert_eq!(
             guard(&c, &restore()),
@@ -91,7 +91,7 @@ fn delete_and_restore_from_the_app_need_a_confirm_in_the_app() {
     let no = caller(Face::Gui, None, false, false);
     assert_eq!(
         guard(&no, &delete()),
-        refuse("delete owner/app: needs a confirm in the app")
+        refuse("archive owner/app: needs a confirm in the app")
     );
     assert_eq!(
         guard(&no, &restore()),
@@ -111,7 +111,7 @@ fn delete_and_restore_from_the_cli_or_mcp_go_to_waiting_on_you_whatever_the_role
                 let c = caller(face, role.clone(), false, confirmed);
                 assert_eq!(
                     guard(&c, &delete()),
-                    Verdict::ToWaiting("delete owner/app: needs a confirm in the app".into())
+                    Verdict::ToWaiting("archive owner/app: needs a confirm in the app".into())
                 );
                 assert_eq!(
                     guard(&c, &restore()),

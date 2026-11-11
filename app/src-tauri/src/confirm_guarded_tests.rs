@@ -9,7 +9,7 @@ use switchboard_core::rules::GuardedAction;
 use switchboard_core::waiting::guarded_item;
 
 const NOW: UnixSeconds = 1_800_000_000;
-const DELETE: &str = "I was asked from the CLI to delete owner/alpha";
+const DELETE: &str = "I was asked from the CLI to archive owner/alpha";
 const RESTORE: &str = "I was asked from the CLI to restore over owner/alpha";
 const REPO: &str = "owner/alpha";
 
@@ -62,7 +62,7 @@ fn unchanged(s: &Setup) {
 fn the_app_without_the_confirm_gets_the_guards_refusal_and_changes_nothing() {
     let s = setup("unconfirmed");
     for (text, want) in [
-        (DELETE, "delete owner/alpha: needs a confirm in the app"),
+        (DELETE, "archive owner/alpha: needs a confirm in the app"),
         (
             RESTORE,
             "restore over owner/alpha: needs a confirm in the app",
@@ -154,11 +154,96 @@ fn the_command_takes_the_typed_name_with_no_default() {
     let signature = &commands[at..at + commands[at..].find(") ->").unwrap()];
     assert!(signature.contains("confirmed: bool,"), "{signature}");
     assert!(signature.contains("typed: String,"), "{signature}");
-    assert!(!signature.contains("Option<"), "{signature}");
+    // #347: the only optional argument is the new private repo of a restore.
+    assert_eq!(signature.matches("Option<").count(), 1, "{signature}");
+    assert!(signature.contains("into: Option<String>,"), "{signature}");
 }
 
 #[test]
 fn the_window_registers_the_confirm_command() {
     let main = include_str!("main.rs");
     assert!(main.contains("commands::confirm_guarded,"));
+}
+
+/// #347, turn a request down: the request leaves Waiting on you and the other one stays. No
+/// settings are read: a drop goes nowhere but the data folder.
+#[test]
+fn dropping_a_request_removes_it_and_leaves_the_other() {
+    let s = setup("drop");
+    let dropped = drop_guarded_at(&s.data, DELETE, &s.cwd).unwrap();
+    assert_eq!(dropped.what, "archive owner/alpha");
+    assert_eq!(
+        dropped.lines,
+        ["the request to archive owner/alpha was dropped; nothing was archived, pushed or queued"]
+    );
+    let left = LocalItems::new(&s.data).load().unwrap();
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].what, RESTORE);
+}
+
+#[test]
+fn dropping_what_is_not_waiting_or_from_a_job_worktree_is_refused() {
+    let s = setup("drop-refused");
+    assert_eq!(
+        drop_guarded_at(&s.data, "restore over owner/beta", &s.cwd),
+        Err(CoreError::Refused(
+            "restore over owner/beta: no such request is waiting on you; nothing was dropped"
+                .to_string()
+        ))
+    );
+    let job = s
+        .cwd
+        .parent()
+        .unwrap()
+        .join("switchboard-wt")
+        .join("fleet-9");
+    std::fs::create_dir_all(&job).unwrap();
+    assert_eq!(
+        drop_guarded_at(&s.data, RESTORE, &job),
+        Err(CoreError::Refused(
+            "drop the request to restore over owner/alpha: refused inside a job worktree"
+                .to_string()
+        ))
+    );
+    unchanged(&s);
+}
+
+/// #347: a restore into a new private repo needs the same confirm and the same typed name as a
+/// restore over the live one, and a name that can be a new repo. With all of that and no
+/// backups folder set it stops there: no test here reaches GitHub.
+#[test]
+fn a_restore_into_a_new_repo_needs_the_same_confirm_and_stops_without_a_backups_folder() {
+    let s = setup("into");
+    let new = Some("owner/alpha-restored");
+    let run = |said: (bool, &str), into: Option<&str>| {
+        confirm_guarded_into_at(&s.settings, &s.data, RESTORE, said, into, &s.cwd)
+    };
+    assert_eq!(
+        run((false, REPO), new),
+        Err(CoreError::Refused(
+            "restore over owner/alpha: needs a confirm in the app".to_string()
+        ))
+    );
+    for typed in ["", "owner/alpha-restored", "Owner/Alpha"] {
+        match run((true, typed), new) {
+            Err(CoreError::Refused(why)) => {
+                assert!(why.contains("type owner/alpha to confirm"), "{why}")
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+    for (bad, needle) in [
+        ("alpha-restored", "is not an owner/name"),
+        ("owner/alpha", "is the repo itself"),
+    ] {
+        match run((true, REPO), Some(bad)) {
+            Err(CoreError::Refused(why)) => assert!(why.contains(needle), "{why}"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+    assert_eq!(
+        run((true, REPO), new),
+        Err(CoreError::MissingPath("nextcloud_backups"))
+    );
+    unchanged(&s);
 }

@@ -143,13 +143,16 @@ fn project_manager_lists_merge_after_the_read_tools() {
     // #384 added the three front-door tools after `merge`.
     assert_eq!(
         tool_names(Some(Role::ProjectManager)),
-        // #385: the autopilot's status read and pass tool.
+        // #385: the autopilot's status read and pass tool. #347: the request tools follow the front door.
         with_extra(&[
             "autopilot_status",
             "merge",
             "ask",
             "ask_as_job",
             "rate",
+            "request_archive",
+            "request_restore",
+            "drop_request",
             "autopilot_pass"
         ])
     );

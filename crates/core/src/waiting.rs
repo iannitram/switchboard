@@ -167,6 +167,19 @@ pub fn handoff_item(handoff_id: &str, summary: &str, at: UnixSeconds) -> Item {
     }
 }
 
+/// True when two requests ask for the same thing: both an archive or both a restore, of one
+/// repo. The repo's `owner/name` is compared without case, as GitHub compares it.
+fn same_request(a: &GuardedAction, b: &GuardedAction) -> bool {
+    match (a, b) {
+        (GuardedAction::DeleteRepo { repo: a }, GuardedAction::DeleteRepo { repo: b })
+        | (
+            GuardedAction::RestoreOverLive { repo: a },
+            GuardedAction::RestoreOverLive { repo: b },
+        ) => a.eq_ignore_ascii_case(b),
+        _ => false,
+    }
+}
+
 /// WAIT-1, CORE-3: a guarded action asked for from the CLI or MCP; `text` is the guard's
 /// `Verdict::ToWaiting` text.
 pub fn guarded_item(action: &GuardedAction, text: &str, at: UnixSeconds) -> Item {
@@ -284,6 +297,29 @@ impl LocalItems {
             None => items.push(item),
         }
         self.write(&items)
+    }
+
+    /// Push `item` unless one is there already for its `source`, or for the archive or restore
+    /// it asks for, whichever face filed that one (#347); the one there is kept as it is. A
+    /// request asked for again must not reset a held restore's item, nor sit beside it as a
+    /// plain one: the next confirm of either would run the whole restore again. True when it
+    /// was added.
+    pub fn add_new(&self, item: Item) -> Result<bool, CoreError> {
+        let mut items = self.load()?;
+        let asks = crate::confirm::guarded_request(&item);
+        let there = |old: &Item| {
+            old.source == item.source
+                || asks.as_ref().is_some_and(|new| {
+                    crate::confirm::guarded_request(old)
+                        .is_some_and(|held| same_request(&held, new))
+                })
+        };
+        if items.iter().any(there) {
+            return Ok(false);
+        }
+        items.push(item);
+        self.write(&items)?;
+        Ok(true)
     }
 
     /// True when an item was removed; nothing removed writes nothing.

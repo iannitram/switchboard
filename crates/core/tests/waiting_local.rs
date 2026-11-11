@@ -219,6 +219,76 @@ fn adding_an_item_with_the_same_source_replaces_it_in_place() {
     assert_eq!(got[0], newer);
 }
 
+/// `owner/name`'s restore request as a face words it.
+fn restore_request(face: &str, repo: &str, since: i64) -> Item {
+    guarded_item(
+        &GuardedAction::RestoreOverLive {
+            repo: repo.to_string(),
+        },
+        &format!("I was asked from {face} to restore over {repo}"),
+        since,
+    )
+}
+
+#[test]
+fn add_new_keeps_the_item_already_there_for_that_source() {
+    let d = data_dir("add-new-source");
+    let store = LocalItems::new(&d);
+    assert!(store.add_new(item("old", NOW, pool("deepseek"))).unwrap());
+    assert!(!store
+        .add_new(item("new", NOW + 60, pool("deepseek")))
+        .unwrap());
+    assert!(store.add_new(item("other", NOW, pool("claude"))).unwrap());
+    assert_eq!(whats(&store.load().unwrap()), vec!["old", "other"]);
+}
+
+/// #347: one request for an action, whichever face asked. A restore held from the CLI's request
+/// must not get a second, plain item from MCP (or the reverse), whose confirm would be a whole
+/// restore over the live repo. The repo's name is compared without case, as GitHub does.
+#[test]
+fn add_new_keeps_the_request_already_there_for_that_action_whichever_face_asked() {
+    for (first, second) in [("the CLI", "MCP"), ("MCP", "the CLI")] {
+        let d = data_dir(&format!("add-new-action-{}", first.len()));
+        let store = LocalItems::new(&d);
+        let mut held = restore_request(first, "owner/alpha", NOW);
+        held.action = "Queue what the restore held back".to_string();
+        store.add(held.clone()).unwrap();
+        for repo in ["owner/alpha", "Owner/ALPHA"] {
+            let added = store
+                .add_new(restore_request(second, repo, NOW + 60))
+                .unwrap();
+            assert!(!added, "{first} then {second}, {repo}");
+        }
+        assert_eq!(store.load().unwrap(), [held]);
+    }
+}
+
+/// An archive request and a restore request for one repo are two actions, and so are the same
+/// action for two repos: each is its own item.
+#[test]
+fn add_new_adds_a_request_for_another_action_or_another_repo() {
+    let d = data_dir("add-new-other");
+    let store = LocalItems::new(&d);
+    store
+        .add(restore_request("the CLI", "owner/alpha", NOW))
+        .unwrap();
+    let archive = guarded_item(
+        &GuardedAction::DeleteRepo {
+            repo: "owner/alpha".to_string(),
+        },
+        "I was asked from MCP to archive owner/alpha",
+        NOW,
+    );
+    assert!(store.add_new(archive).unwrap());
+    assert!(store
+        .add_new(restore_request("MCP", "owner/beta", NOW))
+        .unwrap());
+    assert!(store
+        .add_new(restore_request("MCP", "other/alpha", NOW))
+        .unwrap());
+    assert_eq!(store.load().unwrap().len(), 4);
+}
+
 #[test]
 fn remove_drops_every_item_with_that_source() {
     let d = data_dir("remove");

@@ -18,7 +18,7 @@ const GUARDED: WaitingItemData = {
   action: "Confirm in the app",
   since: 1762447500,
 };
-const DELETE = "I was asked from the CLI to delete owner/alpha";
+const DELETE = "I was asked from the CLI to archive owner/alpha";
 const GUARDED_DELETE: WaitingItemData = { ...GUARDED, what: DELETE, source: { GuardedAction: { text: DELETE } } };
 const HELD: WaitingItemData = { ...GUARDED, action: HELD_ACTION, why: "The restore over owner/alpha pushed the backup's refs; 4 comments and 0 closes or body changes wait." };
 const TASK: WaitingItemData = {
@@ -33,12 +33,13 @@ const TASK: WaitingItemData = {
 type Answer = { ok: unknown } | { error: { command: string; lines: string[] } };
 
 // The core as the view sees it: `waiting` answers `lists` in turn (the last one again after
-// that) and `confirm_guarded` answers `confirm`.
-function core(lists: WaitingItemData[][], confirm: Answer) {
+// that), `confirm_guarded` answers `confirm` and `drop_guarded` answers `drop`.
+function core(lists: WaitingItemData[][], confirm: Answer, drop?: Answer) {
   let reads = 0;
   vi.mocked(call).mockImplementation((async (command: string) => {
     if (command === "waiting") return { ok: lists[Math.min(reads++, lists.length - 1)] };
     if (command === "confirm_guarded") return confirm;
+    if (command === "drop_guarded" && drop) return drop;
     throw new Error(`unexpected command ${command}`);
   }) as never);
 }
@@ -69,7 +70,7 @@ test("listing the request confirms nothing, and its action only opens the confir
   fireEvent.click(screen.getByRole("button", { name: "Confirm in the app" }));
   const step = screen.getByRole("group", { name: "Confirm" });
   expect(within(step).getByText(RESTORE)).toBeTruthy();
-  expect(within(step).getAllByRole("button").map((b) => b.textContent)).toEqual(["Cancel", "Confirm"]);
+  expect(within(step).getAllByRole("button").map((b) => b.textContent)).toEqual(["Cancel", "Drop the request", "Confirm"]);
   expect(confirmCalls()).toEqual([]);
 });
 
@@ -137,12 +138,15 @@ test("a guarded request is read back as the core reads it", () => {
   expect(guardedRequest(GUARDED)).toEqual({ kind: "restore", repo: "owner/alpha" });
   expect(guardedRequest(GUARDED_DELETE)).toEqual({ kind: "archive", repo: "owner/alpha" });
   expect(guardedRequest(HELD)).toEqual({ kind: "held", repo: "owner/alpha" });
+  // A request filed with the old wording is the same archive request.
+  const old = "I was asked from the CLI to delete owner/alpha";
+  expect(guardedRequest({ ...GUARDED, what: old, source: { GuardedAction: { text: old } } })).toEqual({ kind: "archive", repo: "owner/alpha" });
   // A held delete is still an archive: only a restore holds anything back.
   expect(guardedRequest({ ...GUARDED_DELETE, action: HELD_ACTION })).toEqual({ kind: "archive", repo: "owner/alpha" });
   expect(guardedRequest(TASK)).toBeNull();
   expect(guardedRequest({ ...GUARDED, link: "https://github.com/owner/beta" })).toBeNull();
   expect(guardedRequest({ ...GUARDED, link: "" })).toBeNull();
-  for (const text of ["delete owner/alpha", "I was asked to merge owner/alpha#4", "x to delete alpha", "x to delete a/b/c", "x to delete owner/al pha"]) {
+  for (const text of ["delete owner/alpha", "archive owner/alpha", "x to archive alpha", "I was asked to merge owner/alpha#4", "x to delete alpha", "x to delete a/b/c", "x to delete owner/al pha"]) {
     expect(guardedRequest({ ...GUARDED, source: { GuardedAction: { text } } })).toBeNull();
   }
 });
@@ -205,4 +209,105 @@ test("a restore that held comments back says its confirm pushes nothing again", 
   expect(within(step).getByText("Confirm only queues what the restore over owner/alpha held back (comments, closes). Nothing is pushed again.")).toBeTruthy();
   expect(within(step).queryByText(/pushed over the live ones/)).toBeNull();
   expect(confirmButton().disabled).toBe(true);
+});
+
+const dropCalls = () => vi.mocked(call).mock.calls.filter(([command]) => command === "drop_guarded");
+
+test("Drop the request sends only the request's text, needs no name typed, and never confirms", async () => {
+  const lines = ["the request to restore over owner/alpha was dropped; nothing was archived, pushed or queued"];
+  core([[GUARDED, TASK], [TASK]], { ok: { what: "", lines: [], cleared: true } }, { ok: { what: "restore over owner/alpha", lines } });
+  render(<Waiting />);
+  await screen.findAllByRole("article");
+  fireEvent.click(screen.getByRole("button", { name: "Confirm in the app" }));
+  expect(dropCalls()).toEqual([]);
+  fireEvent.click(screen.getByRole("button", { name: "Drop the request" }));
+  const status = await screen.findByRole("status");
+  expect(within(status).getByText("restore over owner/alpha: dropped")).toBeTruthy();
+  expect(within(status).getByText(lines[0])).toBeTruthy();
+  expect(dropCalls()).toEqual([["drop_guarded", { text: RESTORE }]]);
+  expect(confirmCalls()).toEqual([]);
+  await waitFor(() => expect(screen.getAllByRole("article").map((a) => a.getAttribute("aria-label"))).toEqual(["Book the dentist"]));
+  expect(screen.queryByRole("group", { name: "Confirm" })).toBeNull();
+});
+
+test("a drop the core refuses shows its text and the request stays listed", async () => {
+  const refusal = `${RESTORE}: no such request is waiting on you; nothing was dropped`;
+  core([[GUARDED]], { ok: { what: "", lines: [], cleared: true } }, { error: { command: "drop_guarded", lines: [refusal] } });
+  render(<Waiting />);
+  await screen.findAllByRole("article");
+  fireEvent.click(screen.getByRole("button", { name: "Confirm in the app" }));
+  fireEvent.click(screen.getByRole("button", { name: "Drop the request" }));
+  const alert = await screen.findByRole("alert");
+  expect(within(alert).getByText("drop_guarded failed")).toBeTruthy();
+  expect(within(alert).getByText(refusal)).toBeTruthy();
+  expect(screen.queryByRole("status")).toBeNull();
+  expect(confirmCalls()).toEqual([]);
+});
+
+// #347: a restore to a new private repo, from the confirm step.
+const newBox = () => screen.getByRole("checkbox", { name: "Restore to a new private repo instead" }) as HTMLInputElement;
+const newName = () => screen.getByRole("textbox", { name: "New private repo" }) as HTMLInputElement;
+
+test("a restore goes over the live repo unless the new-repo box is ticked, and only a restore has the box", async () => {
+  core([[GUARDED, GUARDED_DELETE, HELD]], { ok: { what: "", lines: [], cleared: true } });
+  render(<Waiting />);
+  await screen.findAllByRole("article");
+  fireEvent.click(screen.getAllByRole("button", { name: "Confirm in the app" })[0]);
+  expect(newBox().checked).toBe(false);
+  expect(screen.queryByRole("textbox", { name: "New private repo" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  fireEvent.click(screen.getAllByRole("button", { name: "Confirm in the app" })[1]);
+  expect(screen.queryByRole("checkbox")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  fireEvent.click(screen.getByRole("button", { name: HELD_ACTION }));
+  expect(screen.queryByRole("checkbox")).toBeNull();
+});
+
+test("a restore to a new private repo sends its name as into, with the same typed confirm", async () => {
+  const what = "restore owner/alpha into the new private repo owner/alpha-restored";
+  core([[GUARDED], []], { ok: { what, lines: ["owner/alpha-restored was created as a private repo; owner/alpha was left as it is"], cleared: true } });
+  render(<Waiting />);
+  await screen.findAllByRole("article");
+  fireEvent.click(screen.getByRole("button", { name: "Confirm in the app" }));
+  fireEvent.click(newBox());
+  expect(newName().value).toBe("owner/alpha-restored");
+  const step = screen.getByRole("group", { name: "Confirm" });
+  expect(
+    within(step).getByText(
+      "Confirm creates the new private repo owner/alpha-restored on GitHub and restores the backup of owner/alpha into it. owner/alpha itself is left as it is.",
+    ),
+  ).toBeTruthy();
+  expect(within(step).queryByText(/pushed over the live ones/)).toBeNull();
+  // The repo's own name must still be typed.
+  expect(confirmButton().disabled).toBe(true);
+  type("owner/alpha");
+  expect(confirmButton().disabled).toBe(false);
+  // A name that cannot be a new repo, or is the repo itself, keeps Confirm off.
+  for (const bad of ["", "alpha-restored", "owner/alpha", "Owner/Alpha", "owner/a b", "owner/..", "a/b/c"]) {
+    fireEvent.change(newName(), { target: { value: bad } });
+    expect(confirmButton().disabled).toBe(true);
+    fireEvent.click(confirmButton());
+  }
+  expect(confirmCalls()).toEqual([]);
+  fireEvent.change(newName(), { target: { value: "owner/alpha-copy" } });
+  fireEvent.click(confirmButton());
+  const status = await screen.findByRole("status");
+  expect(within(status).getByText(`${what}: done`)).toBeTruthy();
+  expect(confirmCalls()).toEqual([["confirm_guarded", { text: RESTORE, confirmed: true, typed: "owner/alpha", into: "owner/alpha-copy" }]]);
+});
+
+test("the new-repo box does not carry over to the next request", async () => {
+  core([[GUARDED]], { ok: { what: "", lines: [], cleared: true } });
+  render(<Waiting />);
+  await screen.findAllByRole("article");
+  fireEvent.click(screen.getByRole("button", { name: "Confirm in the app" }));
+  fireEvent.click(newBox());
+  fireEvent.change(newName(), { target: { value: "owner/other" } });
+  fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  fireEvent.click(screen.getByRole("button", { name: "Confirm in the app" }));
+  expect(newBox().checked).toBe(false);
+  type("owner/alpha");
+  fireEvent.click(confirmButton());
+  await screen.findByRole("status");
+  expect(confirmCalls()).toEqual([["confirm_guarded", { text: RESTORE, confirmed: true, typed: "owner/alpha" }]]);
 });
