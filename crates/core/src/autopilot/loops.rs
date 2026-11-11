@@ -242,6 +242,29 @@ fn token_of(pid: u32) -> Option<String> {
         std::process::id(),
         String::from_utf8_lossy(&out.stdout)
     );
+    if !String::from_utf8_lossy(&out.stdout).contains(&format!("\"{pid}\"")) {
+        for round in 0..3 {
+            let all = std::process::Command::new("tasklist")
+                .args(["/FO", "CSV", "/NH"])
+                .output();
+            if let Ok(all) = all {
+                for line in String::from_utf8_lossy(&all.stdout).lines() {
+                    if line.contains("py") || line.contains(&format!("\"{pid}\"")) {
+                        eprintln!("TEMPDIAG full#{round} for {pid}: {line}");
+                    }
+                }
+            }
+            let again = std::process::Command::new("tasklist")
+                .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
+                .output();
+            if let Ok(again) = again {
+                eprintln!(
+                    "TEMPDIAG again#{round} {pid}: {:?}",
+                    String::from_utf8_lossy(&again.stdout)
+                );
+            }
+        }
+    }
     // `tasklist` gives no start time: a process id used again is taken for the same process.
     String::from_utf8_lossy(&out.stdout)
         .contains(&format!("\"{pid}\""))
