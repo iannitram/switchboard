@@ -107,6 +107,41 @@ pub fn guard_pool_edit(caller: &Caller, pool: &str) -> Verdict {
     }
 }
 
+/// #385: who may run an autopilot pass (`what`, e.g. `autopilot merge`) by hand. `needs` is the
+/// role whose work the pass is: the Project Manager's for the roadmap, review, merge and weekly
+/// passes (R32), the satellite's for a satellite tick. The app may (its own threads run them);
+/// the CLI and MCP only with that role; nothing inside a job worktree. A dry run is asked the
+/// same way.
+pub fn guard_autopilot(caller: &Caller, what: &str, needs: &Role) -> Verdict {
+    if caller.in_job_worktree {
+        return Verdict::Refuse(format!("{what}: refused inside a job worktree"));
+    }
+    match (caller.face, &caller.role) {
+        (Face::Gui, _) => Verdict::Allow,
+        (Face::Cli | Face::Mcp, Some(role)) if role == needs => Verdict::Allow,
+        _ => Verdict::Refuse(format!(
+            "{what}: only the {} role may run this pass",
+            needs.flag()
+        )),
+    }
+}
+
+/// MCP-2, MCP-3, CLI-3 (#384): who may use the front door's writes (`what` names one: an ask
+/// that is sent, a held request sent as a fleet job, a rating). The app may; the CLI and MCP
+/// only with the project-manager role; nothing inside a job worktree. Like a pool edit it is
+/// not one of CORE-3's guarded actions, so it never becomes a Waiting on you item.
+pub fn guard_front_door(caller: &Caller, what: &str) -> Verdict {
+    if caller.in_job_worktree {
+        return Verdict::Refuse(format!("{what}: refused inside a job worktree"));
+    }
+    match (caller.face, &caller.role) {
+        (Face::Gui, _) | (Face::Cli | Face::Mcp, Some(Role::ProjectManager)) => Verdict::Allow,
+        _ => Verdict::Refuse(format!(
+            "{what}: only the project-manager role may use the front door"
+        )),
+    }
+}
+
 /// True when `dir` is inside a job worktree (the fleet's worktrees folder, or a git worktree
 /// whose `.git` file points into one).
 ///

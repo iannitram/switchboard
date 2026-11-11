@@ -5,7 +5,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::time::Duration;
-use switchboard_core::autopilot::{driver, may_spend, passes};
+use switchboard_core::autopilot::weekly::local_utc_offset;
+use switchboard_core::autopilot::{passes, run};
 use switchboard_core::budget::{RefreshTimer, REFRESH_EVERY_SECS};
 use switchboard_core::clock::{Clock, SystemClock};
 use switchboard_core::github::live;
@@ -22,60 +23,50 @@ const TICK_EVERY: Duration = Duration::from_secs(60);
 /// AUTO-6: how often the satellite's lanes are checked. A loop that ended frees its lane.
 const SATELLITE_EVERY: Duration = Duration::from_secs(60);
 
-/// AUTO-6: the satellite thread. Each pass reads `satellite.json` (off when missing), records a
-/// fleet error for each loop that ended with an error (CORE-2), classes the failed cards of
-/// loops that ended (AUTO-9), and starts the lanes `driver::tick` allows.
+/// AUTO-6: the satellite thread. Each pass is one tick of the core's satellite session
+/// (`run::SatelliteSession::tick`, the tick `switchboard autopilot satellite` runs): it reads
+/// `satellite.json` (off when missing), records a fleet error for each loop that ended with an
+/// error (CORE-2), classes the failed cards of loops that ended (AUTO-9), and starts the lanes
+/// `driver::tick` allows. #385: the session holds the satellite lock while its loops run, so a
+/// headless tick on this machine starts no lane beside them, and this thread starts none
+/// beside a headless run's.
 fn satellite_loop(handle: tauri::AppHandle, config_dir: std::path::PathBuf) {
     let data = handle
         .path()
         .app_data_dir()
         .unwrap_or_else(|_| config_dir.clone());
-    let mut runner: Option<driver::ChildRunner> = None;
+    let mut session: Option<run::SatelliteSession> = None;
     loop {
         let state = handle.state::<commands::AppState>();
-        match driver::load_config(&config_dir.join(driver::SATELLITE_FILE)) {
-            Ok(config) => {
-                if let Ok(fleet) = commands::bridge(&state.settings_path) {
-                    let runner = runner.get_or_insert_with(|| {
-                        driver::ChildRunner::new(fleet.clone(), &data.join("satellite"))
-                    });
-                    for end in runner.take_finished() {
-                        // CORE-2 (#383): a loop that ended with an error is a fleet error with its
-                        // exit code and stderr; the runner holds its lane for a while.
-                        if let Some(e) = end.fleet_error() {
-                            commands::record_fleet_error(&state, &e);
-                            eprintln!("satellite {}: {e}", end.lane);
-                        }
-                        let lane = end.lane;
-                        let dir = data.join("satellite").join("cards").join(&lane);
-                        match driver::classify_failed(&fleet, &dir, &end.stdout) {
-                            Ok(classes) => {
-                                for (id, class) in classes {
-                                    eprintln!("satellite {lane}: {id} {class:?}");
-                                }
-                            }
-                            Err(e) => {
-                                let _ = commands::record_fleet_error(&state, &e);
-                            }
-                        }
-                    }
-                    let spend = |lane: &str| may_spend(&fleet, lane);
-                    if let Err(e) = driver::tick(&config, runner, &spend) {
-                        commands::record_fleet_error(&state, &e);
-                        eprintln!("satellite: {e}");
-                    }
-                }
+        if session.is_none() {
+            if let Ok(fleet) = commands::bridge(&state.settings_path) {
+                session = Some(run::SatelliteSession::new(fleet, &data));
             }
-            Err(e) => eprintln!("satellite: {e}"),
+        }
+        if let Some(session) = session.as_mut() {
+            let report = session.tick(&config_dir, Duration::ZERO);
+            print_report(&state, &report);
         }
         std::thread::sleep(SATELLITE_EVERY);
     }
 }
 
-/// AUTO-3: the autopilot's passes after each poll (`autopilot::after_poll`), holding the
-/// GitHub lock so no poll writes a snapshot while they read. Jobs go to
-/// `<data>/autopilot/jobs/`; clones are found beside the pipeline repo. A setting that is not
-/// set starts nothing; no machine name starts no review.
+/// A pass's report on stderr, as the window has always printed it, and its fleet errors
+/// recorded (CORE-2).
+fn print_report(state: &commands::AppState, report: &run::PassReport) {
+    for e in &report.raised {
+        commands::record_fleet_error(state, e);
+    }
+    for line in report.lines() {
+        eprintln!("{line}");
+    }
+}
+
+/// AUTO-3: the autopilot's passes after each poll (`run::run_poll_passes`, the passes
+/// `switchboard autopilot <pass>` runs), holding the GitHub lock so no poll writes a snapshot
+/// while they read. Jobs go to `<data>/autopilot/jobs/`; clones are found beside the pipeline
+/// repo. A setting that is not set starts nothing; no machine name starts no review. #385: the
+/// passes hold the autopilot lock; when a headless run holds it this round is skipped.
 fn autopilot_after_poll(
     handle: &tauri::AppHandle,
     data: &std::path::Path,
@@ -104,115 +95,44 @@ fn autopilot_after_poll(
     let mut starter = passes::FleetStarter {
         fleet,
         jobs_dir: data.join("autopilot").join("jobs"),
-        dev_root,
+        dev_root: dev_root.clone(),
         machine: machine.clone(),
         qwen_probe: Box::new(passes::http_qwen_probe),
     };
-    let result = {
-        let _held = state.github.lock().unwrap_or_else(|p| p.into_inner());
-        let started =
-            switchboard_core::autopilot::after_poll(&mut switchboard_core::autopilot::AfterPoll {
-                data_dir: data,
-                machine: machine.as_deref(),
-                starter: &mut starter,
-            });
-        // AUTO-4: then merge what passed, each merge followed by a read of its repo (GH-3).
-        let store = switchboard_core::github::snapshot::SnapshotStore::new(data);
-        let poller = switchboard_core::github::poll::Poller {
-            transport,
-            store: &store,
-            clock: &SystemClock,
-            repos: Vec::new(),
-        };
-        // #380: every PR is tried; each refusal lands in Waiting on you.
-        match store.load_all() {
-            Ok(snaps) => {
-                let pass = passes::merge_pass(&snaps, &poller, &pipeline_root, &starter.dev_root);
-                for (repo, prs, issues) in &pass.merged {
-                    eprintln!("autopilot: merged {repo} {prs:?}, closing {issues:?}");
-                }
-                for r in &pass.refused {
-                    eprintln!("autopilot: merge {}#{} refused: {}", r.repo, r.pr, r.why);
-                }
-                if let Err(e) =
-                    passes::record_refused_merges(data, &pass.refused, SystemClock.now())
-                {
-                    eprintln!("autopilot: waiting: {e}");
-                }
-            }
-            Err(e) => eprintln!("autopilot: merge: {e}"),
-        }
-        // AUTO-5: the weekly drift clear and backup, once Sunday 6am local has passed.
-        if let Some(offset) = local_utc_offset() {
-            match passes::weekly_run(data, SystemClock.now(), offset, &mut starter) {
-                Ok(run) => {
-                    for id in &run.drift_started {
-                        eprintln!("autopilot: started {id}");
-                    }
-                    if let Some(e) = &run.drift_error {
-                        // #379: a Project Manager job that died is recorded like any fleet error.
-                        commands::record_fleet_error(&state, e);
-                        eprintln!("autopilot: drift clear: {e}");
-                    }
-                    if !run.backup.is_empty() {
-                        let settings = settings.clone();
-                        std::thread::spawn(move || {
-                            match switchboard_core::backup::backup_all(&settings, &run.backup) {
-                                Ok(outcomes) => {
-                                    use switchboard_core::backup::BackupOutcome;
-                                    for (repo, outcome) in outcomes {
-                                        match outcome {
-                                            Ok(BackupOutcome::Written(manifest)) => {
-                                                if let Some(now) = manifest.resolved_repo {
-                                                    eprintln!("weekly backup: {repo}: GitHub answered for {now}: renamed or moved");
-                                                }
-                                            }
-                                            Ok(BackupOutcome::Refused(why)) => {
-                                                eprintln!("weekly backup: {repo} refused: {why}");
-                                            }
-                                            Err(e) => eprintln!("weekly backup: {e}"),
-                                        }
-                                    }
-                                }
-                                Err(e) => eprintln!("weekly backup: {e}"),
-                            }
-                        });
-                    }
-                }
-                Err(e) => eprintln!("autopilot: weekly: {e}"),
-            }
-        }
-        started
+    let env = run::RunEnv {
+        data_dir: data,
+        pipeline_root: &pipeline_root,
+        dev_root: &dev_root,
+        machine: machine.as_deref(),
+        clock: &SystemClock,
+        utc_offset_secs: local_utc_offset(),
+        transport,
+        dry_run: false,
+        lock_wait: Duration::ZERO,
     };
-    match result {
-        Ok(ids) => {
-            for id in ids {
-                eprintln!("autopilot: started {id}");
-            }
-        }
-        Err(e) => {
-            commands::record_fleet_error(&state, &e);
-            eprintln!("autopilot: {e}");
+    let reports = {
+        let _held = state.github.lock().unwrap_or_else(|p| p.into_inner());
+        run::run_poll_passes(&env, &run::Pass::AFTER_POLL, &mut starter)
+    };
+    let reports = match reports {
+        Ok(reports) => reports,
+        Err(e) => return eprintln!("autopilot: {e}"),
+    };
+    for report in reports {
+        print_report(&state, &report);
+        if !report.backup.is_empty() {
+            // AUTO-5: the weekly backup is long and holds nothing.
+            let settings = settings.clone();
+            std::thread::spawn(move || {
+                let mut done = run::PassReport::new(run::Pass::Weekly, false);
+                let result = switchboard_core::backup::backup_all(&settings, &report.backup);
+                run::add_backups(&mut done, result);
+                for line in done.lines() {
+                    eprintln!("{line}");
+                }
+            });
         }
     }
-}
-
-/// AUTO-5: this computer's UTC offset in seconds: `date +%z` on Linux and macOS, PowerShell's
-/// `zzz` on Windows. `None` when neither answers; the weekly run then waits.
-fn local_utc_offset() -> Option<i64> {
-    let out = if cfg!(windows) {
-        std::process::Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-Command",
-                "(Get-Date).ToString('zzz').Replace(':','')",
-            ])
-            .output()
-    } else {
-        std::process::Command::new("date").arg("+%z").output()
-    }
-    .ok()?;
-    switchboard_core::autopilot::weekly::parse_utc_offset(&String::from_utf8_lossy(&out.stdout))
 }
 
 fn main() {

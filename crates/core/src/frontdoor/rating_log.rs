@@ -75,20 +75,7 @@ pub fn log_rating(
 ) -> Result<JobRow, CoreError> {
     let row = rating_entry(handoff_id, turn_index, rating, service, model, kind)?;
     let store = ThreadStore::new(data_dir);
-    if !store.exists(handoff_id)? {
-        return Err(CoreError::Refused(format!("no thread {handoff_id}")));
-    }
-    let turns = store.turns(handoff_id)?;
-    let Some(turn) = turns.get(turn_index as usize) else {
-        return Err(CoreError::Refused(format!(
-            "no turn {turn_index} in thread {handoff_id}"
-        )));
-    };
-    if turn.role.as_deref() != Some("assistant") {
-        return Err(CoreError::Refused(format!(
-            "turn {turn_index} of thread {handoff_id} is not an answer"
-        )));
-    }
+    let turn = answer_turn(&store, handoff_id, turn_index)?;
     let (lane, answered_by) = (
         turn.lane.as_deref().unwrap_or(""),
         turn.model.as_deref().unwrap_or(""),
@@ -100,4 +87,56 @@ pub fn log_rating(
     }
     store.upsert(handoff_id, &row)?;
     Ok(row)
+}
+
+/// The answer a rating names: turn `turn_index` of thread `handoff_id` (`ThreadStore::turns`).
+/// Refused when the thread does not exist, has no such turn, or the turn is not an answer.
+fn answer_turn(
+    store: &ThreadStore,
+    handoff_id: &str,
+    turn_index: u32,
+) -> Result<JobRow, CoreError> {
+    if !store.exists(handoff_id)? {
+        return Err(CoreError::Refused(format!("no thread {handoff_id}")));
+    }
+    let Some(turn) = store
+        .turns(handoff_id)?
+        .into_iter()
+        .nth(turn_index as usize)
+    else {
+        return Err(CoreError::Refused(format!(
+            "no turn {turn_index} in thread {handoff_id}"
+        )));
+    };
+    if turn.role.as_deref() != Some("assistant") {
+        return Err(CoreError::Refused(format!(
+            "turn {turn_index} of thread {handoff_id} is not an answer"
+        )));
+    }
+    Ok(turn)
+}
+
+/// #384: `log_rating` for a caller that holds only the thread and the turn (the CLI's `rate`,
+/// MCP's `rate`): the service, model and kind are read from the turn itself. The refusals are
+/// `log_rating`'s: an unknown rating, no such thread, no such turn, a turn that is not an
+/// answer. A refusal returns before any file is touched.
+pub fn rate_turn(
+    data_dir: &Path,
+    handoff_id: &str,
+    turn_index: u32,
+    rating: &str,
+) -> Result<JobRow, CoreError> {
+    if thumbs_from_name(rating).is_none() {
+        return Err(CoreError::Refused(format!("unknown rating: {rating}")));
+    }
+    let turn = answer_turn(&ThreadStore::new(data_dir), handoff_id, turn_index)?;
+    log_rating(
+        data_dir,
+        handoff_id,
+        turn_index,
+        rating,
+        turn.lane.as_deref().unwrap_or(""),
+        turn.model.as_deref().unwrap_or(""),
+        turn.kind.as_deref(),
+    )
 }

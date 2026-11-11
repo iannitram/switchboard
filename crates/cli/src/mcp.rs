@@ -7,6 +7,8 @@
 //! `budget_refresh` (#374), the pool edits through `rules::guard_pool_edit` and
 //! `budget::save_pool_edit`, as the CLI's commands of the same names.
 //! `reports` takes the CLI's `project`, `outcome` and `pool` filters (#358).
+//! #384: project-manager also holds the front door, `ask`, `ask_as_job` and `rate`
+//! (`mcp_frontdoor.rs`), through `rules::guard_front_door`.
 //! MCP-3: inside a job worktree, no write tool whatever the flag.
 //! #375: the satellite role also reads `errors`, the fleet errors the app recorded and the open
 //! IT tickets (IT-3: triage runs on another machine). MCP-1's six stay the list with no role.
@@ -23,6 +25,9 @@ use switchboard_core::fleet::FleetBridge;
 use switchboard_core::github::snapshot::SnapshotStore;
 use switchboard_core::rules::{self, Caller, Face, GuardedAction, Role, Verdict};
 use switchboard_core::waiting::{guarded_item, Item, LocalItems, Source};
+
+#[path = "mcp_frontdoor.rs"]
+pub mod frontdoor;
 
 /// The core behind the tools. `serve` passes a read tool's name and arguments here and returns
 /// the answer as text. The real core is a thin struct in main.rs.
@@ -72,6 +77,10 @@ pub trait WriteCore {
     ) -> Result<Vec<String>, String> {
         let _ = (action, caller);
         Err("drop_request: no Waiting on you list here".to_string())
+    }
+    /// #384: one front door call (`frontdoor::run` in the real core); the answer as JSON.
+    fn front_door(&self, call: &frontdoor::Call) -> Result<Value, String> {
+        Err(format!("{}: this core has no front door", call.tool()))
     }
 }
 
@@ -194,6 +203,10 @@ impl WriteCore for CoreWrites<'_> {
                 other => format!("drop_request: {other}"),
             })
     }
+
+    fn front_door(&self, call: &frontdoor::Call) -> Result<Value, String> {
+        frontdoor::run(call, self.fleet.as_ref(), self.data.as_deref())
+    }
 }
 
 impl CoreWrites<'_> {
@@ -215,14 +228,27 @@ pub const READ_TOOLS: [&str; 6] = [
 ];
 
 /// MCP-2: the write tools a role holds, in this order. No role, or a role with none, holds none.
+/// #385: the autopilot's pass tools come last: `autopilot_pass` for the Project Manager,
+/// `satellite_tick` for the satellite.
 pub fn write_tools(role: &Role) -> Vec<&'static str> {
+    let mut tools = role_write_tools(role);
     match role {
-        Role::ProjectManager => vec![
-            "merge",
-            "request_archive",
-            "request_restore",
-            "drop_request",
-        ],
+        Role::ProjectManager => tools.push("autopilot_pass"),
+        Role::Satellite => tools.push("satellite_tick"),
+        Role::BudgetManager => {}
+    }
+    tools
+}
+
+fn role_write_tools(role: &Role) -> Vec<&'static str> {
+    match role {
+        Role::ProjectManager => {
+            let mut held = vec!["merge"];
+            held.extend(frontdoor::TOOLS);
+            // #347: the tools that file or turn down a guarded request; none confirms.
+            held.extend(["request_archive", "request_restore", "drop_request"]);
+            held
+        }
         Role::BudgetManager => vec!["set_pool_cap", "pool_edit", "budget_refresh"],
         Role::Satellite => vec![],
     }
@@ -231,9 +257,64 @@ pub fn write_tools(role: &Role) -> Vec<&'static str> {
 /// #375: the read tools a role adds to MCP-1's six, in this order. The satellite is the machine
 /// that triages IT tickets (IT-3), so it reads the fleet errors and the tickets.
 pub fn role_read_tools(role: &Role) -> Vec<&'static str> {
-    match role {
+    let mut tools = match role {
         Role::Satellite => vec!["errors"],
         Role::ProjectManager | Role::BudgetManager => vec![],
+    };
+    // #385: the two roles that run autopilot passes read its state.
+    if matches!(role, Role::ProjectManager | Role::Satellite) {
+        tools.push("autopilot_status");
+    }
+    tools
+}
+
+/// #385: the role an autopilot tool is guarded with (`rules::guard_autopilot`), or `None` for
+/// any other tool. The status read is asked with the caller's own role, so only the job
+/// worktree check can refuse it.
+fn autopilot_needs(tool: &str, role: Option<&Role>) -> Option<Role> {
+    match tool {
+        "autopilot_pass" => Some(Role::ProjectManager),
+        "satellite_tick" => Some(Role::Satellite),
+        "autopilot_status" => role.cloned(),
+        _ => None,
+    }
+}
+
+/// #385: an autopilot tool. The guard is the CLI's; the answer is the read core's (the status,
+/// or the pass's report as JSON). A report with errors is `isError: true`, its text still the
+/// whole report.
+fn autopilot_call(
+    id: &Value,
+    name: &str,
+    args: &Value,
+    core: &dyn ReadCore,
+    role: Option<&Role>,
+    needs: &Role,
+    in_job_worktree: bool,
+) -> Value {
+    let caller = Caller {
+        face: Face::Mcp,
+        role: role.cloned(),
+        in_job_worktree,
+        confirmed_in_app: false,
+    };
+    let said = |text: String, failed: bool| {
+        ok(
+            id,
+            json!({ "content": [{ "type": "text", "text": text }], "isError": failed }),
+        )
+    };
+    if let Verdict::Refuse(text) | Verdict::ToWaiting(text) =
+        rules::guard_autopilot(&caller, name, needs)
+    {
+        return said(text, true);
+    }
+    match core.call(name, args) {
+        Ok(answer) => {
+            let failed = answer["errors"].as_array().is_some_and(|e| !e.is_empty());
+            said(answer.to_string(), failed)
+        }
+        Err(message) => said(message, true),
     }
 }
 
@@ -397,6 +478,9 @@ fn call_tool(
         Some(Err(message)) => return error(id, INVALID_PARAMS, &message),
         None => raw_args.clone(),
     };
+    if let Some(needs) = autopilot_needs(name, role) {
+        return autopilot_call(id, name, &args, core, role, &needs, in_job_worktree);
+    }
     if read {
         return read_call(id, name, &args, core);
     }
@@ -412,6 +496,7 @@ fn tool_schema(name: &str) -> Option<Value> {
     all.into_iter()
         .chain(role_read_schemas().into_iter().map(|(_, schema)| schema))
         .chain(write_schemas().into_iter().map(|(_, schema)| schema))
+        .chain(frontdoor::schemas().into_iter().map(|(_, schema)| schema))
         .find(|tool| tool["name"] == name)
         .map(|tool| tool["inputSchema"].clone())
 }
@@ -467,6 +552,7 @@ fn check_args(tool: &str, schema: &Value, args: &Value) -> Result<Value, String>
             }
             // A number's `minimum` (a pool cap's 0) is left to the core, whose refusal says why.
             "number" if value.as_f64().is_none() => return Err(bad("a number")),
+            "boolean" if !value.is_boolean() => return Err(bad("true or false")),
             _ => {}
         }
     }
@@ -557,6 +643,17 @@ fn write_call(
                         "drop_request needs kind (archive or restore) and repo (string)",
                     )
                 }
+            }
+        }
+        // #384: the front door, the same check the CLI makes.
+        tool if frontdoor::TOOLS.contains(&tool) => {
+            let call = match frontdoor::call_from(tool, args) {
+                Ok(call) => call,
+                Err(message) => return error(id, INVALID_PARAMS, &message),
+            };
+            match rules::guard_front_door(&caller, tool) {
+                Verdict::Allow => write.front_door(&call).map(|answer| answer.to_string()),
+                Verdict::Refuse(text) | Verdict::ToWaiting(text) => Err(text),
             }
         }
         // `budget_refresh`: a re-read, held by the role alone (`write_tools`).
@@ -664,30 +761,45 @@ fn tools(role: Option<&Role>) -> Value {
                 .map(|(_, schema)| schema),
         );
         let held = write_tools(role);
-        let all = write_schemas();
-        list.extend(
-            all.into_iter()
-                .filter(|(name, _)| held.iter().any(|h| h == name))
-                .map(|(_, schema)| schema),
-        );
+        // In `write_tools`' order, so the front door's tools (#384) stay beside `merge` and
+        // the autopilot's pass tool (#385) comes last.
+        let all: Vec<(&str, Value)> = write_schemas()
+            .into_iter()
+            .chain(frontdoor::schemas())
+            .collect();
+        list.extend(held.iter().filter_map(|h| {
+            all.iter()
+                .find(|(name, _)| name == h)
+                .map(|(_, schema)| schema.clone())
+        }));
     }
     Value::Array(list)
 }
 
 /// #375: every role read tool's `(name, schema)`; `tools` lists the ones a role holds.
-fn role_read_schemas() -> [(&'static str, Value); 1] {
-    [(
-        "errors",
-        json!({
-            "name": "errors",
-            "description": "The fleet errors the app recorded, newest first, and the open IT tickets.",
-            "inputSchema": { "type": "object", "properties": {} }
-        }),
-    )]
+fn role_read_schemas() -> [(&'static str, Value); 2] {
+    [
+        (
+            "errors",
+            json!({
+                "name": "errors",
+                "description": "The fleet errors the app recorded, newest first, and the open IT tickets.",
+                "inputSchema": { "type": "object", "properties": {} }
+            }),
+        ),
+        (
+            "autopilot_status",
+            json!({
+                "name": "autopilot_status",
+                "description": "The autopilot's state: what its passes have started and seen, whether the weekly run is due, the running jobs, and the satellite's loops and holds.",
+                "inputSchema": { "type": "object", "properties": {} }
+            }),
+        ),
+    ]
 }
 
 /// MCP-2: every write tool's `(name, schema)`; `tools` lists the ones a role holds.
-fn write_schemas() -> [(&'static str, Value); 7] {
+fn write_schemas() -> [(&'static str, Value); 9] {
     let repo = json!({ "type": "string", "description": "The repo's name or owner/name" });
     [
         (
@@ -775,6 +887,32 @@ fn write_schemas() -> [(&'static str, Value); 7] {
                 "name": "budget_refresh",
                 "description": "Re-read every pool that has a reader now, then return the budget rows.",
                 "inputSchema": { "type": "object", "properties": {} }
+            }),
+        ),
+        (
+            "autopilot_pass",
+            json!({
+                "name": "autopilot_pass",
+                "description": "Run one autopilot pass now, as the app's poll does, and return its report. With dry_run it starts no job, merges nothing and writes no state, and reports what it would do.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "pass": { "type": "string", "enum": ["roadmap", "review", "merge", "weekly"] },
+                        "dry_run": { "type": "boolean" }
+                    },
+                    "required": ["pass"]
+                }
+            }),
+        ),
+        (
+            "satellite_tick",
+            json!({
+                "name": "satellite_tick",
+                "description": "Run one tick of the satellite loop on this machine and return its report; the loops it starts run on while this server lives. With dry_run it starts nothing and reports the lanes it would start.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": { "dry_run": { "type": "boolean" } }
+                }
             }),
         ),
     ]

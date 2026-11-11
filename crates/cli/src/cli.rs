@@ -8,6 +8,7 @@
 //! [--plan <p>] [--cap <n>] [--reset <day time>] [--cost <n>]` edit a pool through
 //! `rules::guard_pool_edit` and `budget::save_pool_edit`, as MCP's tools do (#357, #374).
 //! `budget --refresh` re-reads the pools first (#374); `settings` prints the settings file (#373).
+//! The front door (#384): `ask`, `ask_as_job` and `rate`, in `cli_frontdoor.rs`.
 //!
 //! The raw `fleet` CLI stays the documented escape hatch: Switchboard keeps no state that only
 //! it can read.
@@ -40,6 +41,9 @@ use switchboard_core::settings::{self, Settings};
 use switchboard_core::sky;
 use switchboard_core::waiting::{self, guarded_item, Item, LocalItems};
 
+#[path = "cli_frontdoor.rs"]
+pub mod frontdoor;
+
 /// The environment variable that names the pipeline checkout. There is no default.
 pub const PIPELINE_ENV: &str = "SWITCHBOARD_PIPELINE";
 /// The environment variable that names the app data folder (the snapshot is in `snapshot/`).
@@ -68,10 +72,14 @@ const NO_SNAPSHOT: &str = "switchboard: no snapshot yet; run switchboard refresh
 pub const USAGE: &str = "usage: switchboard [--help | --version] [--json] [--role <role>] \
                      [--project <repo>] [--outcome <o>] [--pool <p>] \
                      <sky | waiting | reports | errors | budget [--refresh] | loadout | settings | \
+                     ask \"<text>\" [--dry-run] [--thread <id>] | \
+                     ask_as_job <kind> \"<text>\" --unmet <need>[,<need>] | \
+                     rate <thread> <turn> <up|down> | \
                      star <repo>#<n> | refresh | backup <repo> | backup --all | delete <repo> | \
                      restore <repo> | drop <delete | restore> <repo> | merge <repo>#<pr> | set_pool_cap <pool> <cap> | \
                      pool_edit <pool> [--plan <p>] [--cap <n>] [--reset <day time>] [--cost <n>] | \
-                     mcp>";
+                     autopilot <roadmap | review | merge | weekly | satellite> [--dry-run] | \
+                     autopilot status | mcp>";
 
 /// The writes a CLI command can reach (CLI-3). The real ones are `CliWrites`; the tests pass
 /// fakes.
@@ -338,7 +346,7 @@ impl GitHubTransport for NoGitHub {
 }
 
 /// The real transport for the re-read, or one that says why there is none (`gh auth token`).
-fn live_transport() -> Box<dyn GitHubTransport> {
+pub(crate) fn live_transport() -> Box<dyn GitHubTransport> {
     match HttpTransport::new(&GhAuthToken::default()) {
         Ok(http) => Box::new(http),
         Err(e) => Box::new(NoGitHub(e.to_string())),
@@ -463,6 +471,14 @@ pub fn run_with(
             return ExitCode::from(2);
         }
     };
+    let (door_flags, argv) = match frontdoor::take_flags(&argv) {
+        Ok(taken) => taken,
+        Err(e) => {
+            eprintln!("switchboard: {e}");
+            eprintln!("{USAGE}");
+            return ExitCode::from(2);
+        }
+    };
     let args = match super::parse_args(&argv) {
         Ok(args) => args,
         Err(e) => {
@@ -489,6 +505,11 @@ pub fn run_with(
     }
     if pool_flags.refresh && command != Some("budget") {
         eprintln!("switchboard: --refresh is for budget");
+        eprintln!("{USAGE}");
+        return ExitCode::from(2);
+    }
+    if let Some(e) = frontdoor::misplaced(&door_flags, command) {
+        eprintln!("switchboard: {e}");
         eprintln!("{USAGE}");
         return ExitCode::from(2);
     }
@@ -528,6 +549,14 @@ pub fn run_with(
             pool_command(&args, &pool_flags, cwd, now, err, &mut std::io::stdout())
         }
         Some("settings") => settings_command(args.json, &mut std::io::stdout()),
+        Some("ask" | "ask_as_job" | "rate") => frontdoor::command(
+            &args.command,
+            args.json,
+            &door_flags,
+            &guard_for(&args, cwd),
+            err,
+            &mut std::io::stdout(),
+        ),
         Some("sky") => sky_command(args.json),
         Some("star") => match args.command.get(1..) {
             Some([target]) => star_command(target, args.json),
