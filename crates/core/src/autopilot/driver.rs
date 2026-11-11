@@ -287,6 +287,20 @@ impl ChildRunner {
         }
     }
 
+    /// The lanes held now after a failed loop, each with the seconds left (#385: the status
+    /// read). The holds live in this runner only, as before.
+    pub fn holds(&mut self) -> Vec<(String, u64)> {
+        let now = Instant::now();
+        LaneRunner::held(self)
+            .into_iter()
+            .zip(
+                self.held
+                    .iter()
+                    .map(|(_, until)| until.saturating_duration_since(now).as_secs()),
+            )
+            .collect()
+    }
+
     /// Each loop that has ended since the last call, oldest first.
     pub fn take_finished(&mut self) -> Vec<LoopEnd> {
         self.reap();

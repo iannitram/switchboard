@@ -916,7 +916,8 @@ fn mcp_project_manager_asks_dry_then_for_real_then_rates() {
         .iter()
         .map(|t| t["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names[6..], ["merge", "ask", "ask_as_job", "rate"]);
+    // #385: `autopilot_status` comes before them and `autopilot_pass` after.
+    assert_eq!(names[7..11], ["merge", "ask", "ask_as_job", "rate"]);
     let dry = &replies[1]["result"];
     assert_eq!(dry["isError"], false, "{dry}");
     let dry: Value = serde_json::from_str(dry["content"][0]["text"].as_str().unwrap()).unwrap();

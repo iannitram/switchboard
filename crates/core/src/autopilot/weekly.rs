@@ -68,3 +68,21 @@ pub fn parse_utc_offset(text: &str) -> Option<i64> {
     }
     Some(sign * (hours * 3_600 + minutes * 60))
 }
+
+/// AUTO-5: this computer's UTC offset in seconds: `date +%z` on Linux and macOS, PowerShell's
+/// `zzz` on Windows. `None` when neither answers; the weekly run then waits.
+pub fn local_utc_offset() -> Option<i64> {
+    let out = if cfg!(windows) {
+        std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                "(Get-Date).ToString('zzz').Replace(':','')",
+            ])
+            .output()
+    } else {
+        std::process::Command::new("date").arg("+%z").output()
+    }
+    .ok()?;
+    parse_utc_offset(&String::from_utf8_lossy(&out.stdout))
+}

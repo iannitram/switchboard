@@ -110,7 +110,8 @@ const DOOR: [&str; 3] = ["ask", "ask_as_job", "rate"];
 #[test]
 fn only_the_project_manager_lists_the_front_door() {
     assert_eq!(
-        names(Some(Role::ProjectManager))[6..],
+        // #385: `autopilot_status` comes before them and `autopilot_pass` after.
+        names(Some(Role::ProjectManager))[7..11],
         ["merge", "ask", "ask_as_job", "rate"]
     );
     for role in [None, Some(Role::Satellite), Some(Role::BudgetManager)] {
