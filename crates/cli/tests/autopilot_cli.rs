@@ -395,6 +395,25 @@ fn a_killed_satellite_run_leaves_its_loop_to_the_next_run() {
             .iter()
             .any(|r| r.pid == loop_pid && r.owner_pid == second_pid)
     });
+    for _ in 0..5 {
+        diag.push_str(&format!(
+            "after adopt: alive={}\n",
+            loops::alive(loop_pid, None)
+        ));
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    if cfg!(windows) {
+        let tl = Command::new("tasklist")
+            .args(["/FO", "CSV", "/NH"])
+            .output()
+            .unwrap();
+        for line in String::from_utf8_lossy(&tl.stdout).lines() {
+            let l = line.to_lowercase();
+            if l.contains("py") || l.contains("switchboard") {
+                diag.push_str(&format!("after adopt tasklist: {line}\n"));
+            }
+        }
+    }
     std::fs::write(tools.join("go"), "").unwrap();
     let out = second.wait_with_output().unwrap();
     assert_eq!(code(&out), Some(0), "{}{}", stdout(&out), stderr(&out));
