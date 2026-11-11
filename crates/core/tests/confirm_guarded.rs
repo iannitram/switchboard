@@ -546,6 +546,25 @@ fn a_restore_that_fails_keeps_its_item() {
     unchanged(&data, &before);
 }
 
+/// Second check of #417: the record of held restores is read before the restore runs, so a
+/// file that cannot be read refuses first. Nothing is pushed and the request stays as it was.
+#[test]
+fn an_unreadable_record_of_held_restores_stops_the_confirm_before_the_restore() {
+    let (data, before) = seeded("bad-record");
+    let record = data.join("waiting").join("held-restores.json");
+    std::fs::write(&record, "{ not json").unwrap();
+    let restore_run = Restore::answering(Ok(report()));
+    let app = caller(Face::Gui, None, false, true);
+    let got = restore_run.run(&data, &text_of(&asked(&restore())), &app);
+    assert!(
+        matches!(&got, Err(CoreError::Parse(why)) if why.contains("held-restores.json")),
+        "{got:?}"
+    );
+    assert!(restore_run.idle(), "the restore did not run");
+    unchanged(&data, &before);
+    assert_eq!(std::fs::read_to_string(&record).unwrap(), "{ not json");
+}
+
 /// #347, owner decision 1: a confirmed delete request archives the repo, once, and its request
 /// leaves Waiting on you. No restore runs.
 #[test]

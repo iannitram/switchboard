@@ -175,7 +175,8 @@ pub struct Actions<'a> {
 ///   with no record gets an empty one, so nothing is closed), and leaves the list once nothing
 ///   is held back. Each time the item stays, the report's record is kept beside it.
 ///
-/// Every refusal and every failed action leaves the file untouched.
+/// The record of held restores is read before a restore runs: one that cannot be read stops
+/// the confirm there. Every refusal and every failed action leaves the file untouched.
 pub fn confirm_with(
     data_dir: &Path,
     text: &str,
@@ -203,8 +204,11 @@ pub fn confirm_with(
     match &action {
         GuardedAction::RestoreOverLive { repo } => {
             typed_is(&what, repo, typed)?;
+            // Read before anything runs: a record that cannot be read refuses the confirm
+            // here, not after the restore pushed and its record could not be kept.
+            let kept = records.get(text)?;
             let pass = if item.action == HELD_ACTION {
-                Pass::Held(records.get(text)?.unwrap_or_default())
+                Pass::Held(kept.unwrap_or_default())
             } else {
                 Pass::Whole
             };
