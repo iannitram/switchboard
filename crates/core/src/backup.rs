@@ -1865,7 +1865,6 @@ fn restore_issues_made(
     }
 
     let backed_up: HashSet<u64> = titles.iter().map(|(number, _)| *number).collect();
-    // What a `#N` in the backup's text names now.
     // The names the backed-up text calls its own repo by (#365).
     let mut own_names = vec![manifest.repo.as_str()];
     own_names.extend(manifest.resolved_repo.as_deref());
@@ -1873,6 +1872,7 @@ fn restore_issues_made(
         from: &own_names,
         to: repo,
     };
+    // What a `#N` in the backup's text names now.
     let number_now = |old: u64| match now.get(&old) {
         Some(&new) => Now::Is(new),
         None if backed_up.contains(&old) => Now::NotYet,
@@ -1928,6 +1928,8 @@ fn restore_issues_made(
     let mut left_open = Vec::new();
     let mut not_made = Vec::new();
     let mut kept_numbers = Vec::new();
+    // What is at a recorded number but no longer has the backup's title: never changed.
+    let mut retitled = Vec::new();
     let mut limited = false;
     for (old, issue) in &numbered {
         let closed = has_state(issue, "closed");
@@ -1982,6 +1984,10 @@ fn restore_issues_made(
         if change.is_empty() {
             continue;
         }
+        if found.title != text(issue, "title") {
+            retitled.push(format!("#{}", found.number));
+            continue;
+        }
         let closes = change.contains_key("state");
         let rewrites = change.contains_key("body");
         let path = format!("/repos/{repo}/issues/{}", found.number);
@@ -2015,11 +2021,20 @@ fn restore_issues_made(
                     .find(|m| text(m, "title").to_lowercase() == *title),
                 Some(made) => match made.milestones.get(title) {
                     // The one the queue made, by its number.
-                    Some(created) => created.number.and_then(|number| {
-                        live_milestones
-                            .iter()
-                            .find(|m| m["number"].as_u64() == Some(number))
-                    }),
+                    Some(created) => {
+                        let at = created.number.and_then(|number| {
+                            live_milestones
+                                .iter()
+                                .find(|m| m["number"].as_u64() == Some(number))
+                        });
+                        match at {
+                            Some(m) if text(m, "title").to_lowercase() != *title => {
+                                retitled.push(format!("milestone {}", text(m, "title")));
+                                continue;
+                            }
+                            at => at,
+                        }
+                    }
                     None => {
                         let there = live_milestones
                             .iter()
@@ -2077,6 +2092,11 @@ fn restore_issues_made(
             named(
                 "issue bodies keep the backup's #N, not rewritten",
                 &kept_numbers,
+            ),
+            named(
+                "issues or milestones this restore made have another title in the repo now and \
+                 were left as they are",
+                &retitled,
             ),
         ]
         .into_iter()

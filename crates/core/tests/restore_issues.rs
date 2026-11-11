@@ -1040,6 +1040,69 @@ fn an_issue_the_queue_found_there_is_not_the_restores() {
     );
 }
 
+/// Second check of #417: what is at a recorded number is closed or rewritten only while it
+/// still has the backup's title. An issue or milestone with another title there now is left
+/// as it is and named; it does not hold the restore.
+#[test]
+fn what_is_at_a_recorded_number_with_another_title_is_left_and_named() {
+    let f = fixture("retitled");
+    std::fs::write(
+        f.backup.join("milestones.json"),
+        r#"[{"title": "1.0", "state": "closed"}]"#,
+    )
+    .unwrap();
+    edit_json(&f.backup, "issues.json", |issues| {
+        issues[0]["body"] = json!("see #2");
+    });
+    let mut made = record(&[(1, 1), (2, 2)]);
+    made.milestones.insert(
+        "1.0".to_string(),
+        Created {
+            key: "key-milestone".to_string(),
+            number: Some(3),
+        },
+    );
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            answer(200, json!({"private": true})),
+            answer(
+                200,
+                json!([{"number": 1, "title": "Not the bug", "state": "open", "body": "see #2"},
+                       {"number": 2, "title": "Someone else's", "state": "open", "body": ""}]),
+            ),
+            answer(200, json!([])),
+            answer(
+                200,
+                json!([{"number": 3, "title": "Another plan", "state": "open"}]),
+            ),
+        ],
+    );
+    let report = restore_held_over_live_from(
+        &caller(Face::Gui, false),
+        &f.fleet,
+        &f.backup,
+        NEW,
+        true,
+        &made,
+        &remote(&f, &api),
+    )
+    .unwrap();
+    assert_eq!(patches(&api), Vec::<String>::new(), "nothing was changed");
+    assert_eq!(report.issues.closed, 0);
+    assert_eq!(report.issues.milestones_closed, 0);
+    assert_eq!(report.issues.state_waiting, 0, "and nothing waits for it");
+    assert!(
+        report.issues.left_out.contains(
+            &"2 issues or milestones this restore made have another title in the repo now and \
+              were left as they are: #2, milestone Another plan"
+                .to_string()
+        ),
+        "{:?}",
+        report.issues.left_out
+    );
+}
+
 /// #365 (second check): the held pass closes a closed milestone only by the number the queue
 /// says it made for the restore; a milestone the repo had, open, stays open and is named.
 #[test]
