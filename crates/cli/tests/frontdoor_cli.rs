@@ -1184,3 +1184,44 @@ fn mcp_in_a_job_worktree_holds_no_front_door() {
     assert!(w.fleet_calls().is_empty());
     assert_eq!(w.asked(), 0);
 }
+
+/// #433: a dry run on a stored thread, the routes a real ask would take from it included (a
+/// Claude handoff that would move it, a braked pool), writes nothing: every file under the data
+/// folder is byte for byte as it was.
+#[test]
+fn a_dry_run_on_a_stored_thread_writes_nothing() {
+    fn files(dir: &Path, out: &mut Vec<(PathBuf, Vec<u8>)>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                out.push((path.clone(), Vec::new()));
+                files(&path, out);
+            } else {
+                let bytes = std::fs::read(&path).unwrap();
+                out.push((path, bytes));
+            }
+        }
+    }
+    let w = world("dry-thread");
+    let thread = w.ask();
+    let tree = || {
+        let mut all = Vec::new();
+        files(&w.data, &mut all);
+        all.sort();
+        all
+    };
+    let before = tree();
+    for (message, env) in [
+        (ASK, ("STUB_BRAKED", "")),
+        ("ask Claude about worktrees", ("STUB_BRAKED", "")),
+        (ASK, ("STUB_BRAKED", "qwen,gemini")),
+        (
+            "search the web for the latest rust release",
+            ("STUB_STALE", "chatgpt"),
+        ),
+    ] {
+        let out = w.run_with(&["ask", message, "--dry-run", "--thread", &thread], &[env]);
+        assert_eq!(out.status.code(), Some(0), "{message}: {}", stderr(&out));
+    }
+    assert!(tree() == before, "a dry run changed the data folder");
+}
