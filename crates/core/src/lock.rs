@@ -117,17 +117,28 @@ fn is_stale(path: &Path) -> bool {
         .is_some_and(|age| age > STALE_LOCK)
 }
 
-/// Move a dead run's lock file aside under a name of this run's own, then remove it. When two
-/// takers find it stale at once, only one rename succeeds; the other just looks again. If what
-/// was moved aside turns out to be fresh (another taker replaced the stale file between the
-/// look and the rename), it is linked back first, which only succeeds while no lock is there.
+/// Remove a dead run's lock file. Only one taker at a time may: it must first make
+/// `<lock>.takeover` with `create_new`, then looks again and removes the lock only if it is
+/// still stale. Without that, a taker that saw the stale file could remove a fresh lock another
+/// taker had just made, and two would hold it. A takeover file left by a run that died mid-
+/// takeover is itself stale after `STALE_LOCK` and removed; every other taker just looks again.
 fn take_over(path: &Path) {
-    let aside = temp_path(path, ".stale");
-    if std::fs::rename(path, &aside).is_err() {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".takeover");
+    let guard = PathBuf::from(name);
+    if std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&guard)
+        .is_err()
+    {
+        if is_stale(&guard) {
+            let _ = std::fs::remove_file(&guard);
+        }
         return;
     }
-    if !is_stale(&aside) {
-        let _ = std::fs::hard_link(&aside, path);
+    if is_stale(path) {
+        let _ = std::fs::remove_file(path);
     }
-    let _ = std::fs::remove_file(&aside);
+    let _ = std::fs::remove_file(&guard);
 }

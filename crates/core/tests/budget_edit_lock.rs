@@ -266,6 +266,61 @@ fn a_lock_left_by_a_dead_run_is_taken_over() {
     drop(held);
 }
 
+/// #416 review: several takers find the same dead run's lock at once. Only one may hold it at a
+/// time; before, a taker that saw the stale file could move away the fresh lock another had
+/// just made, and two held it (seen in most rounds with 8 takers).
+#[test]
+fn a_stale_lock_found_by_many_at_once_has_one_holder_at_a_time() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier};
+    const TAKERS: usize = 8;
+    let base = scratch("stale-many");
+    let target = base.join("config.json");
+    for round in 0..100 {
+        let lock = lock_path(&target);
+        std::fs::write(&lock, "dead run\n").unwrap();
+        let old = std::time::SystemTime::now() - STALE_LOCK - std::time::Duration::from_secs(60);
+        std::fs::File::options()
+            .write(true)
+            .open(&lock)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        let holding = Arc::new(AtomicUsize::new(0));
+        let most = Arc::new(AtomicUsize::new(0));
+        let start = Arc::new(Barrier::new(TAKERS));
+        let takers: Vec<_> = (0..TAKERS)
+            .map(|_| {
+                let (target, holding, most, start) =
+                    (target.clone(), holding.clone(), most.clone(), start.clone());
+                std::thread::spawn(move || {
+                    start.wait();
+                    let held = FileLock::take(&target, std::time::Duration::from_secs(10)).unwrap();
+                    most.fetch_max(holding.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
+                    std::thread::sleep(std::time::Duration::from_micros(200));
+                    holding.fetch_sub(1, Ordering::SeqCst);
+                    drop(held);
+                })
+            })
+            .collect();
+        for taker in takers {
+            taker.join().unwrap();
+        }
+        assert_eq!(
+            most.load(Ordering::SeqCst),
+            1,
+            "round {round}: two held the lock"
+        );
+        let left: Vec<_> = std::fs::read_dir(&base)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .filter(|n| n != "config.json")
+            .collect();
+        assert!(left.is_empty(), "round {round}: left behind: {left:?}");
+    }
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 /// A pipeline root with one pool, `deepseek` (cap 10), and its data folder.
 fn one_pool(tag: &str) -> (PathBuf, PathBuf) {
     let base = scratch(tag);
