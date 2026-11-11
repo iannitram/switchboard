@@ -173,7 +173,7 @@ fn pool_edits_from_several_processes_all_land_or_are_refused() {
                 .iter()
                 .filter(|(p, _)| *p == pool(i))
                 .map(|(_, c)| *c)
-                .last()
+                .next_back()
                 .unwrap_or(1.0);
             assert_eq!(
                 config["pools"][pool(i)]["cap_usd"].as_f64(),
