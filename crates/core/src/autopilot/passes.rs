@@ -13,6 +13,7 @@ use crate::github::merge::{
 };
 use crate::github::poll::Poller;
 use crate::github::snapshot::{PullRequest, RepoSnapshot, SnapshotStore};
+use crate::github::transport::GitHubTransport;
 use crate::rules::{Caller, Face, Role};
 use crate::waiting::{Item, LocalItems, Source};
 use crate::CoreError;
@@ -782,6 +783,47 @@ pub fn clear_settled_merges(
         };
         if there.iter().any(|item| item.source == source) && local.remove(&source)? {
             cleared.push((repo, pr));
+        }
+    }
+    Ok(cleared)
+}
+
+/// #433: the poll reads only the 50 most recently updated PRs, so a refused PR that drops off
+/// that list never shows as merged or closed in a snapshot. Look up, one by one through
+/// `transport`, each Waiting merge item whose PR is in no snapshot, and take out the ones that
+/// merged or closed. A lookup that fails or answers anything else leaves the item. Answers the
+/// PRs cleared, as `(repo, pr)`; with none, nothing is written.
+pub fn clear_vanished_merges(
+    data_dir: &Path,
+    snaps: &[RepoSnapshot],
+    transport: &dyn GitHubTransport,
+) -> Result<Vec<(String, u64)>, CoreError> {
+    let local = LocalItems::new(data_dir);
+    let mut cleared = Vec::new();
+    for item in local.load()? {
+        let Source::GuardedAction { text } = &item.source else {
+            continue;
+        };
+        let Some((repo, pr)) = text
+            .strip_prefix("Merge ")
+            .and_then(|rest| rest.rsplit_once('#'))
+            .and_then(|(repo, n)| Some((repo, n.parse::<u64>().ok()?)))
+        else {
+            continue;
+        };
+        let polled = snaps
+            .iter()
+            .any(|s| s.repo == repo && s.pulls.iter().any(|p| p.number == pr));
+        if polled {
+            continue;
+        }
+        let path = format!("/repos/{repo}/pulls/{pr}");
+        let settled = matches!(
+            transport.rest_get(&path, None),
+            Ok(a) if a.status == 200 && a.body["state"].as_str() == Some("closed")
+        );
+        if settled && local.remove(&item.source)? {
+            cleared.push((repo.to_string(), pr));
         }
     }
     Ok(cleared)
