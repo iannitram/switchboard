@@ -7,6 +7,8 @@
 //! `budget::save_pool_edit`, as the CLI's commands of the same names.
 //! `reports` takes the CLI's `project`, `outcome` and `pool` filters (#358).
 //! MCP-3: inside a job worktree, no write tool whatever the flag.
+//! #375: the satellite role also reads `errors`, the fleet errors the app recorded and the open
+//! IT tickets (IT-3: triage runs on another machine). MCP-1's six stay the list with no role.
 
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
@@ -73,8 +75,14 @@ impl WriteCore for CoreWrites<'_> {
             .as_ref()
             .ok_or_else(|| format!("{tool}: set SWITCHBOARD_DATA to the app data folder"))?;
         let pool = &edit.pool;
+        // An empty pool name leaves no gap before the colon (#416).
+        let who = if pool.is_empty() {
+            tool.to_string()
+        } else {
+            format!("{tool} {pool}")
+        };
         let saved = budget::save_pool_edit(fleet, edit, data, self.clock)
-            .map_err(|e| format!("{tool} {pool}: {e}"))?;
+            .map_err(|e| format!("{who}: {e}"))?;
         Ok(format!(
             "{tool} {pool}: {}",
             budget::edit_summary(&saved.ledger_row)
@@ -127,6 +135,15 @@ pub fn write_tools(role: &Role) -> Vec<&'static str> {
         Role::ProjectManager => vec!["merge"],
         Role::BudgetManager => vec!["set_pool_cap", "pool_edit", "budget_refresh"],
         Role::Satellite => vec![],
+    }
+}
+
+/// #375: the read tools a role adds to MCP-1's six, in this order. The satellite is the machine
+/// that triages IT tickets (IT-3), so it reads the fleet errors and the tickets.
+pub fn role_read_tools(role: &Role) -> Vec<&'static str> {
+    match role {
+        Role::Satellite => vec!["errors"],
+        Role::ProjectManager | Role::BudgetManager => vec![],
     }
 }
 
@@ -280,7 +297,9 @@ fn call_tool(
     };
     let raw_args = params.get("arguments").unwrap_or(&Value::Null);
     let held = role.is_some_and(|r| write_tools(r).contains(&name));
-    if !READ_TOOLS.contains(&name) && !held {
+    let read =
+        READ_TOOLS.contains(&name) || role.is_some_and(|r| role_read_tools(r).contains(&name));
+    if !read && !held {
         return error(id, INVALID_PARAMS, &format!("unknown tool: {name}"));
     }
     let args = match tool_schema(name).map(|schema| check_args(name, &schema, raw_args)) {
@@ -288,7 +307,7 @@ fn call_tool(
         Some(Err(message)) => return error(id, INVALID_PARAMS, &message),
         None => raw_args.clone(),
     };
-    if READ_TOOLS.contains(&name) {
+    if read {
         return read_call(id, name, &args, core);
     }
     match role {
@@ -301,6 +320,7 @@ fn call_tool(
 fn tool_schema(name: &str) -> Option<Value> {
     let all = read_tools().as_array().cloned().unwrap_or_default();
     all.into_iter()
+        .chain(role_read_schemas().into_iter().map(|(_, schema)| schema))
         .chain(write_schemas().into_iter().map(|(_, schema)| schema))
         .find(|tool| tool["name"] == name)
         .map(|tool| tool["inputSchema"].clone())
@@ -482,10 +502,17 @@ fn guarded_merge(
     }
 }
 
-/// MCP-1 and MCP-2: the six read tools, then the role's write tools.
+/// MCP-1 and MCP-2: the six read tools, then the role's read tools (#375), then its write tools.
 fn tools(role: Option<&Role>) -> Value {
     let mut list = read_tools().as_array().cloned().unwrap_or_default();
     if let Some(role) = role {
+        let reads = role_read_tools(role);
+        list.extend(
+            role_read_schemas()
+                .into_iter()
+                .filter(|(name, _)| reads.contains(name))
+                .map(|(_, schema)| schema),
+        );
         let held = write_tools(role);
         let all = write_schemas();
         list.extend(
@@ -495,6 +522,18 @@ fn tools(role: Option<&Role>) -> Value {
         );
     }
     Value::Array(list)
+}
+
+/// #375: every role read tool's `(name, schema)`; `tools` lists the ones a role holds.
+fn role_read_schemas() -> [(&'static str, Value); 1] {
+    [(
+        "errors",
+        json!({
+            "name": "errors",
+            "description": "The fleet errors the app recorded, newest first, and the open IT tickets.",
+            "inputSchema": { "type": "object", "properties": {} }
+        }),
+    )]
 }
 
 /// MCP-2: every write tool's `(name, schema)`; `tools` lists the ones a role holds.

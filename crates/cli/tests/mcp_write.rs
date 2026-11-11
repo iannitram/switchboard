@@ -216,7 +216,8 @@ fn budget_manager_set_pool_cap_reaches_the_core_once() {
 
 #[test]
 fn satellite_lists_no_write_tool() {
-    assert_eq!(tool_names(Some(Role::Satellite)), with_extra(&[]));
+    // #375: the satellite's one extra tool is a read (`errors`), never a write.
+    assert_eq!(tool_names(Some(Role::Satellite)), with_extra(&["errors"]));
     let write = FakeWrite::default();
     let replies = run(
         Some(Role::Satellite),
@@ -344,5 +345,42 @@ fn other_roles_get_no_pool_edit_and_no_budget_refresh() {
         );
         assert!(write.edits.borrow().is_empty());
         assert_eq!(*write.refreshes.borrow(), 0);
+    }
+}
+
+/// #375: the satellite reads the recorded fleet errors and the IT tickets; the call reaches the
+/// read core with no write made.
+#[test]
+fn satellite_errors_reaches_the_read_core() {
+    let write = FakeWrite::default();
+    let replies = run(
+        Some(Role::Satellite),
+        &write,
+        &[call(30, "errors", json!({}))],
+    );
+    assert_eq!(replies[0]["result"]["isError"], false, "{}", replies[0]);
+    let text = replies[0]["result"]["content"][0]["text"].as_str().unwrap();
+    let answer: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(answer["tool"], "errors");
+    assert!(write.merged.borrow().is_empty());
+    assert!(write.caps.borrow().is_empty());
+    assert!(write.edits.borrow().is_empty());
+}
+
+/// #375: MCP-1's six stay the list with no role, and the other roles do not read `errors`.
+#[test]
+fn errors_is_unknown_without_the_satellite_role() {
+    for role in [None, Some(Role::ProjectManager), Some(Role::BudgetManager)] {
+        assert!(
+            !tool_names(role.clone()).iter().any(|t| t == "errors"),
+            "{role:?} lists errors"
+        );
+        let replies = run(
+            role,
+            &FakeWrite::default(),
+            &[call(31, "errors", json!({}))],
+        );
+        assert_eq!(replies[0]["error"]["code"], -32602);
+        assert_eq!(replies[0]["error"]["message"], "unknown tool: errors");
     }
 }

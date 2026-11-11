@@ -298,7 +298,8 @@ impl LocalItems {
         Ok(true)
     }
 
-    /// Pretty JSON to `local.json.tmp`, then renamed over `local.json`.
+    /// Pretty JSON to a temp file of this run's own (`local.json.tmp-<run>`, #416), then renamed
+    /// over `local.json`.
     fn write(&self, items: &[Item]) -> Result<(), CoreError> {
         let io = |e: std::io::Error| CoreError::Io(format!("{}: {e}", self.path.display()));
         if let Some(dir) = self.path.parent() {
@@ -307,9 +308,12 @@ impl LocalItems {
         let mut text = serde_json::to_string_pretty(items)
             .map_err(|e| CoreError::Parse(format!("{}: {e}", self.path.display())))?;
         text.push('\n');
-        let tmp = self.path.with_extension("json.tmp");
+        let tmp = crate::lock::temp_path(&self.path, ".tmp");
         std::fs::write(&tmp, text).map_err(io)?;
-        std::fs::rename(&tmp, &self.path).map_err(io)
+        std::fs::rename(&tmp, &self.path).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            io(e)
+        })
     }
 }
 

@@ -338,6 +338,43 @@ pub fn file_error_tickets(bridge: &FleetBridge, log: &FleetErrorLog) -> Result<u
     Ok(log.errors.len())
 }
 
+/// IT-2: the label an IT ticket carries.
+pub const IT_LABEL: &str = "it";
+
+/// IT-2 (#375): one IT ticket as the CLI and MCP list it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ItTicket {
+    /// `owner/name`.
+    pub repo: String,
+    pub number: u64,
+    pub title: String,
+    pub state: String,
+    pub link: String,
+}
+
+/// IT-2 (#375): the open issues labelled `it` in the stored snapshots, by repo, newest number
+/// first. Tickets are filed in the pipeline repo; reading every snapshot finds them wherever
+/// that repo's snapshot is, and only GitHub's state is shown, as the last refresh read it.
+pub fn open_tickets(snaps: &[crate::github::RepoSnapshot]) -> Vec<ItTicket> {
+    let mut tickets: Vec<ItTicket> = snaps
+        .iter()
+        .flat_map(|snap| {
+            snap.issues
+                .iter()
+                .filter(|i| i.state == "open" && i.labels.iter().any(|l| l == IT_LABEL))
+                .map(|i| ItTicket {
+                    repo: snap.repo.clone(),
+                    number: i.number,
+                    title: i.title.clone(),
+                    state: i.state.clone(),
+                    link: format!("https://github.com/{}/issues/{}", snap.repo, i.number),
+                })
+        })
+        .collect();
+    tickets.sort_by(|a, b| a.repo.cmp(&b.repo).then(b.number.cmp(&a.number)));
+    tickets
+}
+
 /// IT-3: the `it-triage` job for `ticket`, or None while the pipeline lacks `never_on` (U9).
 /// The job carries `never_on: [this_machine]` so `fleet run --next` never gives it back to this
 /// machine, at any hour. It never uses `not_on`, which only applies during quiet hours.

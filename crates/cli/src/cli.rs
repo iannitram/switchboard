@@ -1,5 +1,6 @@
 //! CLI-1: `switchboard sky | waiting | reports | budget | loadout | star <repo>#<n>`, as text or
-//! `--json`, printing what the GUI shows.
+//! `--json`, printing what the GUI shows. `errors` (#375) lists the fleet errors the app
+//! recorded and the open IT tickets.
 //! CLI-2: `switchboard refresh | backup <repo> | backup --all`, the GUI buttons.
 //! CLI-3: a repo delete or a restore over a live repo is refused and becomes a Waiting on you
 //! item; `--role <role> merge <repo>#<pr>` goes through CORE-3; inside a job worktree no role
@@ -22,6 +23,7 @@ use switchboard_core::budget::{self, PoolEdit, PoolRow};
 use switchboard_core::clock::{Clock, SystemClock, UnixSeconds};
 use switchboard_core::error::CoreError;
 use switchboard_core::fleet::FleetBridge;
+use switchboard_core::fleet_errors::{self, FleetErrorRecord};
 use switchboard_core::github::live;
 use switchboard_core::github::merge::{self as gh_merge, MergeJob};
 use switchboard_core::github::poll::{self, Poller};
@@ -64,7 +66,7 @@ const NO_SNAPSHOT: &str = "switchboard: no snapshot yet; run switchboard refresh
 
 pub const USAGE: &str = "usage: switchboard [--help | --version] [--json] [--role <role>] \
                      [--project <repo>] [--outcome <o>] [--pool <p>] \
-                     <sky | waiting | reports | budget [--refresh] | loadout | settings | \
+                     <sky | waiting | reports | errors | budget [--refresh] | loadout | settings | \
                      star <repo>#<n> | refresh | backup <repo> | backup --all | delete <repo> | \
                      restore <repo> | merge <repo>#<pr> | set_pool_cap <pool> <cap> | \
                      pool_edit <pool> [--plan <p>] [--cap <n>] [--reset <day time>] [--cost <n>] | \
@@ -467,7 +469,7 @@ pub fn run_with(
     }
     if matches!(
         command,
-        Some("sky" | "waiting" | "reports" | "budget" | "loadout" | "settings")
+        Some("sky" | "waiting" | "reports" | "errors" | "budget" | "loadout" | "settings")
     ) {
         if let Some(code) = no_more_words(&args) {
             return code;
@@ -506,6 +508,7 @@ pub fn run_with(
         },
         Some("waiting") => waiting(args.json),
         Some("reports") => reports(args.json, &filter),
+        Some("errors") => errors_command(args.json),
         Some("loadout") => loadout_command(
             &it::read_this_machine(&it::SystemProbeRunner, SystemClock.now()),
             args.json,
@@ -1022,11 +1025,14 @@ pub fn pool_command(
     let saved = match budget::save_pool_edit(&FleetBridge::new(&root), &edit, &data, &clock) {
         Ok(saved) => saved,
         Err(e) => {
-            let _ = writeln!(
-                err,
-                "{}",
-                terminal_safe(&format!("{command} {}: {e}", edit.pool))
-            );
+            // An empty pool name leaves no gap before the colon (#416).
+            let who = [command, edit.pool.as_str()]
+                .iter()
+                .filter(|w| !w.is_empty())
+                .copied()
+                .collect::<Vec<_>>()
+                .join(" ");
+            let _ = writeln!(err, "{}", terminal_safe(&format!("{who}: {e}")));
             return ExitCode::from(1);
         }
     };
@@ -1322,6 +1328,92 @@ fn warn_unreadable(command: &str, bad: &[switchboard_core::github::snapshot::Unr
             terminal_safe(&file.error)
         );
     }
+}
+
+/// #375 (CORE-2, IT-2): what `errors` prints and the MCP `errors` tool returns: the fleet
+/// errors the app recorded (`fleet_errors::load`, the list the app shows), newest first; how
+/// many lines of the file did not read; and the open IT tickets in the stored snapshots.
+#[derive(Debug)]
+pub(crate) struct ErrorsAnswer {
+    pub fleet_errors: Vec<FleetErrorRecord>,
+    pub skipped_lines: usize,
+    pub it_tickets: Vec<it::ItTicket>,
+}
+
+/// #375: the errors and tickets in `data`. A snapshot file that does not read is named on
+/// stderr and the rest are used; no snapshot is no tickets, not a failure. Damaged lines of the
+/// errors file are counted in `skipped_lines` and named on stderr.
+pub(crate) fn errors_answer(data: &Path) -> Result<ErrorsAnswer, Fail> {
+    let recorded =
+        fleet_errors::load(data).map_err(|e| fail(1, format!("switchboard errors: {e}")))?;
+    if recorded.skipped > 0 {
+        eprintln!(
+            "switchboard errors: {} line(s) of {} did not read; skipped",
+            recorded.skipped,
+            fleet_errors::FLEET_ERRORS_FILE
+        );
+    }
+    let (snaps, bad) = SnapshotStore::new(data)
+        .load_each()
+        .map_err(|e| fail(1, format!("switchboard errors: {e}")))?;
+    warn_unreadable("errors", &bad);
+    Ok(ErrorsAnswer {
+        fleet_errors: recorded.errors.iter().map(FleetErrorRecord::from).collect(),
+        skipped_lines: recorded.skipped,
+        it_tickets: it::open_tickets(&snaps),
+    })
+}
+
+impl ErrorsAnswer {
+    /// `{"fleet_errors": [..], "skipped_lines": n, "it_tickets": [..]}`.
+    pub(crate) fn to_json(&self) -> Value {
+        json!({
+            "fleet_errors": self.fleet_errors,
+            "skipped_lines": self.skipped_lines,
+            "it_tickets": self.it_tickets,
+        })
+    }
+}
+
+/// `switchboard errors`: the recorded fleet errors, newest first, then the open IT tickets
+/// (text), or both as one JSON object (`--json`). Read only.
+fn errors_command(json: bool) -> ExitCode {
+    let answer = match data_or_fail().and_then(|data| errors_answer(&data)) {
+        Ok(answer) => answer,
+        Err(fail) => return exit_with(fail),
+    };
+    if json {
+        return print_json("errors", serde_json::to_string_pretty(&answer.to_json()));
+    }
+    emit(&errors_text(&answer))
+}
+
+/// One line per fleet error as the app's banner words it, then one per open IT ticket.
+fn errors_text(answer: &ErrorsAnswer) -> String {
+    let mut text = String::new();
+    if answer.fleet_errors.is_empty() {
+        text.push_str("no fleet errors recorded\n");
+    } else {
+        text.push_str("fleet errors, newest first:\n");
+        for err in &answer.fleet_errors {
+            text.push_str(&format!("  {}\n", terminal_safe(&err.message)));
+        }
+    }
+    if answer.it_tickets.is_empty() {
+        text.push_str("no open IT tickets\n");
+    } else {
+        text.push_str("open IT tickets:\n");
+        for t in &answer.it_tickets {
+            text.push_str(&format!(
+                "  {}#{}: {} | {}\n",
+                terminal_safe(&t.repo),
+                t.number,
+                terminal_safe(&t.title),
+                terminal_safe(&t.link)
+            ));
+        }
+    }
+    text
 }
 
 /// `switchboard waiting`: the Waiting on you items from the stored snapshots and the local items
