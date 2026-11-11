@@ -1035,9 +1035,16 @@ fn settle(parent: &Path, name: &str) -> Result<(), CoreError> {
         return Ok(());
     };
     let prefix = format!(".{name}.old-");
+    // `.<name>.old-<run>`, the run a `run_tag` (digits and dashes): another repo's folders
+    // (`demo.old-x` is a repo name too; its aside is `.demo.old-x.old-<run>`) never match.
+    let is_aside = |file: &str| {
+        file.strip_prefix(&prefix).is_some_and(|run| {
+            !run.is_empty() && run.chars().all(|c| c.is_ascii_digit() || c == '-')
+        })
+    };
     let mut asides: Vec<(std::time::SystemTime, PathBuf)> = entries
         .flatten()
-        .filter(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
+        .filter(|entry| is_aside(&entry.file_name().to_string_lossy()))
         .map(|entry| {
             let at = entry.metadata().and_then(|m| m.modified());
             (at.unwrap_or(std::time::UNIX_EPOCH), entry.path())
@@ -2801,7 +2808,7 @@ mod tests {
                 swap_in_steps(
                     &staging,
                     &folder,
-                    &parent.join(".demo.old-run"),
+                    &parent.join(format!(".demo.old-{}", run_tag())),
                     &mut |step| {
                         if step == dies_after {
                             panic!("the run died after {step:?}");
@@ -2828,6 +2835,30 @@ mod tests {
             assert_eq!(beside, Vec::<String>::new(), "died after {dies_after:?}");
             let _ = std::fs::remove_dir_all(&parent);
         }
+    }
+
+    /// #431: settling one repo's folder never touches another repo's whose name starts like
+    /// its aside (`demo` and `demo.old-x`): that one's aside may be its only whole backup, in
+    /// the middle of its own swap under its own lock.
+    #[test]
+    fn settle_leaves_another_repo_s_folders_alone() {
+        let parent = std::env::temp_dir().join(format!("settle-other-{}", crate::lock::run_tag()));
+        let other_aside = parent.join(".demo.old-x.old-1-2-3");
+        whole_backup(&other_aside, "other");
+        // `demo` has no folder: nothing of its own to put back.
+        settle(&parent, "demo").unwrap();
+        assert!(
+            !parent.join("demo").exists(),
+            "another repo's backup became demo's"
+        );
+        assert_eq!(which_backup(&other_aside), Ok("other".to_string()));
+        // `demo` has a folder: only its own asides go.
+        whole_backup(&parent.join("demo"), "new");
+        whole_backup(&parent.join(".demo.old-4-5-6"), "old");
+        settle(&parent, "demo").unwrap();
+        assert!(!parent.join(".demo.old-4-5-6").exists());
+        assert_eq!(which_backup(&other_aside), Ok("other".to_string()));
+        let _ = std::fs::remove_dir_all(&parent);
     }
 
     #[test]

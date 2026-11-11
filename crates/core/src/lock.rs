@@ -9,8 +9,8 @@
 //! holds the lock and what to do. A lock file older than `STALE_LOCK` was left by a run that
 //! died, and is taken over.
 //!
-//! #431: the lock file names its holder: a token no other holder has, the holder's process (id
-//! and start time) and what it is doing. A holder refreshes and removes the file only while it
+//! #431: the lock file names its holder: a token no other holder has, the holder's process (id,
+//! start time, and the machine, boot and pid namespace the id belongs to) and what it is doing. A holder refreshes and removes the file only while it
 //! still holds its token, so one frozen past the takeover time never touches the lock another
 //! run took over. A lock whose holder's process is provably gone is taken over at once; one
 //! whose holder may be alive (an old lock file with no process in it, a process list that could
@@ -96,6 +96,10 @@ pub fn lock_path(target: &Path) -> PathBuf {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct Holder {
     token: String,
+    /// Where `pid` means something (`own_place`): a process id read in another machine, boot
+    /// or pid namespace (a container that shares the folder but not the process list) names
+    /// some other process or none, so it says nothing about the holder.
+    place: Option<String>,
     pid: Option<u32>,
     start: Option<String>,
     what: Option<String>,
@@ -106,6 +110,7 @@ impl Holder {
     fn new(what: Option<&str>) -> Holder {
         Holder {
             token: run_tag(),
+            place: own_place(),
             pid: Some(std::process::id()),
             start: own_start(),
             what: what.map(one_line),
@@ -114,6 +119,10 @@ impl Holder {
 
     fn text(&self) -> String {
         let mut text = format!("token={}\n", self.token);
+        // Before the process id: a file cut short after `pid=` still has its place.
+        if let Some(place) = &self.place {
+            text.push_str(&format!("place={place}\n"));
+        }
         if let Some(pid) = self.pid {
             text.push_str(&format!("pid={pid}\n"));
         }
@@ -142,6 +151,7 @@ impl Holder {
         for line in whole.lines() {
             match line.split_once('=') {
                 Some(("token", v)) => holder.token = v.to_string(),
+                Some(("place", v)) if !v.is_empty() => holder.place = Some(v.to_string()),
                 Some(("pid", v)) => holder.pid = v.trim().parse().ok(),
                 Some(("start", v)) if !v.is_empty() => holder.start = Some(v.to_string()),
                 Some(("holder", v)) if !v.is_empty() => holder.what = Some(v.to_string()),
@@ -153,11 +163,17 @@ impl Holder {
 
     /// Is the holder's process provably gone: no such process runs, or its id now names
     /// another process (a start time that differs)? A holder with no process recorded, or a
-    /// process list that could not be read, is taken for alive (`loops::alive`).
+    /// process list that could not be read, is taken for alive (`loops::alive`). So is one
+    /// recorded in another place (`own_place`: another machine sharing the folder, a boot
+    /// before this one, another pid namespace), or with no place: its process id cannot be
+    /// looked up here, and it is held until stale.
     fn gone(&self) -> bool {
         let Some(pid) = self.pid else {
             return false;
         };
+        if self.place.is_none() || self.place != own_place() {
+            return false;
+        }
         if pid == std::process::id() && self.start == own_start() {
             return false;
         }
@@ -179,6 +195,49 @@ fn own_start() -> Option<String> {
                 .filter(|t| t != crate::autopilot::loops::UNKNOWN_TOKEN)
         })
         .clone()
+}
+
+/// Where this process's id means something, read once: on Linux the boot and the pid
+/// namespace (`/proc/sys/kernel/random/boot_id`, `/proc/self/ns/pid`), so a lock written in a
+/// container with a process list of its own, or before a reboot, is never judged by this
+/// process list; elsewhere the machine's name. `None` when it cannot be read: no lock is then
+/// taken over before it is stale.
+fn own_place() -> Option<String> {
+    use std::sync::OnceLock;
+    static PLACE: OnceLock<Option<String>> = OnceLock::new();
+    PLACE.get_or_init(read_place).clone()
+}
+
+#[cfg(target_os = "linux")]
+fn read_place() -> Option<String> {
+    let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
+    let ns = std::fs::read_link("/proc/self/ns/pid").ok()?;
+    Some(one_line(&format!("{}/{}", boot.trim(), ns.display())))
+}
+
+#[cfg(windows)]
+fn read_place() -> Option<String> {
+    std::env::var("COMPUTERNAME")
+        .ok()
+        .filter(|name| !name.trim().is_empty())
+        .map(|name| one_line(name.trim()))
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn read_place() -> Option<String> {
+    let out = std::process::Command::new("uname")
+        .arg("-n")
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|out| out.status.success())?;
+    let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!name.is_empty()).then(|| one_line(&name))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn read_place() -> Option<String> {
+    None
 }
 
 fn one_line(text: &str) -> String {
@@ -481,5 +540,31 @@ mod tests {
         assert_eq!(Holder::parse("token=abc\npid=1234\nstart=9").start, None);
         assert!(!Holder::parse("").gone());
         assert!(!Holder::parse("tok").gone());
+    }
+
+    /// A process id is looked up only where it was written: a holder in a container with a
+    /// process list of its own, on another machine sharing the folder, or before a reboot is
+    /// never found gone because this process list lacks its id; it is held until stale.
+    #[test]
+    fn a_holder_from_another_place_is_never_found_gone() {
+        let Some(here) = own_place() else {
+            return;
+        };
+        // No process has this id (above the kernel's pid limit on every system).
+        let dead = |place: Option<&str>| Holder {
+            token: "t".to_string(),
+            place: place.map(str::to_string),
+            pid: Some(0x7fff_fff0),
+            start: None,
+            what: None,
+        };
+        assert!(dead(Some(&here)).gone(), "a dead holder here is gone");
+        assert!(!dead(Some("another-boot/pid:[1]")).gone());
+        assert!(!dead(None).gone());
+        let text = dead(Some(&here)).text();
+        assert_eq!(Holder::parse(&text), dead(Some(&here)));
+        // Cut short after `pid=`: its place is there before it.
+        let cut = &text[..text.find("pid=").unwrap()];
+        assert!(!Holder::parse(cut).gone());
     }
 }
