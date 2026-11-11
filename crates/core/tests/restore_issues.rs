@@ -22,6 +22,9 @@ use switchboard_core::rules::{Caller, Face, Role};
 use switchboard_core::CoreError;
 
 const NEW: &str = "owner/restored";
+/// When the restore over the live repo was asked for (2026-11-10T00:00:00Z): the held pass
+/// changes only what GitHub says was created at or after it.
+const SINCE: i64 = 1_794_268_800;
 
 /// No test here has a release file to fetch.
 struct NoFiles;
@@ -257,6 +260,27 @@ fn listed(issues: &[(u64, &str)]) -> RestAnswer {
             issues
                 .iter()
                 .map(|(number, title)| json!({"number": number, "title": title}))
+                .collect(),
+        ),
+    )
+}
+
+/// As `listed`, for issues GitHub says were created after `SINCE` (by the restore's queue) or
+/// before it (the repo had them already).
+fn listed_made(issues: &[(u64, &str, bool)]) -> RestAnswer {
+    answer(
+        200,
+        Value::Array(
+            issues
+                .iter()
+                .map(|(number, title, made)| {
+                    let at = if *made {
+                        "2026-11-10T09:30:00Z"
+                    } else {
+                        "2026-11-09T23:59:59Z"
+                    };
+                    json!({"number": number, "title": title, "created_at": at})
+                })
                 .collect(),
         ),
     )
@@ -614,6 +638,123 @@ fn a_restore_over_a_repo_that_has_some_of_it_queues_only_the_rest() {
                    "labels": ["bug"], "milestone": "1.0"}),
             json!({"kind": "comment", "repo": NEW, "number": 8, "body": "me too", "marker": null}),
         ]
+    );
+    // #365: "Old" was in the repo before the restore, open; it is not the restore's to close.
+    assert_eq!(patches(&api), Vec::<String>::new());
+}
+
+/// #365: over a live repo only what the restore made is closed or renumbered. An issue and a
+/// milestone the repo had already, open, stay open though the backup has them closed, and the
+/// report says so; the issue the restore queued is closed.
+#[test]
+fn a_restore_over_a_live_repo_closes_only_what_it_made() {
+    let f = fixture("live-made");
+    edit_json(&f.backup, "issues.json", |issues| {
+        for issue in issues.as_array_mut().unwrap() {
+            issue["state"] = json!("closed");
+            issue["body"] = json!("see #1 and #2");
+        }
+    });
+    std::fs::write(
+        f.backup.join("milestones.json"),
+        r#"[{"title": "1.0", "state": "closed"}]"#,
+    )
+    .unwrap();
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            answer(200, json!({"private": true})),
+            answer(200, json!([{"name": "Bug"}, {"name": "size:Easy"}])),
+            answer(200, json!([{"title": "1.0", "state": "open"}])),
+            // The repo had "Old" (#7), open, with the backup's body.
+            answer(
+                200,
+                json!([{"number": 7, "title": "Old", "state": "open", "body": "see #1 and #2"}]),
+            ),
+            answer(
+                200,
+                json!([{"number": 7, "title": "Old", "state": "open", "body": "see #1 and #2"},
+                       {"number": 8, "title": "Bug", "state": "open", "body": "see #1 and #2"}]),
+            ),
+            answer(200, json!([])),
+            answer(200, json!([{"number": 3, "title": "1.0", "state": "open"}])),
+        ],
+    );
+    let report = restore_over_live_from(
+        &caller(Face::Gui, false),
+        &f.fleet,
+        &f.backup,
+        NEW,
+        true,
+        &remote(&f, &api),
+    )
+    .unwrap();
+    assert_eq!(
+        patch_bodies(&api),
+        vec![(
+            format!("/repos/{NEW}/issues/8"),
+            json!({"body": "see #8 and #7", "state": "closed"})
+        )],
+        "only the issue the restore queued"
+    );
+    assert_eq!(
+        report.issues,
+        IssuesReport {
+            issues: 1,
+            issues_there: 1,
+            comments: 1,
+            closed: 1,
+            renumbered: 1,
+            left_out: vec![
+                "1 issues and 1 milestones closed in the backup are open in the repo, which had \
+                 them before the restore: left open"
+                    .to_string()
+            ],
+            ..IssuesReport::default()
+        }
+    );
+}
+
+/// #365: the held pass closes only what GitHub says was created since the restore was asked
+/// for; an issue the repo had before, open, stays open and is not counted as waiting.
+#[test]
+fn the_held_pass_closes_nothing_the_repo_had_before_the_restore() {
+    let f = fixture("held-before");
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            answer(200, json!({"private": true})),
+            listed_made(&[(1, "Bug", true), (2, "Old", false)]),
+            answer(200, json!([])),
+        ],
+    );
+    let report = restore_held_over_live_from(
+        &caller(Face::Gui, false),
+        &f.fleet,
+        &f.backup,
+        NEW,
+        true,
+        SINCE,
+        &remote(&f, &api),
+    )
+    .unwrap();
+    assert_eq!(patches(&api), Vec::<String>::new());
+    assert_eq!(
+        report.issues,
+        IssuesReport {
+            issues_there: 2,
+            comments: 1,
+            left_out: vec![
+                "1 issues and 0 milestones closed in the backup are open in the repo, which had \
+                 them before the restore: left open"
+                    .to_string()
+            ],
+            ..IssuesReport::default()
+        }
+    );
+    assert!(
+        !report.issues.held(),
+        "nothing waits: the request can leave"
     );
 }
 
@@ -1030,13 +1171,20 @@ fn a_second_confirm_only_queues_what_was_held_back_and_pushes_no_ref() {
         Vec::new(),
         vec![
             answer(200, json!({"private": true})),
-            listed(&[(1, "Bug"), (2, "Old")]),
+            listed_made(&[(1, "Bug", true), (2, "Old", true)]),
             answer(200, json!([])),
         ],
     );
-    let second =
-        restore_held_over_live_from(&app, &f.fleet, &f.backup, NEW, true, &remote(&f, &api))
-            .unwrap();
+    let second = restore_held_over_live_from(
+        &app,
+        &f.fleet,
+        &f.backup,
+        NEW,
+        true,
+        SINCE,
+        &remote(&f, &api),
+    )
+    .unwrap();
     assert_eq!(
         second,
         RestoreReport {
@@ -1088,9 +1236,16 @@ fn a_second_confirm_only_queues_what_was_held_back_and_pushes_no_ref() {
             ),
         ],
     );
-    let third =
-        restore_held_over_live_from(&app, &f.fleet, &f.backup, NEW, true, &remote(&f, &api))
-            .unwrap();
+    let third = restore_held_over_live_from(
+        &app,
+        &f.fleet,
+        &f.backup,
+        NEW,
+        true,
+        SINCE,
+        &remote(&f, &api),
+    )
+    .unwrap();
     assert_eq!(third.issues.comments, 0);
     assert_eq!(third.issues.comments_there, 1);
     assert_eq!(queued(&f), expected, "no duplicate issue or comment");
@@ -1116,6 +1271,7 @@ fn the_held_pass_queues_no_issue_the_repo_lacks() {
         &f.backup,
         NEW,
         true,
+        SINCE,
         &remote(&f, &api),
     )
     .unwrap();
@@ -1149,6 +1305,7 @@ fn a_refused_second_confirm_writes_nothing() {
             &f.backup,
             NEW,
             confirmed,
+            SINCE,
             &remote(&f, &api),
         ) {
             Err(CoreError::Refused(why)) => assert!(why.contains(NEW), "{why}"),

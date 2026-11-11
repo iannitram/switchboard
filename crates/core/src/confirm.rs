@@ -105,7 +105,7 @@ fn lines_of(report: &RestoreReport, pass: Pass) -> Vec<String> {
                 issues.issues, issues.comments
             ),
         ],
-        Pass::Held => vec![
+        Pass::Held { .. } => vec![
             "no ref was pushed again".to_string(),
             format!("{} comments queued", issues.comments),
         ],
@@ -198,7 +198,7 @@ pub fn confirm_with(
         GuardedAction::RestoreOverLive { repo } => {
             typed_is(&what, repo, typed)?;
             let pass = if item.action == HELD_ACTION {
-                Pass::Held
+                Pass::Held { since: item.since }
             } else {
                 Pass::Whole
             };
@@ -220,7 +220,7 @@ pub fn confirm_with(
             Ok(Done {
                 what: match pass {
                     Pass::Whole => what,
-                    Pass::Held => format!("{what} (what was held back)"),
+                    Pass::Held { .. } => format!("{what} (what was held back)"),
                 },
                 lines: lines_of(&report, pass),
                 cleared,
@@ -278,7 +278,9 @@ pub fn confirm(
         let confirmed = caller.confirmed_in_app;
         match pass {
             Pass::Whole => backup::restore_over_live(caller, &fleet, &folder, repo, confirmed),
-            Pass::Held => backup::restore_held_over_live(caller, &fleet, &folder, repo, confirmed),
+            Pass::Held { since } => {
+                backup::restore_held_over_live(caller, &fleet, &folder, repo, confirmed, since)
+            }
         }
     };
     let archive = |caller: &Caller, repo: &str| {

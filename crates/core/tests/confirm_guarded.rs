@@ -25,6 +25,9 @@ fn data_dir(name: &str) -> PathBuf {
     d
 }
 
+/// The held pass of the request `asked` leaves: it changes only what was made since the request.
+const HELD: Pass = Pass::Held { since: NOW };
+
 fn delete() -> GuardedAction {
     GuardedAction::DeleteRepo { repo: REPO.into() }
 }
@@ -372,7 +375,7 @@ fn a_second_confirm_of_a_restore_that_held_comments_back_only_runs_the_held_pass
     assert_eq!(done.what, "restore over owner/alpha (what was held back)");
     assert_eq!(done.lines[0], "no ref was pushed again");
     assert!(!done.lines.iter().any(|l| l.contains("refs pushed")));
-    assert_eq!(*restore_run.passes.borrow(), vec![Pass::Whole, Pass::Held]);
+    assert_eq!(*restore_run.passes.borrow(), vec![Pass::Whole, HELD]);
     assert_eq!(
         LocalItems::new(&data).load().unwrap()[1].action,
         HELD_ACTION
@@ -399,7 +402,7 @@ fn a_second_confirm_of_a_restore_that_held_comments_back_only_runs_the_held_pass
     );
     assert_eq!(
         *restore_run.passes.borrow(),
-        vec![Pass::Whole, Pass::Held, Pass::Held],
+        vec![Pass::Whole, HELD, HELD],
         "the whole restore ran once only"
     );
     assert_eq!(
@@ -428,7 +431,7 @@ fn a_refused_second_confirm_runs_nothing_and_the_request_stays_held() {
     // A held pass that fails keeps the request held too.
     *restore_run.report.borrow_mut() = Err(CoreError::GitHub("down".to_string()));
     assert!(restore_run.run(&data, &text, &app).is_err());
-    assert_eq!(*restore_run.passes.borrow(), vec![Pass::Whole, Pass::Held]);
+    assert_eq!(*restore_run.passes.borrow(), vec![Pass::Whole, HELD]);
     unchanged(&data, &before);
 }
 

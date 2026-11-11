@@ -3,10 +3,12 @@
 //! private repo (BAK-3: history, labels and milestones in `restore_history`, issues and comments
 //! in `restore_issues`).
 
+use crate::clock::UnixSeconds;
 use crate::fleet::FleetBridge;
 use crate::github::queue::{self, Create, QueueStatus};
 use crate::github::transport::{GitHubTransport, HttpTransport};
 use crate::renumber::{renumber, Now};
+use crate::reports::parse_time;
 use crate::rules::{self, Caller, GuardedAction, Verdict};
 use crate::settings::Settings;
 use crate::CoreError;
@@ -1552,6 +1554,8 @@ struct LiveIssue {
     title: String,
     closed: bool,
     body: String,
+    /// When GitHub says it was created; `None` when it does not say.
+    created: Option<UnixSeconds>,
 }
 
 /// The repo's issues now (PRs aside), lowest number first.
@@ -1565,6 +1569,7 @@ fn live_issues(api: &dyn GitHubTransport, repo: &str) -> Result<Vec<LiveIssue>, 
                 title: item["title"].as_str()?.to_string(),
                 closed: has_state(item, "closed"),
                 body: item["body"].as_str().unwrap_or("").to_string(),
+                created: item["created_at"].as_str().and_then(parse_time),
             })
         })
         .collect();
@@ -1629,8 +1634,22 @@ pub enum Pass {
     /// Everything: the issues the repo lacks are queued, then the comments, then the state.
     Whole,
     /// Only what an earlier pass held back until its issues were there: the comments, the
-    /// closes and the renumbered bodies. No issue is queued.
-    Held,
+    /// closes and the renumbered bodies. No issue is queued. `since` is when the restore was
+    /// asked for: only what GitHub says was created at or after it is closed or renumbered.
+    Held { since: UnixSeconds },
+}
+
+/// Which of the repo's issues and milestones a restore may close or give new numbers (#365):
+/// only what the restore made, never what the repo had before it.
+enum Made<'a> {
+    /// A new repo (`restore_issues`): everything in it is the restore's.
+    All,
+    /// A whole restore over a live repo: the issues this pass queues, and the milestones (titles
+    /// in lower case) it queued.
+    Queued(&'a HashSet<String>),
+    /// The held pass of a restore over a live repo: what GitHub says was created at or after
+    /// this time, the time the restore was asked for.
+    Since(UnixSeconds),
 }
 
 /// PATCHes `path` with `body`. `Ok(true)` when GitHub answered 200; `Ok(false)` when it
@@ -1657,7 +1676,8 @@ fn patched(api: &dyn GitHubTransport, path: &str, body: &Value) -> Result<bool, 
 /// only a failed create is an error.
 ///
 /// Then the state, through the transport's PATCH (a close is not a create, GH-4): an issue that
-/// was closed in the backup and is open in the repo is closed; an issue body that still reads as
+/// was closed in the backup and is open in the repo is closed (over a live repo, only one the
+/// restore made: `restore_over_live_from`); an issue body that still reads as
 /// the backup's gets its `#N` rewritten; and, once every issue is there, a milestone that was
 /// closed in the backup and is open in the repo is closed. What has to wait for an issue that is
 /// not there yet, or for a rate limit, is counted in `state_waiting`, and a second call does it.
@@ -1668,16 +1688,17 @@ pub fn restore_issues(
     repo: &str,
     remote: &Remote<'_>,
 ) -> Result<IssuesReport, CoreError> {
-    restore_issues_pass(fleet, backup_dir, repo, remote, Pass::Whole)
+    restore_issues_made(fleet, backup_dir, repo, remote, &Made::All)
 }
 
-/// `restore_issues` for one `pass`: `Pass::Held` queues no issue, only what was held back.
-pub fn restore_issues_pass(
+/// `restore_issues`, closing and renumbering only what `made` says the restore made.
+/// `Made::Since` is the held pass: it queues no issue, only what was held back.
+fn restore_issues_made(
     fleet: &FleetBridge,
     backup_dir: &Path,
     repo: &str,
     remote: &Remote<'_>,
-    pass: Pass,
+    made: &Made<'_>,
 ) -> Result<IssuesReport, CoreError> {
     split_repo(repo)?;
     let manifest = manifest_in(backup_dir)?;
@@ -1709,10 +1730,16 @@ pub fn restore_issues_pass(
     let mut live = live_issues(remote.api, repo)?;
     let mut now = match_issues(&titles, &titles_of(&live));
     let mut report = IssuesReport::default();
-    if pass == Pass::Whole {
-        let issue_creates: Vec<Create> = numbered
+    // The backup's numbers of the issues this pass queued.
+    let mut queued_now: HashSet<u64> = HashSet::new();
+    if !matches!(made, Made::Since(_)) {
+        let to_queue: Vec<&(u64, &Value)> = numbered
             .iter()
             .filter(|(number, _)| !now.contains_key(number))
+            .collect();
+        queued_now = to_queue.iter().map(|(number, _)| *number).collect();
+        let issue_creates: Vec<Create> = to_queue
+            .iter()
             .map(|(_, issue)| Create::Issue {
                 repo: repo.to_string(),
                 title: text(issue, "title"),
@@ -1788,7 +1815,13 @@ pub fn restore_issues_pass(
     report.comments = comment_creates.len() as u64;
     send_checked(fleet, repo, &comment_creates)?;
 
-    // The state (#365). After a rate-limit answer nothing more is sent: the rest waits.
+    // The state (#365). After a rate-limit answer nothing more is sent: the rest waits. Only
+    // what this restore made is changed: an issue or milestone the repo had before it is left.
+    let made_at = |created: Option<UnixSeconds>| match made {
+        Made::Since(since) => created.is_some_and(|at| at >= *since),
+        Made::All | Made::Queued(_) => false,
+    };
+    let mut left_open = 0;
     let mut limited = false;
     for (old, issue) in &numbered {
         let closed = has_state(issue, "closed");
@@ -1803,6 +1836,15 @@ pub fn restore_issues_pass(
             }
             continue;
         };
+        let ours = match made {
+            Made::All => true,
+            Made::Queued(_) => queued_now.contains(old),
+            Made::Since(_) => made_at(found.created),
+        };
+        if !ours {
+            left_open += u64::from(closed && !found.closed);
+            continue;
+        }
         let mut change = serde_json::Map::new();
         // Only a body that still reads as the backup's is rewritten; what the queue put after
         // it (its marker) stays.
@@ -1844,6 +1886,7 @@ pub fn restore_issues_pass(
         .filter(|m| has_state(m, "closed"))
         .map(|m| text(m, "title").to_lowercase())
         .collect();
+    let mut milestones_left_open = 0;
     if !closed_milestones.is_empty() {
         let all_there = numbered.iter().all(|(old, _)| now.contains_key(old));
         let live_milestones = rest_all(remote.api, &format!("/repos/{repo}/milestones?state=all"))?;
@@ -1851,8 +1894,17 @@ pub fn restore_issues_pass(
             let found = live_milestones
                 .iter()
                 .find(|m| text(m, "title").to_lowercase() == *title);
+            let ours = |m: &Value| match made {
+                Made::All => true,
+                Made::Queued(queued) => queued.contains(title),
+                Made::Since(_) => made_at(m["created_at"].as_str().and_then(parse_time)),
+            };
             let number = match found {
                 Some(m) if has_state(m, "closed") => continue,
+                Some(m) if !ours(m) => {
+                    milestones_left_open += 1;
+                    continue;
+                }
                 Some(m) if all_there && !limited => m["number"].as_u64(),
                 _ => None,
             };
@@ -1873,6 +1925,12 @@ pub fn restore_issues_pass(
         }
     }
 
+    if left_open > 0 || milestones_left_open > 0 {
+        report.left_out.push(format!(
+            "{left_open} issues and {milestones_left_open} milestones closed in the backup are \
+             open in the repo, which had them before the restore: left open"
+        ));
+    }
     if limited {
         report.left_out.push(
             "GitHub answered a close or a body change with 403 or 429 (a rate limit, or the \
@@ -1959,7 +2017,16 @@ pub fn restore_over_live_from(
             let before = queue_counts(fleet)?;
             let creates: Vec<Create> = labels.iter().chain(&milestones).cloned().collect();
             queue_labels(fleet, repo, &creates, &before)?;
-            let issues = restore_issues(fleet, backup_dir, repo, remote)?;
+            // Only what this restore queued is closed (#365): not what the repo had already.
+            let queued: HashSet<String> = milestones
+                .iter()
+                .filter_map(|c| match c {
+                    Create::Milestone { title, .. } => Some(title.to_lowercase()),
+                    _ => None,
+                })
+                .collect();
+            let issues =
+                restore_issues_made(fleet, backup_dir, repo, remote, &Made::Queued(&queued))?;
             let mut left_out = left_out(&backup);
             if !other_colour.is_empty() {
                 left_out.push(format!(
@@ -2024,29 +2091,32 @@ pub fn restore_held_over_live(
     backup_dir: &Path,
     repo: &str,
     confirmed: bool,
+    since: UnixSeconds,
 ) -> Result<RestoreReport, CoreError> {
     with_github(|remote| {
-        restore_held_over_live_from(caller, fleet, backup_dir, repo, confirmed, remote)
+        restore_held_over_live_from(caller, fleet, backup_dir, repo, confirmed, since, remote)
     })
 }
 
 /// The second confirm of a restore over the live repo `repo` (#347): after the same checks as
 /// `restore_over_live_from`, only what the first restore held back is done
-/// (`restore_issues_pass` with `Pass::Held`): the comments whose issues are there now are
-/// queued, and the closes and body changes that waited are sent. No ref is pushed and no label,
-/// milestone or issue is queued, so nothing pushed to the repo since the first confirm is
-/// overwritten. The report's `refs`, `labels` and `milestones` are 0.
+/// (`Pass::Held`): the comments whose issues are there now are queued, and the closes and body
+/// changes that waited are sent, only to issues and milestones GitHub says were created at or
+/// after `since` (when the restore was asked for), so never to one the repo had before it. No
+/// ref is pushed and no label, milestone or issue is queued, so nothing pushed to the repo since
+/// the first confirm is overwritten. The report's `refs`, `labels` and `milestones` are 0.
 pub fn restore_held_over_live_from(
     caller: &Caller,
     fleet: &FleetBridge,
     backup_dir: &Path,
     repo: &str,
     confirmed: bool,
+    since: UnixSeconds,
     remote: &Remote<'_>,
 ) -> Result<RestoreReport, CoreError> {
     live_backup(caller, backup_dir, repo, confirmed, remote)?;
     Ok(RestoreReport {
-        issues: restore_issues_pass(fleet, backup_dir, repo, remote, Pass::Held)?,
+        issues: restore_issues_made(fleet, backup_dir, repo, remote, &Made::Since(since))?,
         ..RestoreReport::default()
     })
 }
