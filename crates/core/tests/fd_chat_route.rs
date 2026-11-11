@@ -592,10 +592,13 @@ fn the_chat_route_command_is_a_thin_call_into_route_message() {
         .map_or(commands.len(), |i| at + i);
     let body = &commands[at..body_end];
     assert!(body.contains("message: String"), "{body}");
-    // #378: in an open thread the chat stays on its model (FD-5), so the command routes with
-    // `route_in_thread`, which is `route_message` for a new chat.
-    assert!(body.contains("route_in_thread("), "{body}");
-    assert!(body.contains("estimate_complexity(&message)"), "{body}");
+    // #384: the command calls the core's `ask::ask`, the same call the CLI and MCP make.
+    assert!(body.contains("ask::ask("), "{body}");
+    // #378: in an open thread the chat stays on its model (FD-5), so `ask` routes with
+    // `route_in_thread_on`, which is `route_message` for a new chat.
+    let ask = include_str!("../src/frontdoor/ask.rs");
+    assert!(ask.contains("chat::route_in_thread_on("), "{ask}");
+    assert!(ask.contains("chat::estimate_complexity(message)"), "{ask}");
     assert!(body.contains("FaceError::new(\"chat_route\""), "{body}");
     assert!(body.contains("record_fleet_error("), "{body}");
 }

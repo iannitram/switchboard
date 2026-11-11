@@ -125,6 +125,22 @@ pub fn guard_autopilot(caller: &Caller, what: &str, needs: &Role) -> Verdict {
     }
 }
 
+/// MCP-2, MCP-3, CLI-3 (#384): who may use the front door's writes (`what` names one: an ask
+/// that is sent, a held request sent as a fleet job, a rating). The app may; the CLI and MCP
+/// only with the project-manager role; nothing inside a job worktree. Like a pool edit it is
+/// not one of CORE-3's guarded actions, so it never becomes a Waiting on you item.
+pub fn guard_front_door(caller: &Caller, what: &str) -> Verdict {
+    if caller.in_job_worktree {
+        return Verdict::Refuse(format!("{what}: refused inside a job worktree"));
+    }
+    match (caller.face, &caller.role) {
+        (Face::Gui, _) | (Face::Cli | Face::Mcp, Some(Role::ProjectManager)) => Verdict::Allow,
+        _ => Verdict::Refuse(format!(
+            "{what}: only the project-manager role may use the front door"
+        )),
+    }
+}
+
 /// True when `dir` is inside a job worktree (the fleet's worktrees folder, or a git worktree
 /// whose `.git` file points into one).
 ///

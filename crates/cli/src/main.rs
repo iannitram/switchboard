@@ -151,6 +151,11 @@ pub fn mcp_call(argv: &[String]) -> Option<Result<McpCall, String>> {
                 words.next();
                 error.get_or_insert_with(|| format!("{word} is for pool_edit"));
             }
+            // The front door's value flags (#384).
+            "--thread" | "--unmet" => {
+                words.next();
+                error.get_or_insert_with(|| format!("{word} is for ask or ask_as_job"));
+            }
             "--help" | "-h" => help = true,
             "--version" | "-V" => version = true,
             flag if flag.starts_with("--role=") => role = Some(&flag["--role=".len()..]),
