@@ -3,6 +3,7 @@
 Newest first. One line per change of stage, release or decision that the next session needs.
 
 
+- 2026-11-11 Restore rulings (#426): the app's new-private-repo box is ticked by default; the CLI confirms a restore into a new private repo (`confirm restore <repo> --into <new>`, typed name, no role); a half-done restore records the repo Switchboard made and a retry finishes only the unfinished steps there; the CLI says `archive` (`delete` stays a silent alias) and old "to delete" items show as "to archive".
 - 2026-11-11 Docs: machine paths in SPEC.md and docs/code-map.md replaced with placeholders (R01); repo-lint clean.
 - 2026-11-11 Front door ruling (#377, FD-3): a queued ask stays manual; an ask whose pool is braked or over budget is answered by the local Qwen lane when it is up, and the route reason says so; it is queued only when Qwen is down too.
 - 2026-11-09 Roadmap brought in line with the code (R03): re-dated, and the live loops added to the stages (the poll, the autopilot passes, the loadout timer, IT tickets, the CLI and MCP writes are tested functions nothing runs yet); stage stays Dev Loop (R26). Milestones and every label RUBRIC lists were already in place.
