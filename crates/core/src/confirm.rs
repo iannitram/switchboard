@@ -1,5 +1,5 @@
-//! CORE-3, BAK-3 (#347): the confirm step in the app. A repo delete or a restore over a live
-//! repo asked for from the CLI or MCP waits in Waiting on you; here the app confirms it. The
+//! CORE-3, BAK-3 (#347): the confirm step in the app. A repo archive (the `delete` request) or
+//! a restore over a live repo asked for from the CLI or MCP waits in Waiting on you; here the app confirms it. The
 //! request is read back from its item, `rules::guard` decides (only the app, only with my
 //! confirm, never inside a job worktree), the repo's `owner/name` I typed must be the request's,
 //! the action runs, and its item leaves the list (WAIT-3). A refusal runs nothing and leaves
@@ -46,8 +46,9 @@ pub struct Done {
 
 /// The delete or restore request a Waiting on you item holds, `None` when it holds none.
 ///
-/// The item's source must be a guarded action whose text ends in ` to delete <repo>` or
-/// ` to restore over <repo>` (what the CLI writes), `<repo>` must be one `owner/name`, and the
+/// The item's source must be a guarded action whose text ends in ` to archive <repo>` or
+/// ` to restore over <repo>` (what the CLI and MCP write; ` to delete <repo>`, the wording
+/// before #347's SPEC change, is read as the same archive request), `<repo>` must be one `owner/name`, and the
 /// item's link must be that repo's GitHub address. Anything else is no request: the app never
 /// guesses which repo was meant.
 pub fn guarded_request(item: &Item) -> Option<GuardedAction> {
@@ -57,7 +58,12 @@ pub fn guarded_request(item: &Item) -> Option<GuardedAction> {
     let (_, request) = text.rsplit_once(" to ")?;
     let (repo, delete) = match request.strip_prefix("restore over ") {
         Some(repo) => (repo, false),
-        None => (request.strip_prefix("delete ")?, true),
+        None => (
+            request
+                .strip_prefix("archive ")
+                .or_else(|| request.strip_prefix("delete "))?,
+            true,
+        ),
     };
     let mut parts = repo.split('/');
     let (owner, name) = (parts.next()?, parts.next()?);
@@ -196,7 +202,7 @@ pub fn confirm_with(
     };
     let Some(action) = guarded_request(&item) else {
         return Err(CoreError::Refused(format!(
-            "{text}: does not name one repo to delete or restore over"
+            "{text}: does not name one repo to archive or restore over"
         )));
     };
     rules::guard(caller, &action).into_result()?;

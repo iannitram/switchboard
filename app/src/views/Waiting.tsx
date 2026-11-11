@@ -44,14 +44,14 @@ export const HELD_ACTION = "Queue what the restore held back";
 export type GuardedRequest = { kind: "archive" | "restore" | "held"; repo: string };
 
 // What a guarded request asks for and on which repo, as the core reads it back (confirm.rs
-// `guarded_request`): the text ends in ` to delete <owner/name>` or ` to restore over
-// <owner/name>` and the link is that repo's GitHub address. Null for anything else. A delete
-// request archives the repo; Switchboard never deletes one (#347).
+// `guarded_request`): the text ends in ` to archive <owner/name>` (or ` to delete <owner/name>`,
+// the wording before #347's SPEC change) or ` to restore over <owner/name>` and the link is that
+// repo's GitHub address. Null for anything else. Switchboard never deletes a repo (#347).
 export function guardedRequest(item: WaitingItemData): GuardedRequest | null {
   const text = guardedText(item);
-  const found = text === null ? null : /^.* to (delete|restore over) ([A-Za-z0-9._-]+\/[A-Za-z0-9._-]+)$/.exec(text);
+  const found = text === null ? null : /^.* to (archive|delete|restore over) ([A-Za-z0-9._-]+\/[A-Za-z0-9._-]+)$/.exec(text);
   if (!found || item.link !== `https://github.com/${found[2]}`) return null;
-  const kind = found[1] === "delete" ? "archive" : item.action === HELD_ACTION ? "held" : "restore";
+  const kind = found[1] !== "restore over" ? "archive" : item.action === HELD_ACTION ? "held" : "restore";
   return { kind, repo: found[2] };
 }
 
@@ -68,7 +68,7 @@ export function confirmLine(request: GuardedRequest): string {
 }
 
 // The Waiting on you view (feature:waiting, SPEC.md). Asks the core once; a core error shows in
-// place of the list (SHELL-3). The action of a guarded request (a repo delete or a restore over
+// place of the list (SHELL-3). The action of a guarded request (a repo archive or a restore over
 // a live repo asked for from the CLI or MCP) opens the confirm step. Its Confirm button is
 // enabled only while the box holds the repo's `owner/name`, letter for letter; only it sends
 // `confirmed: true`, with the name typed, and the core checks the name again. Cancel sends

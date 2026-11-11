@@ -2,7 +2,7 @@
 //! `--json`, printing what the GUI shows. `errors` (#375) lists the fleet errors the app
 //! recorded and the open IT tickets.
 //! CLI-2: `switchboard refresh | backup <repo> | backup --all`, the GUI buttons.
-//! CLI-3: a repo delete or a restore over a live repo is refused and becomes a Waiting on you
+//! CLI-3: a repo archive (`delete <repo>`; nothing is ever deleted) or a restore over a live repo is refused and becomes a Waiting on you
 //! item; `--role <role> merge <repo>#<pr>` goes through CORE-3; inside a job worktree no role
 //! gives write actions. `--role budget-manager set_pool_cap <pool> <cap>` and `pool_edit <pool>
 //! [--plan <p>] [--cap <n>] [--reset <day time>] [--cost <n>]` edit a pool through
@@ -848,11 +848,11 @@ fn guard_for(args: &super::Args, cwd: &Path) -> Caller {
     }
 }
 
-/// The action as the guard words it, e.g. `delete switchboard`.
+/// The action as the guard words it, e.g. `archive owner/switchboard`: `delete` archives.
 fn request_text(action: &GuardedAction) -> String {
     match action {
         GuardedAction::Merge { repo, pr } => format!("merge {repo}#{pr}"),
-        GuardedAction::DeleteRepo { repo } => format!("delete {repo}"),
+        GuardedAction::DeleteRepo { repo } => format!("archive {repo}"),
         GuardedAction::RestoreOverLive { repo } => format!("restore over {repo}"),
     }
 }

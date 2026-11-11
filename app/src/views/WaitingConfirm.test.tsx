@@ -18,7 +18,7 @@ const GUARDED: WaitingItemData = {
   action: "Confirm in the app",
   since: 1762447500,
 };
-const DELETE = "I was asked from the CLI to delete owner/alpha";
+const DELETE = "I was asked from the CLI to archive owner/alpha";
 const GUARDED_DELETE: WaitingItemData = { ...GUARDED, what: DELETE, source: { GuardedAction: { text: DELETE } } };
 const HELD: WaitingItemData = { ...GUARDED, action: HELD_ACTION, why: "The restore over owner/alpha pushed the backup's refs; 4 comments and 0 closes or body changes wait." };
 const TASK: WaitingItemData = {
@@ -137,12 +137,15 @@ test("a guarded request is read back as the core reads it", () => {
   expect(guardedRequest(GUARDED)).toEqual({ kind: "restore", repo: "owner/alpha" });
   expect(guardedRequest(GUARDED_DELETE)).toEqual({ kind: "archive", repo: "owner/alpha" });
   expect(guardedRequest(HELD)).toEqual({ kind: "held", repo: "owner/alpha" });
+  // A request filed with the old wording is the same archive request.
+  const old = "I was asked from the CLI to delete owner/alpha";
+  expect(guardedRequest({ ...GUARDED, what: old, source: { GuardedAction: { text: old } } })).toEqual({ kind: "archive", repo: "owner/alpha" });
   // A held delete is still an archive: only a restore holds anything back.
   expect(guardedRequest({ ...GUARDED_DELETE, action: HELD_ACTION })).toEqual({ kind: "archive", repo: "owner/alpha" });
   expect(guardedRequest(TASK)).toBeNull();
   expect(guardedRequest({ ...GUARDED, link: "https://github.com/owner/beta" })).toBeNull();
   expect(guardedRequest({ ...GUARDED, link: "" })).toBeNull();
-  for (const text of ["delete owner/alpha", "I was asked to merge owner/alpha#4", "x to delete alpha", "x to delete a/b/c", "x to delete owner/al pha"]) {
+  for (const text of ["delete owner/alpha", "archive owner/alpha", "x to archive alpha", "I was asked to merge owner/alpha#4", "x to delete alpha", "x to delete a/b/c", "x to delete owner/al pha"]) {
     expect(guardedRequest({ ...GUARDED, source: { GuardedAction: { text } } })).toBeNull();
   }
 });

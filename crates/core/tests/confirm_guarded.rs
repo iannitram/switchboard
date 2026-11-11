@@ -64,7 +64,7 @@ fn restore() -> GuardedAction {
 /// The item the CLI leaves (`cli::write_command`): its text, and the guard's wording after "to".
 fn asked(action: &GuardedAction) -> Item {
     let request = match action {
-        GuardedAction::DeleteRepo { repo } => format!("delete {repo}"),
+        GuardedAction::DeleteRepo { repo } => format!("archive {repo}"),
         GuardedAction::RestoreOverLive { repo } => format!("restore over {repo}"),
         GuardedAction::Merge { repo, pr } => format!("merge {repo}#{pr}"),
     };
@@ -196,6 +196,26 @@ fn the_request_is_read_back_from_the_item_the_cli_leaves() {
     assert_eq!(guarded_request(&asked(&restore())), Some(restore()));
 }
 
+/// A request filed before the wording changed says "to delete": it is still the same request,
+/// and its confirm still archives.
+#[test]
+fn a_request_worded_as_a_delete_is_still_read_and_still_archives() {
+    let old = guarded_item(
+        &delete(),
+        &format!("I was asked from the CLI to delete {REPO}"),
+        NOW,
+    );
+    assert_eq!(guarded_request(&old), Some(delete()));
+    let data = data_dir("old-wording");
+    LocalItems::new(&data).add(old.clone()).unwrap();
+    let run = Restore::answering(Ok(report()));
+    let app = caller(Face::Gui, None, false, true);
+    let done = run.run(&data, &text_of(&old), &app).unwrap();
+    assert_eq!(done.what, format!("archive {REPO}"));
+    assert_eq!(run.archives.borrow().len(), 1);
+    assert_eq!(LocalItems::new(&data).load().unwrap(), Vec::new());
+}
+
 #[test]
 fn an_item_that_is_not_one_clear_delete_or_restore_request_is_no_request() {
     // Not a guarded request at all.
@@ -225,7 +245,7 @@ fn without_the_confirm_the_app_is_refused_and_nothing_changes() {
     let restore_run = Restore::answering(Ok(report()));
     let app = caller(Face::Gui, None, false, false);
     for (action, want) in [
-        (delete(), "delete owner/alpha: needs a confirm in the app"),
+        (delete(), "archive owner/alpha: needs a confirm in the app"),
         (
             restore(),
             "restore over owner/alpha: needs a confirm in the app",
@@ -258,7 +278,7 @@ fn the_cli_and_mcp_cannot_confirm_whatever_the_role() {
                 "{face:?} {role:?}"
             );
             let why = refused(restore_run.run(&data, &text_of(&asked(&delete())), &who));
-            assert_eq!(why, "delete owner/alpha: needs a confirm in the app");
+            assert_eq!(why, "archive owner/alpha: needs a confirm in the app");
         }
     }
     assert!(restore_run.idle(), "no restore and no archive ran");
@@ -313,7 +333,7 @@ fn a_waiting_item_that_names_no_clear_request_is_refused() {
     let app = caller(Face::Gui, None, false, true);
     let why = refused(restore_run.run(&data, &text_of(&odd), &app));
     assert!(
-        why.contains("does not name one repo to delete or restore over"),
+        why.contains("does not name one repo to archive or restore over"),
         "{why}"
     );
     assert!(restore_run.idle());
@@ -530,7 +550,7 @@ fn a_confirm_without_the_repos_name_typed_right_is_refused_and_nothing_changes()
     // The guard answers before the name is looked at: the right name does not help the CLI.
     let cli = caller(Face::Cli, Some(Role::ProjectManager), false, true);
     let why = refused(restore_run.run(&data, &text_of(&asked(&delete())), &cli));
-    assert_eq!(why, "delete owner/alpha: needs a confirm in the app");
+    assert_eq!(why, "archive owner/alpha: needs a confirm in the app");
     assert!(restore_run.idle());
     unchanged(&data, &before);
 }

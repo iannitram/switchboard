@@ -9,7 +9,7 @@ use switchboard_core::rules::GuardedAction;
 use switchboard_core::waiting::guarded_item;
 
 const NOW: UnixSeconds = 1_800_000_000;
-const DELETE: &str = "I was asked from the CLI to delete owner/alpha";
+const DELETE: &str = "I was asked from the CLI to archive owner/alpha";
 const RESTORE: &str = "I was asked from the CLI to restore over owner/alpha";
 const REPO: &str = "owner/alpha";
 
@@ -62,7 +62,7 @@ fn unchanged(s: &Setup) {
 fn the_app_without_the_confirm_gets_the_guards_refusal_and_changes_nothing() {
     let s = setup("unconfirmed");
     for (text, want) in [
-        (DELETE, "delete owner/alpha: needs a confirm in the app"),
+        (DELETE, "archive owner/alpha: needs a confirm in the app"),
         (
             RESTORE,
             "restore over owner/alpha: needs a confirm in the app",
