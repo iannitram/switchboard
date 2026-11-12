@@ -60,7 +60,10 @@ fn a_node_with_no_issue_is_named_by_its_id() {
 
 #[test]
 fn a_closed_issue_still_counts_as_the_nodes_issue() {
-    let issues = [issue(1, "open", &["node:a"]), issue(2, "closed", &["node:b"])];
+    let issues = [
+        issue(1, "open", &["node:a"]),
+        issue(2, "closed", &["node:b"]),
+    ];
     assert_eq!(pairs(ROADMAP, &issues), Vec::new());
 }
 
@@ -111,7 +114,10 @@ fn a_roadmap_with_no_updated_line_is_stale() {
 #[test]
 fn an_unspecified_item_is_fog_ready_when_all_its_waits_on_nodes_are_done() {
     // `a` is done; `b` is still open, so `d` (waits on a and b) is not ready, but `c` is.
-    let issues = [issue(1, "closed", &["node:a"]), issue(2, "open", &["node:b"])];
+    let issues = [
+        issue(1, "closed", &["node:a"]),
+        issue(2, "open", &["node:b"]),
+    ];
     assert_eq!(
         pairs(ROADMAP, &issues),
         vec![(Kind::FogReady, "c".to_string())]
@@ -133,7 +139,12 @@ fn every_item_names_its_kind_and_its_id_in_json() {
     }
     let kinds: Vec<String> = items
         .iter()
-        .map(|item| serde_json::to_value(item).unwrap()["kind"].as_str().unwrap().to_string())
+        .map(|item| {
+            serde_json::to_value(item).unwrap()["kind"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
         .collect();
     assert_eq!(
         kinds,

@@ -1,7 +1,9 @@
 //! The roadmap graph: ROADMAP.md's `nodes:` and `unspecified:` blocks and each node's spec file
 //! (`roadmap/nodes/<id>.json`), read into a graph and linted. `lint` reports every problem by id;
-//! it reads files and never runs a command. `switchboard roadmap lint <clone> --json` is its face.
+//! `drift` reports the gaps between the roadmap and the issues. Neither runs a command.
+//! `switchboard roadmap lint <clone> --json` is the lint's face.
 
+pub mod drift;
 pub mod graph;
 
 use std::collections::HashMap;
