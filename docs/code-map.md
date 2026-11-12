@@ -4,7 +4,7 @@ Updated: 2026-11-12
 
 What each module owns, the Musts it carries (`SPEC.md`), what it talks to, and its status. An issue that fills a module moves its status from **planned** to **present** in the same PR (RUBRIC). Words are the glossary's (`GLOSSARY.md`).
 
-Status today: the core and faces have the present modules listed below; remaining skeleton bodies are `todo!("<Must id>")`. The runner's spec loader, the roadmap graph's lint, its drift, and the roadmap units' plan and wiring are present; the runner's engine and the other roadmap nodes remain planned.
+Status today: the core and faces have the present modules listed below; remaining skeleton bodies are `todo!("<Must id>")`. The runner's spec loader, the roadmap graph's lint, its drift, the roadmap units' plan and wiring, and the unit frontier are present; the runner's engine and the other roadmap nodes remain planned.
 
 reuses:
 - brocrew: the chat parts, the Waiting on you item, the work report entry and the fixed-report shape (Apache-2.0; our fork is archived, read and copied from only)
@@ -24,6 +24,7 @@ crates/core/                  switchboard-core: every rule, read and write
   src/autopilot/              review, driver, instructions, classify, weekly
   src/runner/                 workflow spec types, loading and validation
   src/roadmap/                the roadmap graph (ROADMAP's nodes and unspecified blocks, node spec files), its lint, its drift against the issues, and the units plan (issues and blocked-by links)
+  src/unit/                   the unit frontier (open, unclaimed, unblocked units) and the next one to take
   src/workloop/               planned (after 1.0, `local-only`): backlog, run, packet, judge, progress, handoff
   tests/                      one test file per issue; fixtures/ (fleet stub, recorded answers)
 crates/cli/                   the `switchboard` binary: cli.rs (CLI-1..3), mcp.rs (MCP-1..3)
@@ -270,6 +271,11 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 `crates/core/src/roadmap/units.rs` · roadmap-units (#399) · present. `plan(graph, issues, repo)` gives the create-queue issues (`Create::Issue`) for the nodes with no issue yet: a node is skipped when an open or closed issue carries its `node:<id>` label; each new issue carries that label, its `type:<type>` label and its `feature:<feature>` label. `wire(graph, numbers, linked)` gives the native blocked-by `Link`s for every `after` id, in graph order, minus the (blocked, blocker) pairs already linked, so a second run gives none; refused when a node or an `after` id has no issue number. Both are pure: the caller sends the creates through the queue and the links to GitHub. Tests: `crates/core/tests/roadmap_units.rs`.
 
 `crates/core/src/roadmap/drift.rs` · roadmap-drift (#400) · present. `find(roadmap_md, issues, today)` returns one `DriftItem` per gap, each `kind`, `ref` and `message` (JSON keys the same): `node-without-unit` (a node with no issue labelled `node:<id>`; `ref` the node id), `unit-without-node` (an issue whose `node:` labels name no node; `ref` `#<n>`), `stale-date` (ROADMAP's `Updated:` missing or more than 14 days old, the SKY-5 rule read from `sky::drift`; `ref` `ROADMAP.md`) and `fog-ready` (an unspecified item whose `waits on` nodes are all done, a node being done when its issue is closed; `ref` the item id). Pure; refused only when ROADMAP.md does not parse. The `switchboard roadmap drift <repo> --json` face is not wired yet. Tests: `crates/core/tests/roadmap_drift.rs`.
+
+### unit
+`crates/core/src/unit/mod.rs` · unit-frontier (#402) · present. Declares `frontier`.
+
+`crates/core/src/unit/frontier.rs` · unit-frontier (#402) · present. `frontier(inputs)` gives the units (issues labelled `node:<id>` with a node in the graph) that are open, not claimed and whose every blocker is closed and in the resolution records; a blocker missing from the issues still blocks. `next(inputs)` gives the first of them by open units unblocked, transitively (`unblocks`), then smaller size, then earlier roadmap line, then lower issue number. `Inputs` takes the graph, the issues, the (blocked, blocker) links, the resolved issue numbers and the claimed ones. `EMPTY_EXIT` (75) is the exit for an empty frontier; the `switchboard unit frontier` and `unit next` faces are not wired yet. Pure. Tests: `crates/core/tests/unit_frontier.rs`.
 
 ### workloop
 `crates/core/src/workloop/` · no Musts yet (`local-only`, after 1.0) · planned, not in the skeleton. The work loop: stars built unattended in dependency order, each turn a fleet job with a fresh context, judged by the harness. Design and the analysis of Craft Anything's Make loop it comes from: `docs/work-loop.md`. Nothing here gets an issue until the `local-only` feature has its own Spec; the module names are a proposal. Nothing is lifted from Craft Anything (ours, MIT or Apache-2.0) yet, so it has no line in the `reuses:` block above, which the sky draws as a reuse line (SKY-6); the PR that first lifts code (the check result shape, the stall guard or the context trim, `docs/work-loop.md` §7 question 8) adds that line.
