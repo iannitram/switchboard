@@ -8,7 +8,6 @@ Status today: the skeleton. Every module below exists with its types and signatu
 
 reuses:
 - brocrew: the chat parts, the Waiting on you item, the work report entry and the fixed-report shape (Apache-2.0; our fork is archived, read and copied from only)
-- craft-anything: planned, for `workloop`: the check result shape, the stall guard and the context trim of its Make loop (MIT or Apache-2.0; ours; `docs/work-loop.md`)
 
 (The sky reads this block, SKY-6. Ideas taken from projects that are not ours, such as wayfinder-maps' look, are credited in the README, not here.)
 
@@ -254,7 +253,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - AUTO-2 roadmap pass (`roadmap_pass`, `pm_job` in `passes.rs`; run by `after_poll`): present.
 
 ### workloop
-`crates/core/src/workloop/` · no Musts yet (`local-only`, after 1.0) · planned, not in the skeleton. The work loop: stars built unattended in dependency order, each turn a fleet job with a fresh context, judged by the harness. Design and the analysis of Craft Anything's Make loop it comes from: `docs/work-loop.md`. Nothing here gets an issue until the `local-only` feature has its own Spec; the module names are a proposal.
+`crates/core/src/workloop/` · no Musts yet (`local-only`, after 1.0) · planned, not in the skeleton. The work loop: stars built unattended in dependency order, each turn a fleet job with a fresh context, judged by the harness. Design and the analysis of Craft Anything's Make loop it comes from: `docs/work-loop.md`. Nothing here gets an issue until the `local-only` feature has its own Spec; the module names are a proposal. Nothing is lifted from Craft Anything (ours, MIT or Apache-2.0) yet, so it has no line in the `reuses:` block above, which the sky draws as a reuse line (SKY-6); the PR that first lifts code (the check result shape, the stall guard or the context trim, `docs/work-loop.md` §7 question 8) adds that line.
 
 - `backlog`: the ready stars in dependency order (`sky::chain`), each with its locked checks; one star at a time per repo. Planned.
 - `run`: the state machine of one star: may_spend (`autopilot::may_spend`), pick, packet, turn, checks, handoff, then good, next model, split or park. Round, try and unchanged-turn counts are saved after every step, so a restart carries on. Planned.
