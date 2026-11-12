@@ -1,6 +1,6 @@
 //! FD-1 for the Chat composer (#177): route one message and say which step picked; FD-5: in an
-//! open thread, keep the chat on its model until a signal moves it. Routing only: no adapter is
-//! called, nothing is logged and no thread is stored.
+//! open thread, keep the chat on its model until a signal moves it. The labeller may call a
+//! model for the kind; no answer is sent, nothing is logged and no thread is stored.
 
 use crate::abilities::{AbilitiesIndex, FleetModels};
 use crate::autopilot::may_spend;
@@ -8,7 +8,7 @@ use crate::budget::{self, PoolRow};
 use crate::fleet::FleetBridge;
 use crate::frontdoor::adapters::HttpChatTransport;
 use crate::frontdoor::answer::{braked_why, claude_model_of, MOVE_ROLE};
-use crate::frontdoor::labeller::{LlamaLabeller, SmallLabeller};
+use crate::frontdoor::labeller::{FallbackLabeller, LlamaLabeller, PaidLabeller, SmallLabeller};
 use crate::frontdoor::router::{self, BudgetGate, Complexity, Pick, Route, Step};
 use crate::frontdoor::sticky::{leaves_the_model, move_signals, open_chat, OpenChat, STICKY_STEP};
 use crate::frontdoor::thread::ThreadStore;
@@ -416,20 +416,40 @@ fn brake_homes(rows: &[crate::joblog::JobRow], open: &OpenChat) -> Vec<(String, 
     homes
 }
 
-/// How long the labeller may take before the route goes on without it (a slow local model must
-/// not hold up Chat).
+/// How long each labeller HTTP request may take (a slow model must not hold up Chat
+/// indefinitely). A failed local request can then try the paid labeller (#330).
 pub const LABELLER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 
-/// The labeller for `machine`: its local qwen model on the server the fleet config names, over
+/// The local labeller for `machine`, also used alone by a dry run so it cannot spend money.
+/// Its local qwen model is on the server the fleet config names, over
 /// a transport that gives up after `LABELLER_TIMEOUT`. `None` without a model and a URL (rules
 /// only). A server that cannot be reached makes the labeller answer `None`, never an error.
-pub fn live_labeller(fleet: &FleetBridge, machine: Option<&str>) -> Option<LlamaLabeller> {
+pub fn local_labeller(fleet: &FleetBridge, machine: Option<&str>) -> Option<LlamaLabeller> {
     let (model, base_url) = FleetModels::read_qwen_endpoint(fleet, machine)?;
     Some(LlamaLabeller::new(
         &base_url,
         &model,
         Box::new(HttpChatTransport::with_timeout(LABELLER_TIMEOUT)),
     ))
+}
+
+/// #330: try the first cheapest-first paid service with budget and a key (its first model row, as the router's Small rule picks) only if the local request fails.
+/// Index or budget failures leave the rules-only result, just like missing keys or budget.
+pub fn live_labeller<'a>(
+    fleet: &'a FleetBridge,
+    machine: Option<&str>,
+) -> Option<impl SmallLabeller + 'a> {
+    let local = local_labeller(fleet, machine)?;
+    let machine = machine.map(str::to_string);
+    Some(FallbackLabeller::new(local, move || {
+        let index = AbilitiesIndex::load_with(fleet, machine.as_deref()).ok()?;
+        PaidLabeller::new(
+            &index,
+            &FleetGate::new(fleet),
+            &|name| std::env::var(name).ok(),
+            &|| Box::new(HttpChatTransport::with_timeout(LABELLER_TIMEOUT)),
+        )
+    }))
 }
 
 /// FD-1: route one Chat message with the real router (#169), the live labeller behind the

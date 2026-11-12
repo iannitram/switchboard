@@ -183,7 +183,7 @@ pub fn learned_pick(kind: &str, rows: &[JobRow]) -> Option<(String, String)> {
 pub const CLAUDE_AGENTS: [&str; 2] = ["harmon", "therapist"];
 
 /// Services from cheapest to dearest: the budget rule's `Small` takes the first one in budget.
-const CHEAPEST_FIRST: [&str; 5] = ["qwen", "gemini", "chatgpt", "deepseek", "claudeapi"];
+pub(crate) const CHEAPEST_FIRST: [&str; 5] = ["qwen", "gemini", "chatgpt", "deepseek", "claudeapi"];
 
 /// `text` as lowercase words joined by single spaces, padded so `contains` matches whole words.
 fn padded(text: &str) -> String {
@@ -200,7 +200,7 @@ fn wait_claude() -> Pick {
 }
 
 /// A model any request kind gives `service`, in id order, optionally one whose name has `part`.
-fn any_model(index: &AbilitiesIndex, service: &str, part: &str) -> Option<String> {
+pub(crate) fn any_model(index: &AbilitiesIndex, service: &str, part: &str) -> Option<String> {
     index
         .models
         .values()

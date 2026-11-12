@@ -162,18 +162,27 @@ fn adapter_for(service: &str, ctx: &AnswerContext) -> Result<Box<dyn ChatAdapter
         };
         return Ok(Box::new(QwenAdapter::new(base, (ctx.transport)())));
     }
+    paid_adapter_for(service, ctx.env, ctx.transport)
+}
+
+/// The paid adapters and key lookup shared by answers and the FD-2 labeller.
+pub(crate) fn paid_adapter_for(
+    service: &str,
+    env: &dyn Fn(&str) -> Option<String>,
+    transport: &dyn Fn() -> Box<dyn ChatTransport>,
+) -> Result<Box<dyn ChatAdapter>, CoreError> {
     let Some(var) = key_var(service) else {
         return Err(CoreError::Refused(format!(
             "no chat adapter for service {service}"
         )));
     };
-    let key = (ctx.env)(var).filter(|k| !k.trim().is_empty());
+    let key = env(var).filter(|k| !k.trim().is_empty());
     let Some(key) = key else {
         return Err(CoreError::Refused(format!(
             "no key for {service}: set {var}"
         )));
     };
-    let transport = (ctx.transport)();
+    let transport = transport();
     Ok(match service {
         "deepseek" => Box::new(DeepSeekAdapter::new(
             DEEPSEEK_URL,

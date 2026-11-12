@@ -131,7 +131,7 @@ pub fn ask_on(
 /// the Chat composer's Send does: this machine's name, the live labeller, the process
 /// environment for the keys and the real HTTP transport. With `dry_run` it routes and stops:
 /// no model is sent the message, no thread is written and nothing is spent (the labeller, a
-/// local model, may still be asked for the kind, so the route is the one a real ask takes).
+/// local model, may still be asked for the kind; the paid labeller fallback is disabled).
 pub fn ask(
     fleet: &FleetBridge,
     data_dir: &Path,
@@ -140,12 +140,26 @@ pub fn ask(
     dry_run: bool,
 ) -> Result<Asked, CoreError> {
     let machine = FleetModels::local_machine();
-    let small = chat::live_labeller(fleet, machine.as_deref());
+    let local = if dry_run {
+        chat::local_labeller(fleet, machine.as_deref())
+    } else {
+        None
+    };
+    let live = if dry_run {
+        None
+    } else {
+        chat::live_labeller(fleet, machine.as_deref())
+    };
+    let small: Option<&dyn SmallLabeller> = if dry_run {
+        local.as_ref().map(|s| s as &dyn SmallLabeller)
+    } else {
+        live.as_ref().map(|s| s as &dyn SmallLabeller)
+    };
     let env = |name: &str| std::env::var(name).ok();
     let transport = || -> Box<dyn ChatTransport> { Box::new(HttpChatTransport::new()) };
     let seams = Seams {
         machine: machine.as_deref(),
-        small: small.as_ref().map(|s| s as &dyn SmallLabeller),
+        small,
         env: &env,
         transport: &transport,
         qwen_up: &crate::autopilot::passes::http_qwen_probe,
