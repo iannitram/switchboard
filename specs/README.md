@@ -99,7 +99,7 @@ bug-loop (14):
 
 - `switchboard waiting --json` exists, newest first; `waiting list` does not.
 - Switchboard never calls `fleet pick` or `fleet gh` today; it reads only exits 0 and 75.
-- Whether Switchboard can write fleet-state files.
+- Whether Switchboard can write fleet-state files: research/fleet-state-write.md (#401) gives a create-if-absent protocol (tree check, then an expected-SHA push lease); no live write has tried it.
 - Whether `fleet run` honours a picked lane or reuses a branch.
 - Plain `git` and `gh` steps are marked as Switchboard's.
 - Who writes the approval lines after the owner answers.
