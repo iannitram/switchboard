@@ -164,27 +164,123 @@ fn non_negative(value: Option<f64>, name: &str) -> Result<Option<Value>, CoreErr
     }
 }
 
+/// BUD-2: the largest dollar cap an edit may set (a typo guard, not a policy).
+pub const MAX_CAP_USD: f64 = 100_000.0;
+
+/// BUD-2: the smallest dollar cap an edit may set: one cent (#416). A cap is a dollar amount,
+/// so less than a cent (`1e-300`) is no cap at all.
+pub const MIN_CAP_USD: f64 = 0.01;
+
+/// A cap: finite, at least `MIN_CAP_USD` and at most `MAX_CAP_USD`. A negative number keeps the
+/// same refusal text as any other number field.
+fn cap_value(value: Option<f64>) -> Result<Option<Value>, CoreError> {
+    match value {
+        Some(v) if v.is_finite() && (MIN_CAP_USD..=MAX_CAP_USD).contains(&v) => {
+            Ok(Some(Value::from(v)))
+        }
+        Some(v) if !v.is_finite() || v < 0.0 => non_negative(Some(v), "cap"),
+        Some(_) => Err(CoreError::Parse(format!(
+            "cap must be at least {MIN_CAP_USD} and at most {MAX_CAP_USD}"
+        ))),
+        None => Ok(None),
+    }
+}
+
 /// BUD-2: save the edit to the pipeline clone's `tools/fleet/config.json` and append a row to
 /// `edits_log`, then re-read `budget`. U5: the edit stays local; the Waiting on you item it
-/// gives back asks for it to be landed through review. A refusal writes nothing.
+/// gives back asks for it to be landed through review. An `Err` means nothing changed: the
+/// ledger row goes first, then `config.json` (replaced whole), then the re-read; a failure
+/// after a write puts the file and the ledger back as they were. A cap is refused on a pool
+/// with no dollar cap (no `cap_usd` and not `fixed-period`) and outside `MIN_CAP_USD` to
+/// `MAX_CAP_USD`. #416: the whole save holds the lock on `config.json`, then the one on the
+/// ledger (`lock::FileLock`), so edits saved at once from several threads or processes each land
+/// whole or are refused; waiting longer than `EDIT_LOCK_WAIT` for them is a refusal.
 pub fn save_edit(
     fleet: &FleetBridge,
     edit: &PoolEdit,
     edits_log: &std::path::Path,
     clock: &dyn Clock,
 ) -> Result<EditSaved, CoreError> {
+    save_edit_then(fleet, edit, edits_log, clock, &|_| Ok(()))
+}
+
+/// BUD-2 for every face (#340): `save_edit` with the ledger in `<data>/pool-edits.jsonl` and its
+/// Waiting on you item added to the local items in `data`, all or nothing. The item is added
+/// last, after the re-read; when it cannot be added, the file and the ledger are put back as
+/// they were, so an `Err` still means nothing changed.
+pub fn save_pool_edit(
+    fleet: &FleetBridge,
+    edit: &PoolEdit,
+    data: &std::path::Path,
+    clock: &dyn Clock,
+) -> Result<EditSaved, CoreError> {
+    save_edit_then(fleet, edit, &data.join(POOL_EDITS_LOG), clock, &|item| {
+        crate::waiting::LocalItems::new(data).add(item.clone())
+    })
+}
+
+/// BUD-2 (#416): how long a pool edit waits for another edit's save to finish before it is
+/// refused. A save re-reads the budget, which is quick unless fleet is stuck.
+pub const EDIT_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// BUD-2: the pool-edit ledger's file name in the app data folder.
+pub const POOL_EDITS_LOG: &str = "pool-edits.jsonl";
+
+/// BUD-2 (#362): what an edit set, from its ledger row, as one line: each field in the row's
+/// order as `<field> is now <new> (was <old>)`, joined by `, `; a field with no old value says
+/// `was not set`. A row that set nothing says `nothing changed`.
+pub fn edit_summary(ledger_row: &Value) -> String {
+    let shown = |v: &Value| match v {
+        Value::Null => "not set".to_string(),
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+    let parts: Vec<String> = ledger_row["set"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .map(|(field, new)| {
+            format!(
+                "{field} is now {} (was {})",
+                shown(new),
+                shown(&ledger_row["before"][field])
+            )
+        })
+        .collect();
+    if parts.is_empty() {
+        return "nothing changed".to_string();
+    }
+    parts.join(", ")
+}
+
+/// `save_edit`, then `finish` with the Waiting item once the re-read is done; a `finish` that
+/// fails takes the edit back as a failed re-read does.
+fn save_edit_then(
+    fleet: &FleetBridge,
+    edit: &PoolEdit,
+    edits_log: &std::path::Path,
+    clock: &dyn Clock,
+    finish: &dyn Fn(&crate::waiting::Item) -> Result<(), CoreError>,
+) -> Result<EditSaved, CoreError> {
     let pool = edit.pool.as_str();
+    if pool.trim().is_empty() {
+        return Err(CoreError::Parse(
+            "pool edit has no pool name; name the pool to edit".to_string(),
+        ));
+    }
     if edit.plan.is_none() && edit.cap.is_none() && edit.reset.is_none() && edit.cost_usd.is_none()
     {
         return Err(CoreError::Parse(format!(
             "pool edit for {pool} changes nothing"
         )));
     }
-    let cap = non_negative(edit.cap, "cap")?;
+    let cap = cap_value(edit.cap)?;
     let cost = non_negative(edit.cost_usd, "cost_usd")?;
     let reset = edit.reset.as_deref().map(parse_reset).transpose()?;
 
     let path = config_path(fleet);
+    // #416: from the read of config.json to the last undo, no other edit may run.
+    let _config_lock = crate::lock::FileLock::take(&path, EDIT_LOCK_WAIT)?;
     let text = std::fs::read_to_string(&path)
         .map_err(|e| CoreError::Io(format!("{}: {e}", path.display())))?;
     let mut config: Value = serde_json::from_str(&text)
@@ -194,6 +290,15 @@ pub fn save_edit(
         .and_then(|pools| pools.get_mut(pool))
         .and_then(Value::as_object_mut)
         .ok_or_else(|| CoreError::Parse(format!("no pool {pool} in config.json")))?;
+
+    if cap.is_some()
+        && entry.get("cap_usd").is_none()
+        && entry.get("kind").and_then(Value::as_str) != Some("fixed-period")
+    {
+        return Err(CoreError::Parse(format!(
+            "pool {pool} has no dollar cap to set"
+        )));
+    }
 
     let mut set = serde_json::Map::new();
     let mut before = serde_json::Map::new();
@@ -238,7 +343,6 @@ pub fn save_edit(
     let mut out = serde_json::to_string_pretty(&config)
         .map_err(|e| CoreError::Parse(format!("{}: {e}", path.display())))?;
     out.push('\n');
-    std::fs::write(&path, out).map_err(|e| CoreError::Io(format!("{}: {e}", path.display())))?;
 
     let now = clock.now();
     let ledger_row = serde_json::json!({
@@ -247,9 +351,24 @@ pub fn save_edit(
         "set": Value::Object(set),
         "before": Value::Object(before),
     });
-    append_line(edits_log, &ledger_row)?;
-
-    let rows = read(fleet)?;
+    if let Some(dir) = edits_log.parent() {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| CoreError::Io(format!("{}: {e}", edits_log.display())))?;
+    }
+    let _ledger_lock = crate::lock::FileLock::take(edits_log, EDIT_LOCK_WAIT)?;
+    let ledger_undo = append_line(edits_log, &ledger_row)?;
+    if let Err(err) = replace_file(&path, &out) {
+        let stuck: Vec<String> = ledger_undo.undo().err().into_iter().collect();
+        return Err(with_undo_failures(err, stuck));
+    }
+    let rows = match read(fleet) {
+        Ok(rows) => rows,
+        Err(err) => {
+            let mut stuck: Vec<String> = ledger_undo.undo().err().into_iter().collect();
+            stuck.extend(replace_file(&path, &text).err().map(detail));
+            return Err(with_undo_failures(err, stuck));
+        }
+    };
     let waiting = crate::waiting::Item {
         what: format!("Land the {pool} pool edit"),
         why: "A pool edit is saved in the local pipeline clone only; it lands through review (U5)."
@@ -261,6 +380,11 @@ pub fn save_edit(
         action: "Open config.json".to_string(),
         since: now,
     };
+    if let Err(err) = finish(&waiting) {
+        let mut stuck: Vec<String> = ledger_undo.undo().err().into_iter().collect();
+        stuck.extend(replace_file(&path, &text).err().map(detail));
+        return Err(with_undo_failures(err, stuck));
+    }
     Ok(EditSaved {
         rows,
         ledger_row,
@@ -268,19 +392,97 @@ pub fn save_edit(
     })
 }
 
-/// One JSON line appended to `log`, its parent folders created first.
-fn append_line(log: &std::path::Path, row: &Value) -> Result<(), CoreError> {
+/// How to take back one `append_line`.
+struct LedgerUndo<'a> {
+    log: &'a std::path::Path,
+    /// The length before the append; `None`: the file did not exist.
+    len: Option<u64>,
+}
+
+impl LedgerUndo<'_> {
+    /// Take the line back off; the error text says what could not be put back.
+    fn undo(self) -> Result<(), String> {
+        let io = |e: std::io::Error| format!("{}: {e}", self.log.display());
+        match self.len {
+            None => match std::fs::remove_file(self.log) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(io(e)),
+                _ => Ok(()),
+            },
+            Some(len) => std::fs::OpenOptions::new()
+                .write(true)
+                .open(self.log)
+                .and_then(|f| f.set_len(len))
+                .map_err(io),
+        }
+    }
+}
+
+/// `err`, and when taking the edit back failed too, say so: an `Err` from `save_edit` must not
+/// hide that part of the edit is still in place. A fleet error stays a fleet error (the app
+/// logs those), with the note on it.
+fn with_undo_failures(err: CoreError, stuck: Vec<String>) -> CoreError {
+    if stuck.is_empty() {
+        return err;
+    }
+    let note = stuck.join("; ");
+    match err {
+        CoreError::Fleet(mut e) => {
+            e.undo_note = Some(note);
+            CoreError::Fleet(e)
+        }
+        // #416: a file error's text goes in as it is, so `file:` is said once.
+        other => CoreError::Io(format!(
+            "{}; the edit could not be fully taken back, check: {note}",
+            detail(other)
+        )),
+    }
+}
+
+/// An error's text for a note: a file error's own text (its path and the OS error), any other
+/// error as it displays.
+fn detail(err: CoreError) -> String {
+    match err {
+        CoreError::Io(why) => why,
+        other => other.to_string(),
+    }
+}
+
+/// One JSON line appended to `log`, its parent folders created first. Gives back the way to
+/// take the line off again.
+fn append_line<'a>(log: &'a std::path::Path, row: &Value) -> Result<LedgerUndo<'a>, CoreError> {
     use std::io::Write;
     let io = |e: std::io::Error| CoreError::Io(format!("{}: {e}", log.display()));
     if let Some(dir) = log.parent() {
         std::fs::create_dir_all(dir).map_err(io)?;
     }
+    let len = match std::fs::metadata(log) {
+        Ok(meta) if meta.is_file() => Some(meta.len()),
+        Ok(_) => None,
+        Err(_) => None,
+    };
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(log)
         .map_err(io)?;
-    file.write_all(format!("{row}\n").as_bytes()).map_err(io)
+    let line = format!("{row}\n");
+    if let Err(e) = file.write_all(line.as_bytes()) {
+        let stuck: Vec<String> = LedgerUndo { log, len }.undo().err().into_iter().collect();
+        return Err(with_undo_failures(io(e), stuck));
+    }
+    Ok(LedgerUndo { log, len })
+}
+
+/// Write `text` to `path` whole: a sibling temp file, then a rename, so a failed write never
+/// leaves a half-written `config.json`. The temp file's name is this run's own (#416).
+fn replace_file(path: &std::path::Path, text: &str) -> Result<(), CoreError> {
+    let io = |e: std::io::Error| CoreError::Io(format!("{}: {e}", path.display()));
+    let tmp = crate::lock::temp_path(path, ".switchboard-tmp");
+    std::fs::write(&tmp, text).map_err(io)?;
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        io(e)
+    })
 }
 
 /// BUD-3: refresh every pool that has a reader (`fleet budget --refresh --json`).

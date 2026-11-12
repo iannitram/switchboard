@@ -121,7 +121,11 @@ pub fn sample_size(rows_logged: usize) -> usize {
 /// keyed by (service, model); a row without a lane or a model cannot be picked and is skipped.
 /// A pass is rating "pass" or "up". The mean cost is over those last N rows (None is 0.0);
 /// ties on the mean go to the smaller model name, then the smaller service.
+///
+/// #427: a row about an answer the local Qwen lane gave as a fallback (`fallback` set: the
+/// answer, or a rating of it) is left out entirely, so thumbs on a fallback never teach routing.
 pub fn learned_pick(kind: &str, rows: &[JobRow]) -> Option<(String, String)> {
+    let rows: Vec<&JobRow> = rows.iter().filter(|row| row.fallback.is_none()).collect();
     let logged = rows
         .iter()
         .filter(|row| row.kind.as_deref() == Some(kind))
@@ -176,7 +180,7 @@ pub fn learned_pick(kind: &str, rows: &[JobRow]) -> Option<(String, String)> {
 }
 
 /// The agents whose names are built in and go to Claude (FD-8).
-const CLAUDE_AGENTS: [&str; 2] = ["harmon", "therapist"];
+pub const CLAUDE_AGENTS: [&str; 2] = ["harmon", "therapist"];
 
 /// Services from cheapest to dearest: the budget rule's `Small` takes the first one in budget.
 const CHEAPEST_FIRST: [&str; 5] = ["qwen", "gemini", "chatgpt", "deepseek", "claudeapi"];
@@ -309,8 +313,9 @@ fn budget_rule(index: &AbilitiesIndex, budget: &dyn BudgetGate, complexity: Comp
 }
 
 /// FD-1: route one message, stopping at the first step that matches: a trigger word (an
-/// agent's name, whole word, case-insensitive), an explicit ask, the labeller (rules only, no
-/// small model), then the budget and complexity rule. A braked pool is skipped, never called,
+/// agent's name, whole word, case-insensitive), an explicit ask, the labeller (rules first;
+/// `small`, when given, is asked only when the rules name nothing, and a `None` from it leaves
+/// the rules-only result), then the budget and complexity rule. A braked pool is skipped, never called,
 /// and the `Pick::Wait` says why. An ask whose `needs` tag a request kind carries takes that
 /// kind's pick; one only a job action carries (and the `claude` ask) is a Claude handoff; one
 /// nothing carries falls through to the next step.
@@ -319,6 +324,7 @@ pub fn route(
     index: &AbilitiesIndex,
     budget: &dyn BudgetGate,
     complexity: Complexity,
+    small: Option<&dyn super::labeller::SmallLabeller>,
 ) -> Route {
     if let Some(route) = trigger(message, index, budget) {
         return route;
@@ -327,7 +333,7 @@ pub fn route(
         return route;
     }
     let kinds: Vec<String> = index.request_kinds().iter().map(|a| a.id.clone()).collect();
-    if let Some(kind) = super::labeller::label(message, &kinds, None) {
+    if let Some(kind) = super::labeller::label(message, &kinds, small) {
         return Route {
             step: Step::Labeller { kind: kind.clone() },
             pick: pick_for_kind(index, &kind, budget),

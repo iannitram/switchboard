@@ -8,6 +8,8 @@ import { Empty } from "./Empty";
 export type Loadout = {
   read_at: number;
   clis: [string, boolean][];
+  // CLIs whose sign-in probe timed out (#433); absent when none. Not the same as signed out.
+  timed_out?: string[];
   models_loaded: string[];
   toolchains: string[];
   busy: boolean;
@@ -15,8 +17,9 @@ export type Loadout = {
 };
 
 // The toolchains the core probes (it.rs `LOADOUT_TOOLCHAINS`). The core leaves a missing one out
-// of `toolchains`, so the panel names it "not found" instead of dropping its row.
-const TOOLCHAINS = ["cargo", "node", "python3"];
+// of `toolchains`, so the panel names it "not found" instead of dropping its row. `gemini` is the
+// Antigravity CLI (`agy`): presence only, never "signed in".
+const TOOLCHAINS = ["cargo", "node", "python3", "gemini"];
 
 // How often the age line is worked out again, so a stalled core timer shows as an older read.
 const AGE_TICK_MS = 30_000;
@@ -43,7 +46,10 @@ export function probeRows(l: Loadout): ProbeRow[] {
   const toolchains = [...TOOLCHAINS, ...l.toolchains.filter((t) => !TOOLCHAINS.includes(t))];
   return [
     ...l.clis.map(([name, signedIn]) => ({
-      name, state: signedIn ? "signed in" : "not signed in", detail: "", failed: !signedIn,
+      name,
+      state: signedIn ? "signed in" : (l.timed_out ?? []).includes(name) ? "could not check: timed out" : "not signed in",
+      detail: "",
+      failed: !signedIn,
     })),
     ...toolchains.map((name) => {
       const found = l.toolchains.includes(name);

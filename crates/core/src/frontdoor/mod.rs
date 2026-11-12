@@ -2,6 +2,8 @@
 //! index (`crate::abilities`) holds the request kinds it routes by.
 
 pub mod adapters;
+pub mod answer;
+pub mod ask;
 pub mod chat;
 pub mod implicit_log;
 pub mod labeller;

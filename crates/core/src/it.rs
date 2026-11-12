@@ -7,6 +7,7 @@ use crate::platform::{current_os, loadout_probes, Probe};
 use crate::CoreError;
 use serde::Serialize;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 /// IT-1: what this machine can do right now.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -14,6 +15,10 @@ pub struct Loadout {
     pub read_at: UnixSeconds,
     /// CLI name and whether it is signed in.
     pub clis: Vec<(String, bool)>,
+    /// CLIs whose sign-in probe ran out of time (#433): their `clis` entry is `false`, but they
+    /// are not known to be signed out. Left out of the JSON when none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub timed_out: Vec<String>,
     pub models_loaded: Vec<String>,
     pub toolchains: Vec<String>,
     pub busy: bool,
@@ -26,6 +31,8 @@ pub struct ProbeResult {
     pub name: String,
     pub exit_code: Option<i32>,
     pub stdout: String,
+    /// The probe was killed for running past `PROBE_TIMEOUT`.
+    pub timed_out: bool,
 }
 
 /// Runs probes (tests stub it).
@@ -45,7 +52,12 @@ pub fn read_loadout(probes: &[Probe], runner: &dyn ProbeRunner, now: UnixSeconds
         let result = runner.run(probe);
         let ok = result.exit_code == Some(0);
         match probe.name {
-            name if LOADOUT_CLIS.contains(&name) => loadout.clis.push((name.to_string(), ok)),
+            name if LOADOUT_CLIS.contains(&name) => {
+                loadout.clis.push((name.to_string(), ok));
+                if result.timed_out {
+                    loadout.timed_out.push(name.to_string());
+                }
+            }
             name if ok && LOADOUT_TOOLCHAINS.contains(&name) => {
                 loadout.toolchains.push(name.to_string());
             }
@@ -59,10 +71,11 @@ pub fn read_loadout(probes: &[Probe], runner: &dyn ProbeRunner, now: UnixSeconds
 }
 
 /// IT-1: the CLI probes (signed in when the probe exits 0).
-const LOADOUT_CLIS: [&str; 4] = ["claude", "codex", "gemini", "gh"];
+const LOADOUT_CLIS: [&str; 3] = ["claude", "codex", "gh"];
 
-/// IT-1: the toolchain probes (present when `--version` exits 0).
-const LOADOUT_TOOLCHAINS: [&str; 3] = ["cargo", "node", "python3"];
+/// IT-1: the toolchain probes (present when `--version` exits 0). `gemini` is the Antigravity
+/// CLI (`agy`), which has no auth-status command, so presence is all it reports.
+const LOADOUT_TOOLCHAINS: [&str; 4] = ["cargo", "node", "python3", "gemini"];
 
 /// IT-1: how many recent errors the loadout keeps.
 const RECENT_ERRORS: usize = 5;
@@ -95,29 +108,89 @@ fn last_errors(out: &str) -> Vec<String> {
     lines.into_iter().skip(skip).collect()
 }
 
+/// IT-W: how long one probe may run before it is killed (#339). A probe that runs out of time
+/// has no exit code, so the loadout leaves it out or shows it not busy; a sign-in probe that
+/// ran out of time is listed in `timed_out` ("could not check", #433), never as signed in.
+pub const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// IT-W: the real probe runner. It runs the probe's program with its args, stdin and stderr
-/// closed, and keeps the exit code and stdout; a program that cannot start has no exit code.
+/// closed, and keeps the exit code and stdout; a program that cannot start, or that is still
+/// running after `PROBE_TIMEOUT`, has no exit code (a slow one is killed).
 pub struct SystemProbeRunner;
 
 impl ProbeRunner for SystemProbeRunner {
     fn run(&self, probe: &Probe) -> ProbeResult {
-        let output = std::process::Command::new(probe.program)
-            .args(probe.args)
-            .stdin(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .output();
-        match output {
-            Ok(out) => ProbeResult {
-                name: probe.name.to_string(),
-                exit_code: out.status.code(),
-                stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-            },
-            Err(_) => ProbeResult {
-                name: probe.name.to_string(),
-                exit_code: None,
-                stdout: String::new(),
-            },
+        run_probe_within(probe, PROBE_TIMEOUT)
+    }
+}
+
+/// Kill the probe's whole process group (the child is its leader). `kill` is the system
+/// program, so the core needs no unsafe code or extra crate.
+#[cfg(unix)]
+fn kill_group(child: &std::process::Child) {
+    let _ = std::process::Command::new("kill")
+        .args(["-KILL", "--", &format!("-{}", child.id())])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+#[cfg(not(unix))]
+fn kill_group(_child: &std::process::Child) {}
+
+/// IT-W: run `probe`, killing it when it is still going after `limit`.
+pub fn run_probe_within(probe: &Probe, limit: Duration) -> ProbeResult {
+    let none = |timed_out: bool| ProbeResult {
+        name: probe.name.to_string(),
+        exit_code: None,
+        stdout: String::new(),
+        timed_out,
+    };
+    let mut command = std::process::Command::new(probe.program);
+    command
+        .args(probe.args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    // Its own process group, so a kill reaches what the probe started too (a shim script's
+    // `sleep` would otherwise outlive it).
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    let Ok(mut child) = command.spawn() else {
+        return none(false);
+    };
+    // Read stdout on its own thread so a full pipe cannot stall the child. It is never joined
+    // after a kill: a grandchild may still hold the pipe open.
+    let (tx, rx) = std::sync::mpsc::channel();
+    if let Some(mut out) = child.stdout.take() {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut out, &mut bytes);
+            let _ = tx.send(bytes);
+        });
+    }
+    let deadline = Instant::now() + limit;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            _ => {
+                kill_group(&child);
+                let _ = child.kill();
+                let _ = child.wait();
+                return none(true);
+            }
         }
+    };
+    let bytes = rx.recv_timeout(Duration::from_secs(1)).unwrap_or_default();
+    ProbeResult {
+        name: probe.name.to_string(),
+        exit_code: status.code(),
+        stdout: String::from_utf8_lossy(&bytes).into_owned(),
+        timed_out: false,
     }
 }
 
@@ -277,6 +350,43 @@ pub fn file_error_tickets(bridge: &FleetBridge, log: &FleetErrorLog) -> Result<u
     let records = error_records(log).to_string();
     bridge.run_status_with_input(&["errors", "file", "--records", "-"], &records)?;
     Ok(log.errors.len())
+}
+
+/// IT-2: the label an IT ticket carries.
+pub const IT_LABEL: &str = "it";
+
+/// IT-2 (#375): one IT ticket as the CLI and MCP list it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ItTicket {
+    /// `owner/name`.
+    pub repo: String,
+    pub number: u64,
+    pub title: String,
+    pub state: String,
+    pub link: String,
+}
+
+/// IT-2 (#375): the open issues labelled `it` in the stored snapshots, by repo, newest number
+/// first. Tickets are filed in the pipeline repo; reading every snapshot finds them wherever
+/// that repo's snapshot is, and only GitHub's state is shown, as the last refresh read it.
+pub fn open_tickets(snaps: &[crate::github::RepoSnapshot]) -> Vec<ItTicket> {
+    let mut tickets: Vec<ItTicket> = snaps
+        .iter()
+        .flat_map(|snap| {
+            snap.issues
+                .iter()
+                .filter(|i| i.state == "open" && i.labels.iter().any(|l| l == IT_LABEL))
+                .map(|i| ItTicket {
+                    repo: snap.repo.clone(),
+                    number: i.number,
+                    title: i.title.clone(),
+                    state: i.state.clone(),
+                    link: format!("https://github.com/{}/issues/{}", snap.repo, i.number),
+                })
+        })
+        .collect();
+    tickets.sort_by(|a, b| a.repo.cmp(&b.repo).then(b.number.cmp(&a.number)));
+    tickets
 }
 
 /// IT-3: the `it-triage` job for `ticket`, or None while the pipeline lacks `never_on` (U9).

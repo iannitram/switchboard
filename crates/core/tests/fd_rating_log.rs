@@ -48,6 +48,38 @@ fn expected(
     }
 }
 
+/// Seed thread `id` with one question and its answer per `(service, model)`, as `answer_route`
+/// stores them: turn `2k` is the k-th question, turn `2k + 1` its answer. Returns the rows.
+/// (#372: a rating needs the thread and the answered turn it names.)
+fn answered(data: &Path, id: &str, answers: &[(&str, &str)]) -> Vec<JobRow> {
+    let store = ThreadStore::new(data);
+    let mut rows = Vec::new();
+    for (service, model) in answers {
+        for row in [
+            JobRow {
+                role: Some("user".to_string()),
+                text: Some("a question".to_string()),
+                handoff_id: Some(id.to_string()),
+                source: RowSource::Chat,
+                ..JobRow::default()
+            },
+            JobRow {
+                role: Some("assistant".to_string()),
+                text: Some("an answer".to_string()),
+                lane: Some(service.to_string()),
+                model: Some(model.to_string()),
+                handoff_id: Some(id.to_string()),
+                source: RowSource::Chat,
+                ..JobRow::default()
+            },
+        ] {
+            store.append(id, &row).unwrap();
+            rows.push(row);
+        }
+    }
+    rows
+}
+
 fn refused(text: &str) -> Result<JobRow, CoreError> {
     Err(CoreError::Refused(text.to_string()))
 }
@@ -248,6 +280,7 @@ fn rating_rows_are_rated_chat_rows_the_learned_pick_counts() {
 #[test]
 fn a_press_appends_its_row_to_the_thread_and_returns_it() {
     let data = scratch("press");
+    let mut seeded = answered(&data, "handoff-7", &[("gemini", "gemini-3-flash")]);
     let row = log_rating(
         &data,
         "handoff-7",
@@ -267,37 +300,45 @@ fn a_press_appends_its_row_to_the_thread_and_returns_it() {
         false,
     );
     assert_eq!(row, want);
-    assert_eq!(
-        ThreadStore::new(&data).read("handoff-7").unwrap(),
-        vec![want]
-    );
+    seeded.push(want);
+    assert_eq!(ThreadStore::new(&data).read("handoff-7").unwrap(), seeded);
 }
 
 #[test]
-fn a_second_press_on_a_turn_is_appended_after_the_first() {
+fn a_second_press_on_a_turn_replaces_the_first() {
+    // #372: this test once asserted that a second press was appended after the first (and rated
+    // turn 1 for a model that had not answered it). A turn has one rating: the last press.
     let data = scratch("again");
+    let mut rows = answered(
+        &data,
+        "h3",
+        &[("qwen", "qwen3-coder"), ("qwen", "qwen3-coder")],
+    );
     let first = log_rating(&data, "h3", 1, "down", "qwen", "qwen3-coder", None).unwrap();
     let other = log_rating(&data, "h3", 3, "up", "qwen", "qwen3-coder", None).unwrap();
-    let last = log_rating(&data, "h3", 1, "up", "gemini", "gemini-3-flash", None).unwrap();
+    let last = log_rating(&data, "h3", 1, "up", "qwen", "qwen3-coder", None).unwrap();
+    assert_eq!(first.id, last.id);
     // A second store over the same folder: a restart.
-    let rows = ThreadStore::new(&data).read("h3").unwrap();
-    assert_eq!(rows, vec![first, other, last.clone()]);
+    rows.extend([last.clone(), other]);
+    assert_eq!(ThreadStore::new(&data).read("h3").unwrap(), rows);
     assert_eq!(last.id.as_deref(), Some("h3#rating-1"));
-    assert_eq!(rows[2].rating.as_deref(), Some("up"));
+    assert_eq!(rows[4].rating.as_deref(), Some("up"));
 }
 
 #[test]
 fn threads_stay_apart() {
     let data = scratch("apart");
-    log_rating(&data, "hb", 0, "up", "qwen", "qwen3-coder", None).unwrap();
-    log_rating(&data, "ha", 0, "down", "qwen", "qwen3-coder", None).unwrap();
+    answered(&data, "hb", &[("qwen", "qwen3-coder")]);
+    answered(&data, "ha", &[("qwen", "qwen3-coder")]);
+    log_rating(&data, "hb", 1, "up", "qwen", "qwen3-coder", None).unwrap();
+    log_rating(&data, "ha", 1, "down", "qwen", "qwen3-coder", None).unwrap();
     let store = ThreadStore::new(&data);
     assert_eq!(
         store.list().unwrap(),
         vec!["ha".to_string(), "hb".to_string()]
     );
-    assert_eq!(store.read("ha").unwrap().len(), 1);
-    assert_eq!(store.read("hb").unwrap().len(), 1);
+    assert_eq!(store.read("ha").unwrap().len(), 3);
+    assert_eq!(store.read("hb").unwrap().len(), 3);
 }
 
 #[test]

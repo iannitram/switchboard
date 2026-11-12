@@ -6,13 +6,24 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use switchboard_core::backup::{
-    restore_history_from, write_json, RecordedAnswers, Remote, RestoreReport,
+    restore_history_from, restore_to_new_from, restore_to_new_marked_from, write_json, FileSource,
+    Made, Marks, Pass, RecordedAnswers, Remote, RestoreReport,
 };
 use switchboard_core::fleet::FleetBridge;
 use switchboard_core::github::transport::{Recorded, RestAnswer};
+use switchboard_core::rules::{Caller, Face, Role};
 use switchboard_core::CoreError;
 
 const NEW: &str = "owner/restored";
+
+/// No test here has a release file to fetch.
+struct NoFiles;
+
+impl FileSource for NoFiles {
+    fn fetch(&self, url: &str) -> Result<Vec<u8>, CoreError> {
+        Err(CoreError::GitHub(format!("GET {url}: not expected")))
+    }
+}
 
 /// A fixture `fleet ghq`: logs each call, keeps every batch item in `items.json`, and answers
 /// `status` with counts: a repo named in `taken` is `exists`, an item whose kind is in `fail` is
@@ -168,6 +179,7 @@ fn remote<'a>(f: &Fixture, api: &'a Recorded) -> Remote<'a> {
         git_base: f.server.to_string_lossy().into_owned(),
         git_config: Vec::new(),
         api,
+        files: &NoFiles,
     }
 }
 
@@ -195,7 +207,8 @@ fn a_restore_makes_a_private_repo_with_every_ref_and_the_manifest_counts() {
         RestoreReport {
             refs: 3,
             labels: 2,
-            milestones: 1
+            milestones: 1,
+            ..RestoreReport::default()
         }
     );
 
@@ -285,4 +298,828 @@ fn a_label_the_queue_fails_is_an_error_not_a_report() {
         Err(CoreError::GitHub(why)) => assert!(why.contains("2 label or milestone"), "{why}"),
         other => panic!("expected a queue failure, got {other:?}"),
     }
+}
+
+/// Asserts a restore was refused with `needle` in the reason and nothing was touched: no API
+/// call, no queue call (so no repo was created), nothing pushed.
+fn refused_before_any_write(f: &Fixture, backup: &Path, needle: &str) {
+    let api = Recorded::new(Vec::new(), Vec::new());
+    match restore_history_from(&f.fleet, backup, NEW, &remote(f, &api)) {
+        Err(CoreError::Parse(why)) => assert!(why.contains(needle), "{why}"),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    assert!(api.log.lock().unwrap().is_empty(), "no API call at all");
+    assert!(!f.stub.join("calls.log").exists(), "no fleet call at all");
+    assert!(refs_of(&f.target, "refs").is_empty());
+}
+
+fn set_manifest(backup: &Path, change: impl Fn(&mut Value)) {
+    let path = backup.join("manifest.json");
+    let mut manifest: Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    change(&mut manifest);
+    std::fs::write(&path, serde_json::to_string_pretty(&manifest).unwrap()).unwrap();
+}
+
+/// #364: a valid bundle that holds only `master`, where the manifest says 4 refs.
+#[test]
+fn a_bundle_with_fewer_refs_than_the_manifest_is_refused_before_a_repo_is_created() {
+    let f = fixture("fewer-refs");
+    let bundle = f.backup.join("repo.bundle");
+    std::fs::remove_file(&bundle).unwrap();
+    git(
+        &f.source,
+        &[
+            "bundle",
+            "create",
+            "-q",
+            &bundle.to_string_lossy(),
+            "master",
+        ],
+    );
+    refused_before_any_write(&f, &f.backup, "1 refs, the manifest says 4");
+}
+
+/// #364: a manifest edited to claim more refs than the bundle holds.
+#[test]
+fn a_manifest_that_claims_more_refs_than_the_bundle_is_refused() {
+    let f = fixture("more-refs");
+    set_manifest(&f.backup, |m| m["refs"] = json!(99));
+    refused_before_any_write(&f, &f.backup, "4 refs, the manifest says 99");
+}
+
+/// #364: the bundle is not the file the manifest was written for.
+#[test]
+fn a_bundle_that_is_not_the_manifests_is_refused() {
+    let f = fixture("hash");
+    // A hash is 40 hex characters; this is not this bundle's.
+    set_manifest(&f.backup, |m| m["bundle_hash"] = json!("0".repeat(40)));
+    refused_before_any_write(&f, &f.backup, "repo.bundle is not the one the manifest");
+
+    // With the bundle's own hash the same backup restores.
+    let hash = git(&f.backup, &["hash-object", "--no-filters", "repo.bundle"]);
+    set_manifest(&f.backup, |m| m["bundle_hash"] = json!(hash));
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            answer(404, json!({"message": "Not Found"})),
+            answer(200, json!({"full_name": NEW, "private": true})),
+        ],
+    );
+    let report = restore_history_from(&f.fleet, &f.backup, NEW, &remote(&f, &api)).unwrap();
+    assert_eq!(report.refs, 3);
+}
+
+/// #364: the folder is the backup of `owner/demo`, the manifest in it names another repo.
+#[test]
+fn a_manifest_for_another_repo_than_its_folder_is_refused() {
+    let f = fixture("wrong-repo");
+    let home = f.backup.parent().unwrap().join("Backups/github/owner/demo");
+    std::fs::create_dir_all(home.parent().unwrap()).unwrap();
+    std::fs::rename(&f.backup, &home).unwrap();
+    set_manifest(&home, |m| m["repo"] = json!("other/zzz"));
+    refused_before_any_write(&f, &home, "the manifest is for other/zzz");
+
+    set_manifest(&home, |m| m["repo"] = json!("zzz"));
+    refused_before_any_write(&f, &home, "not an owner/name repo");
+}
+
+/// #364: a copy of the backup kept anywhere (not in `github/<owner>/<name>`), its manifest edited
+/// to name another repo: what the folder holds still says which repo it is the backup of.
+#[test]
+fn a_manifest_for_another_repo_than_the_backups_items_is_refused_wherever_it_sits() {
+    let f = fixture("wrong-repo-copy");
+    std::fs::write(
+        f.backup.join("comments.json"),
+        r#"[{"body": "me too",
+             "issue_url": "https://api.github.com/repos/owner/demo/issues/1"}]"#,
+    )
+    .unwrap();
+    set_manifest(&f.backup, |m| m["repo"] = json!("other/zzz"));
+    // No `resolved_repo` in the manifest (hand-edited, or written before the manifest had the
+    // field): refused, with both names and what to do if the repo was renamed before the backup.
+    refused_before_any_write(
+        &f,
+        &f.backup,
+        "the manifest is for other/zzz, the backup holds items of owner/demo; if the repo was \
+         renamed or moved to owner/demo before this backup was taken, add \
+         \"resolved_repo\": \"owner/demo\" to its manifest.json and restore again",
+    );
+    // A recorded rename covers that one name only.
+    set_manifest(&f.backup, |m| m["resolved_repo"] = json!("third/repo"));
+    refused_before_any_write(
+        &f,
+        &f.backup,
+        "the manifest is for other/zzz (GitHub answered for third/repo), the backup holds \
+         items of owner/demo",
+    );
+    set_manifest(&f.backup, |m| {
+        m.as_object_mut().unwrap().remove("resolved_repo");
+    });
+
+    // With the manifest's own repo (any case) the same copy restores.
+    set_manifest(&f.backup, |m| m["repo"] = json!("Owner/Demo"));
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            answer(404, json!({"message": "Not Found"})),
+            answer(200, json!({"full_name": NEW, "private": true})),
+        ],
+    );
+    let report = restore_history_from(&f.fleet, &f.backup, NEW, &remote(&f, &api)).unwrap();
+    assert_eq!(report.refs, 3);
+}
+
+/// #364: a repo renamed or moved before its backup, backed up under the old name. GitHub
+/// answered with the items of the new name; the backup recorded it, so the restore goes on.
+#[test]
+fn a_backup_that_followed_a_rename_restores() {
+    let f = fixture("renamed");
+    let at = |rest: &str| format!("https://api.github.com/repos/new-owner/renamed/{rest}");
+    let answers = RecordedAnswers {
+        repo: "owner/demo".to_string(),
+        labels: vec![
+            json!({"name": "bug", "url": at("labels/bug")}),
+            json!({"name": "size:Easy", "url": at("labels/size:Easy")}),
+        ],
+        milestones: vec![json!({"title": "1.0", "url": at("milestones/1")})],
+        comments: vec![json!({"body": "me too", "issue_url": at("issues/1")})],
+        ..RecordedAnswers::default()
+    };
+    let mut manifest = write_json(&answers, &f.backup, "2026-11-09T14:00:00Z").unwrap();
+    assert_eq!(manifest.repo, "owner/demo");
+    assert_eq!(manifest.resolved_repo.as_deref(), Some("new-owner/renamed"));
+    manifest.refs = 4;
+    std::fs::write(
+        f.backup.join("manifest.json"),
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            answer(404, json!({"message": "Not Found"})),
+            answer(200, json!({"full_name": NEW, "private": true})),
+        ],
+    );
+    let report = restore_history_from(&f.fleet, &f.backup, NEW, &remote(&f, &api)).unwrap();
+    assert_eq!((report.refs, report.labels, report.milestones), (3, 2, 1));
+
+    // The same backup with the recorded name taken out of the manifest is refused.
+    set_manifest(&f.backup, |m| {
+        m.as_object_mut().unwrap().remove("resolved_repo");
+    });
+    match restore_history_from(&f.fleet, &f.backup, NEW, &remote(&f, &api)) {
+        Err(CoreError::Parse(why)) => assert!(
+            why.contains(
+                "the manifest is for owner/demo, the backup holds items of new-owner/renamed"
+            ),
+            "{why}"
+        ),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
+/// Items of more than one other repo are no rename: the JSON is not written.
+#[test]
+fn answers_for_several_other_repos_are_not_written() {
+    let root = scratch("several");
+    let at = |repo: &str| format!("https://api.github.com/repos/{repo}/labels/x");
+    let answers = RecordedAnswers {
+        repo: "owner/demo".to_string(),
+        labels: vec![
+            json!({"name": "a", "url": at("one/repo")}),
+            json!({"name": "b", "url": at("two/repo")}),
+        ],
+        ..RecordedAnswers::default()
+    };
+    let out = root.join("backup");
+    match write_json(&answers, &out, "2026-11-09T14:00:00Z") {
+        Err(CoreError::GitHub(why)) => assert!(
+            why.contains("more than one other repo (one/repo, two/repo)"),
+            "{why}"
+        ),
+        other => panic!("expected an error, got {other:?}"),
+    }
+    assert!(!out.join("labels.json").exists());
+}
+
+/// #365: a label comes back with its colour and description, a milestone with its description
+/// and due date.
+#[test]
+fn labels_and_milestones_keep_their_colour_description_and_due_date() {
+    let f = fixture("colours");
+    std::fs::write(
+        f.backup.join("labels.json"),
+        r#"[{"name": "bug", "color": "d73a4a", "description": "Something is broken"},
+            {"name": "size:Easy", "color": "", "description": null}]"#,
+    )
+    .unwrap();
+    std::fs::write(
+        f.backup.join("milestones.json"),
+        r#"[{"title": "1.0", "state": "open", "description": "First release",
+             "due_on": "2026-12-01T08:00:00Z"}]"#,
+    )
+    .unwrap();
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            answer(404, json!({"message": "Not Found"})),
+            answer(200, json!({"full_name": NEW, "private": true})),
+        ],
+    );
+    restore_history_from(&f.fleet, &f.backup, NEW, &remote(&f, &api)).unwrap();
+    assert_eq!(
+        queued(&f)[1..],
+        [
+            json!({"kind": "label", "repo": NEW, "name": "bug", "color": "d73a4a",
+                   "description": "Something is broken"}),
+            json!({"kind": "label", "repo": NEW, "name": "size:Easy"}),
+            json!({"kind": "milestone", "repo": NEW, "title": "1.0",
+                   "description": "First release", "due": "2026-12-01"}),
+        ]
+    );
+}
+
+/// #365: what a restore cannot bring back is named in the report, not passed over in silence.
+#[test]
+fn what_is_not_restored_is_listed_in_the_report() {
+    let f = fixture("left-out");
+    set_manifest(&f.backup, |m| {
+        m["wiki"] = json!(true);
+        m["pulls"] = json!(2);
+        m["releases"] = json!(1);
+    });
+    std::fs::write(
+        f.backup.join("milestones.json"),
+        r#"[{"title": "1.0", "state": "closed"}]"#,
+    )
+    .unwrap();
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            answer(404, json!({"message": "Not Found"})),
+            answer(200, json!({"full_name": NEW, "private": true})),
+        ],
+    );
+    let report = restore_history_from(&f.fleet, &f.backup, NEW, &remote(&f, &api)).unwrap();
+    assert_eq!(
+        report.left_out,
+        [
+            "the wiki (wiki.git) is not restored",
+            "2 PRs (pulls.json) are not restored",
+            "1 releases (releases.json, releases/) are not restored; their tags are",
+            "1 closed milestones are open until the issues are restored: restore_issues closes \
+             them",
+        ]
+    );
+}
+
+fn who(face: Face, in_job_worktree: bool) -> Caller {
+    Caller {
+        face,
+        role: Some(Role::ProjectManager),
+        in_job_worktree,
+        confirmed_in_app: true,
+    }
+}
+
+/// #347: a restore to a new private repo, as the app's confirm step runs it: the repo is asked
+/// for through the create queue as private, the refs go to it, and the backed-up repo
+/// (`owner/demo`) is never asked about or written.
+#[test]
+fn a_restore_to_a_new_repo_asks_the_queue_for_a_private_repo_and_never_touches_the_live_one() {
+    let f = fixture("to-new");
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            answer(404, json!({"message": "Not Found"})),
+            answer(200, json!({"full_name": NEW, "private": true})),
+            // `restore_issues`: the new repo has no issue yet.
+            answer(200, json!([])),
+        ],
+    );
+    let report = restore_to_new_from(
+        &who(Face::Gui, false),
+        &f.fleet,
+        &f.backup,
+        ("owner/demo", NEW),
+        true,
+        &Pass::Whole,
+        &remote(&f, &api),
+    )
+    .unwrap();
+    assert_eq!((report.refs, report.labels, report.milestones), (3, 2, 1));
+    assert_eq!(
+        report.made,
+        Made {
+            into: Some(NEW.to_string()),
+            ..Made::default()
+        }
+    );
+    // The create the queue was given: the new repo, private.
+    assert_eq!(
+        queued(&f)[0],
+        json!({"kind": "repo", "repo": NEW, "private": true})
+    );
+    for item in queued(&f) {
+        assert_eq!(item["repo"], NEW, "{item}");
+    }
+    for pattern in ["refs/heads", "refs/tags"] {
+        assert_eq!(refs_of(&f.target, pattern), refs_of(&f.source, pattern));
+    }
+    for line in api.log.lock().unwrap().iter() {
+        assert!(!line.contains("owner/demo"), "{line}");
+        assert!(line.starts_with("GET "), "{line}");
+    }
+    // The last read is `restore_issues` looking at the new repo's issues.
+    assert_eq!(
+        *api.log.lock().unwrap(),
+        vec![
+            format!("GET /repos/{NEW}"),
+            format!("GET /repos/{NEW}"),
+            format!("GET /repos/{NEW}/issues?state=all&per_page=100&page=1"),
+        ]
+    );
+}
+
+#[test]
+fn a_new_repo_name_that_exists_is_refused_before_anything_is_queued_or_pushed() {
+    let f = fixture("to-new-taken");
+    let api = Recorded::new(
+        Vec::new(),
+        vec![answer(200, json!({"full_name": NEW, "private": true}))],
+    );
+    match restore_to_new_from(
+        &who(Face::Gui, false),
+        &f.fleet,
+        &f.backup,
+        ("owner/demo", NEW),
+        true,
+        &Pass::Whole,
+        &remote(&f, &api),
+    ) {
+        Err(CoreError::Refused(why)) => assert!(why.contains("already exists"), "{why}"),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    assert!(queued(&f).is_empty());
+    assert!(!f.stub.join("calls.log").exists(), "no fleet call at all");
+    assert!(refs_of(&f.target, "refs").is_empty());
+    assert_eq!(*api.log.lock().unwrap(), vec![format!("GET /repos/{NEW}")]);
+}
+
+/// The same guarded confirm as a restore over the live repo, and the new name is another name.
+#[test]
+fn a_restore_to_a_new_repo_without_the_guarded_confirm_reads_and_writes_nothing() {
+    let f = fixture("to-new-guard");
+    let api = Recorded::new(Vec::new(), Vec::new());
+    let cases = [
+        (
+            who(Face::Gui, false),
+            false,
+            NEW,
+            "needs a confirm in the app",
+        ),
+        (
+            who(Face::Gui, true),
+            true,
+            NEW,
+            "refused inside a job worktree",
+        ),
+        (
+            who(Face::Cli, false),
+            true,
+            NEW,
+            "needs a confirm in the app",
+        ),
+        (
+            who(Face::Mcp, false),
+            true,
+            NEW,
+            "needs a confirm in the app",
+        ),
+        (
+            who(Face::Gui, false),
+            true,
+            "owner/demo",
+            "is the repo itself",
+        ),
+        (
+            who(Face::Gui, false),
+            true,
+            "Owner/Demo",
+            "is the repo itself",
+        ),
+    ];
+    for (caller, confirmed, new, needle) in cases {
+        for pass in [Pass::Whole, Pass::Held(Made::default())] {
+            match restore_to_new_from(
+                &caller,
+                &f.fleet,
+                &f.backup,
+                ("owner/demo", new),
+                confirmed,
+                &pass,
+                &remote(&f, &api),
+            ) {
+                Err(CoreError::Refused(why)) => assert!(why.contains(needle), "{why}"),
+                other => panic!("expected a refusal, got {other:?}"),
+            }
+        }
+    }
+    assert!(api.log.lock().unwrap().is_empty());
+    assert!(!f.stub.join("calls.log").exists(), "no fleet call at all");
+    assert!(refs_of(&f.target, "refs").is_empty());
+}
+
+/// What the first pass held back is done in the new repo: no repo is created, no ref pushed.
+#[test]
+fn the_held_pass_of_a_restore_to_a_new_repo_creates_and_pushes_nothing() {
+    let f = fixture("to-new-held");
+    let api = Recorded::new(Vec::new(), vec![answer(200, json!([]))]);
+    let report = restore_to_new_from(
+        &who(Face::Gui, false),
+        &f.fleet,
+        &f.backup,
+        ("owner/demo", NEW),
+        true,
+        &Pass::Held(Made::default()),
+        &remote(&f, &api),
+    )
+    .unwrap();
+    assert_eq!((report.refs, report.labels, report.milestones), (0, 0, 0));
+    assert!(queued(&f).iter().all(|item| item["kind"] != "repo"));
+    assert!(refs_of(&f.target, "refs").is_empty());
+    assert_eq!(
+        *api.log.lock().unwrap(),
+        vec![format!(
+            "GET /repos/{NEW}/issues?state=all&per_page=100&page=1"
+        )]
+    );
+}
+
+/// A failure after the new repo was made says what is there and what is not, and the retry is
+/// refused before a second repo is asked for or anything is pushed again.
+#[test]
+fn a_failure_after_the_new_repo_is_made_is_named_and_a_retry_creates_and_pushes_nothing() {
+    let f = fixture("to-new-fails-late");
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            answer(404, json!({"message": "Not Found"})),
+            answer(200, json!({"full_name": NEW, "private": true})),
+            // `restore_issues` cannot read the new repo's issues.
+            answer(502, json!({"message": "Bad Gateway"})),
+        ],
+    );
+    let run = |api: &Recorded| {
+        restore_to_new_from(
+            &who(Face::Gui, false),
+            &f.fleet,
+            &f.backup,
+            ("owner/demo", NEW),
+            true,
+            &Pass::Whole,
+            &remote(&f, api),
+        )
+    };
+    match run(&api) {
+        Err(CoreError::GitHub(why)) => assert!(
+            why.contains(&format!(
+                "{NEW} was created and the history pushed, but its issues were not restored"
+            )),
+            "{why}"
+        ),
+        other => panic!("expected a GitHub error, got {other:?}"),
+    }
+    let pushed = refs_of(&f.target, "refs");
+    assert!(!pushed.is_empty());
+    let creates = queued(&f).len();
+
+    // The retry: GitHub has the repo now.
+    let api = Recorded::new(
+        Vec::new(),
+        vec![answer(200, json!({"full_name": NEW, "private": true}))],
+    );
+    match run(&api) {
+        Err(CoreError::Refused(why)) => assert!(why.contains("already exists"), "{why}"),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    assert_eq!(queued(&f).len(), creates, "nothing more was queued");
+    assert_eq!(
+        queued(&f)
+            .iter()
+            .filter(|item| item["kind"] == "repo")
+            .count(),
+        1
+    );
+    assert_eq!(refs_of(&f.target, "refs"), pushed);
+}
+
+/// An owner the queue cannot create in: the repo is not made and nothing is pushed.
+#[test]
+fn a_new_repo_the_queue_cannot_create_pushes_nothing() {
+    let f = fixture("to-new-no-owner");
+    std::fs::write(f.stub.join("fail"), "repo").unwrap();
+    let api = Recorded::new(Vec::new(), vec![answer(404, json!({}))]);
+    match restore_to_new_from(
+        &who(Face::Gui, false),
+        &f.fleet,
+        &f.backup,
+        ("owner/demo", NEW),
+        true,
+        &Pass::Whole,
+        &remote(&f, &api),
+    ) {
+        Err(CoreError::GitHub(why)) => assert!(why.contains("did not create the repo"), "{why}"),
+        other => panic!("expected a queue failure, got {other:?}"),
+    }
+    assert!(refs_of(&f.target, "refs").is_empty());
+    assert!(queued(&f).iter().all(|item| item["kind"] == "repo"));
+}
+
+/// The held pass of a restore to a new repo queues no issue: a second confirm does only what
+/// was held back (CORE-3), even when an issue the first pass queued is not there yet.
+#[test]
+fn the_held_pass_of_a_restore_to_a_new_repo_queues_no_issue() {
+    let f = fixture("to-new-held-issue");
+    let issue = json!({"number": 1, "title": "first", "body": "", "state": "open"});
+    std::fs::write(f.backup.join("issues.json"), json!([issue]).to_string()).unwrap();
+    set_manifest(&f.backup, |m| m["issues"] = json!(1));
+    // The new repo's issues, read once (a pass that queued an issue would read them again).
+    let api = Recorded::new(
+        Vec::new(),
+        vec![answer(200, json!([])), answer(200, json!([]))],
+    );
+    let report = restore_to_new_from(
+        &who(Face::Gui, false),
+        &f.fleet,
+        &f.backup,
+        ("owner/demo", NEW),
+        true,
+        &Pass::Held(Made::default()),
+        &remote(&f, &api),
+    )
+    .unwrap();
+    assert_eq!(report.issues.issues, 0);
+    assert_eq!(queued(&f), Vec::<Value>::new());
+}
+
+/// #426: a restore to a new repo as the confirm runs it, with the repo it makes recorded under
+/// `data`.
+fn marked(
+    f: &Fixture,
+    data: &Path,
+    api: &Recorded,
+    from: &str,
+) -> Result<RestoreReport, CoreError> {
+    restore_to_new_marked_from(
+        &who(Face::Gui, false),
+        &f.fleet,
+        &f.backup,
+        (from, NEW),
+        true,
+        &Pass::Whole,
+        &remote(f, api),
+        Some(&Marks::new(data)),
+    )
+}
+
+fn repo_creates(f: &Fixture) -> usize {
+    queued(f)
+        .iter()
+        .filter(|item| item["kind"] == "repo")
+        .count()
+}
+
+/// #426: the repo Switchboard made is recorded, a failure after that leaves the record, and the
+/// retry into that same repo finishes only what did not finish: no second repo, no ref pushed
+/// again, no label queued again. The record is gone once it got through.
+#[test]
+fn a_retry_into_the_repo_switchboard_made_finishes_the_restore_and_clears_the_record() {
+    let f = fixture("to-new-resume");
+    let data = scratch("to-new-resume-data");
+    let marks = Marks::new(&data);
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            answer(404, json!({"message": "Not Found"})),
+            answer(200, json!({"full_name": NEW, "private": true, "id": 7})),
+            answer(502, json!({"message": "Bad Gateway"})),
+        ],
+    );
+    assert!(marked(&f, &data, &api, "owner/demo").is_err());
+    let mark = marks.get(NEW).unwrap().expect("the made repo is recorded");
+    assert_eq!(mark.from, "owner/demo");
+    assert_eq!(mark.done, vec!["refs".to_string(), "labels".to_string()]);
+    let creates = queued(&f).len();
+    let pushed = refs_of(&f.target, "refs");
+    assert!(!pushed.is_empty());
+
+    // The retry: GitHub has the repo (private), and the issues read now.
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            answer(200, json!({"full_name": NEW, "private": true, "id": 7})),
+            answer(200, json!([])),
+        ],
+    );
+    let report = marked(&f, &data, &api, "owner/demo").unwrap();
+    assert_eq!((report.refs, report.labels, report.milestones), (0, 0, 0));
+    assert_eq!(report.made.into.as_deref(), Some(NEW));
+    assert_eq!(queued(&f).len(), creates, "nothing was queued again");
+    assert_eq!(repo_creates(&f), 1);
+    assert_eq!(refs_of(&f.target, "refs"), pushed);
+    assert_eq!(marks.get(NEW).unwrap(), None, "the record is cleared");
+    assert!(!data.join("waiting").join("new-repo-restores.json").exists());
+}
+
+/// #426: a retry runs only the steps not recorded as done: the refs went, the labels did not.
+#[test]
+fn a_retry_runs_only_the_steps_that_did_not_finish() {
+    let f = fixture("to-new-resume-steps");
+    let data = scratch("to-new-resume-steps-data");
+    // The queue fails the labels, after the repo and the refs went.
+    std::fs::write(f.stub.join("fail"), "label").unwrap();
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            answer(404, json!({})),
+            answer(200, json!({"full_name": NEW, "private": true, "id": 7})),
+        ],
+    );
+    assert!(marked(&f, &data, &api, "owner/demo").is_err());
+    let mark = Marks::new(&data).get(NEW).unwrap().unwrap();
+    assert_eq!(mark.done, vec!["refs".to_string()]);
+    let pushed = refs_of(&f.target, "refs");
+
+    std::fs::write(f.stub.join("fail"), "").unwrap();
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            answer(200, json!({"full_name": NEW, "private": true, "id": 7})),
+            answer(200, json!([])),
+        ],
+    );
+    let report = marked(&f, &data, &api, "owner/demo").unwrap();
+    assert_eq!((report.refs, report.labels, report.milestones), (0, 2, 1));
+    assert_eq!(repo_creates(&f), 1);
+    assert_eq!(refs_of(&f.target, "refs"), pushed);
+    assert_eq!(Marks::new(&data).get(NEW).unwrap(), None);
+}
+
+/// #426: any other repo that exists is still refused: one Switchboard did not make, and one it
+/// made for another repo's backup. Nothing is queued, pushed or recorded.
+#[test]
+fn any_other_existing_repo_is_still_refused_with_the_same_message() {
+    let f = fixture("to-new-resume-refused");
+    let data = scratch("to-new-resume-refused-data");
+    let there = || {
+        Recorded::new(
+            Vec::new(),
+            vec![answer(
+                200,
+                json!({"full_name": NEW, "private": true, "id": 7}),
+            )],
+        )
+    };
+    // No record at all: a pre-existing repo.
+    match marked(&f, &data, &there(), "owner/demo") {
+        Err(CoreError::Refused(why)) => assert_eq!(
+            why,
+            format!("{NEW} already exists; restore goes to a new repo only")
+        ),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    // A record made for another repo's restore.
+    std::fs::create_dir_all(data.join("waiting")).unwrap();
+    std::fs::write(
+        data.join("waiting").join("new-repo-restores.json"),
+        json!({ NEW: {"from": "owner/else", "id": 7, "done": ["refs"]} }).to_string(),
+    )
+    .unwrap();
+    match marked(&f, &data, &there(), "owner/demo") {
+        Err(CoreError::Refused(why)) => assert!(why.contains("already exists"), "{why}"),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    assert!(queued(&f).is_empty());
+    assert!(refs_of(&f.target, "refs").is_empty());
+    assert!(!f.stub.join("calls.log").exists(), "no fleet call at all");
+}
+
+/// #426: a record of a repo that is gone from GitHub says nothing: the restore makes a new one.
+#[test]
+fn a_record_of_a_repo_that_is_gone_starts_the_restore_over() {
+    let f = fixture("to-new-resume-gone");
+    let data = scratch("to-new-resume-gone-data");
+    std::fs::create_dir_all(data.join("waiting")).unwrap();
+    std::fs::write(
+        data.join("waiting").join("new-repo-restores.json"),
+        json!({ NEW: {"from": "owner/demo", "id": 7, "done": ["refs", "labels"]} }).to_string(),
+    )
+    .unwrap();
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            answer(404, json!({})),
+            answer(200, json!({"full_name": NEW, "private": true, "id": 7})),
+            answer(200, json!([])),
+        ],
+    );
+    let report = marked(&f, &data, &api, "owner/demo").unwrap();
+    assert_eq!((report.refs, report.labels, report.milestones), (3, 2, 1));
+    assert_eq!(repo_creates(&f), 1);
+    assert_eq!(Marks::new(&data).get(NEW).unwrap(), None);
+}
+
+/// A restore that gets through at once leaves no record behind.
+#[test]
+fn a_restore_that_gets_through_leaves_no_record() {
+    let f = fixture("to-new-no-record");
+    let data = scratch("to-new-no-record-data");
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            answer(404, json!({})),
+            answer(200, json!({"full_name": NEW, "private": true, "id": 7})),
+            answer(200, json!([])),
+        ],
+    );
+    marked(&f, &data, &api, "owner/demo").unwrap();
+    assert_eq!(Marks::new(&data).get(NEW).unwrap(), None);
+    assert!(!data.join("waiting").join("new-repo-restores.json").exists());
+}
+
+/// #426: a record names the repo Switchboard made by its GitHub id, not by its name. The same
+/// name made again by someone else (another id), or Switchboard's repo made public since, is
+/// refused: nothing is queued, pushed or recorded, and the record stays as it was.
+#[test]
+fn a_record_finishes_only_the_private_repo_with_the_id_it_made() {
+    let f = fixture("to-new-resume-id");
+    let data = scratch("to-new-resume-id-data");
+    let file = data.join("waiting").join("new-repo-restores.json");
+    std::fs::create_dir_all(data.join("waiting")).unwrap();
+    let record = json!({ NEW: {"from": "owner/demo", "id": 7, "done": ["refs"]} }).to_string();
+    std::fs::write(&file, &record).unwrap();
+    let there = |body: Value| Recorded::new(Vec::new(), vec![answer(200, body)]);
+    let other = there(json!({"full_name": NEW, "private": true, "id": 8}));
+    match marked(&f, &data, &other, "owner/demo") {
+        Err(CoreError::Refused(why)) => assert_eq!(
+            why,
+            format!("{NEW} already exists; restore goes to a new repo only")
+        ),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    let public = there(json!({"full_name": NEW, "private": false, "id": 7}));
+    match marked(&f, &data, &public, "owner/demo") {
+        Err(CoreError::Refused(why)) => assert!(why.contains("not private"), "{why}"),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    assert!(queued(&f).is_empty());
+    assert!(refs_of(&f.target, "refs").is_empty());
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), record);
+}
+
+/// #426: the record is found whatever case the new repo's name is typed in.
+#[test]
+fn a_retry_finds_the_record_whatever_the_case_of_the_name() {
+    let f = fixture("to-new-resume-case");
+    let data = scratch("to-new-resume-case-data");
+    std::fs::create_dir_all(data.join("waiting")).unwrap();
+    std::fs::write(
+        data.join("waiting").join("new-repo-restores.json"),
+        format!(
+            r#"{{"{}": {{"from": "OWNER/Demo", "id": 7, "done": ["refs", "labels"]}}}}"#,
+            NEW.to_uppercase()
+        ),
+    )
+    .unwrap();
+    assert!(
+        Marks::new(&data).get(NEW).unwrap().is_none(),
+        "keys are lower case"
+    );
+    std::fs::write(
+        data.join("waiting").join("new-repo-restores.json"),
+        format!(
+            r#"{{"{}": {{"from": "OWNER/Demo", "id": 7, "done": ["refs", "labels"]}}}}"#,
+            NEW.to_lowercase()
+        ),
+    )
+    .unwrap();
+    assert!(Marks::new(&data)
+        .get(&NEW.to_uppercase())
+        .unwrap()
+        .is_some());
+    let api = Recorded::new(
+        Vec::new(),
+        vec![
+            answer(200, json!({"full_name": NEW, "private": true, "id": 7})),
+            answer(200, json!([])),
+        ],
+    );
+    let report = marked(&f, &data, &api, "owner/demo").unwrap();
+    assert_eq!((report.refs, report.labels), (0, 0));
+    assert!(queued(&f).is_empty());
+    assert_eq!(Marks::new(&data).get(NEW).unwrap(), None);
 }

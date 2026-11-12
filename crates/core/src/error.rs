@@ -22,7 +22,7 @@ pub enum CoreError {
 impl std::fmt::Display for CoreError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            CoreError::Fleet(e) => write!(f, "fleet error: {}", e.command.join(" ")),
+            CoreError::Fleet(e) => write!(f, "fleet error: {e}"),
             CoreError::MissingPath(name) => write!(f, "setting not set: {name}"),
             CoreError::Refused(why) => write!(f, "refused: {why}"),
             CoreError::GitHub(why) => write!(f, "GitHub: {why}"),

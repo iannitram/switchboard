@@ -41,7 +41,8 @@ pub struct Caller {
     pub role: Option<Role>,
     /// True when the process runs inside a job worktree (MCP-3, CLI-3).
     pub in_job_worktree: bool,
-    /// GUI only: I confirmed this action in the app.
+    /// GUI: I confirmed this action in the app. CLI (a restore into a new private repo only,
+    /// `guard_restore_new`): I typed the repo's name.
     pub confirmed_in_app: bool,
 }
 
@@ -50,7 +51,7 @@ pub struct Caller {
 pub enum Verdict {
     /// Go ahead.
     Allow,
-    /// Not from here: becomes a Waiting on you item with this text (repo delete and restore
+    /// Not from here: becomes a Waiting on you item with this text (repo archive and restore
     /// over a live repo asked from the CLI or MCP).
     ToWaiting(String),
     /// Refused, with the refusal text every face shows.
@@ -61,12 +62,13 @@ pub enum Verdict {
 /// `Allow`; this decides who may ask.
 ///
 /// Inside a job worktree everything is refused. A merge is mine from the app and the
-/// project-manager role's from the CLI or MCP. Deleting a repo and restoring over a live one
-/// need my confirm in the app; from the CLI or MCP they become a Waiting on you item.
+/// project-manager role's from the CLI or MCP. Archiving a repo (the `delete` request; nothing
+/// is ever deleted) and restoring over a live one need my confirm in the app; from the CLI or MCP they become a Waiting on you item.
 pub fn guard(caller: &Caller, action: &GuardedAction) -> Verdict {
     let what = match action {
         GuardedAction::Merge { repo, pr } => format!("merge {repo}#{pr}"),
-        GuardedAction::DeleteRepo { repo } => format!("delete {repo}"),
+        // Switchboard never deletes a repo: the request archives it (#347).
+        GuardedAction::DeleteRepo { repo } => format!("archive {repo}"),
         GuardedAction::RestoreOverLive { repo } => format!("restore over {repo}"),
     };
     if caller.in_job_worktree {
@@ -86,6 +88,79 @@ pub fn guard(caller: &Caller, action: &GuardedAction) -> Verdict {
                 }
             }
         }
+    }
+}
+
+/// #426: who may restore `repo`'s backup into a new private repo (the live repo is left alone).
+/// The app after my confirm; the CLI after the repo's `owner/name` was typed (`confirmed_in_app`
+/// is that typed name), and only without a role flag: a role is an agent's, and the confirm is
+/// mine. MCP never; nothing inside a job worktree. Every refusal says what the others say.
+pub fn guard_restore_new(caller: &Caller, repo: &str) -> Verdict {
+    let what = format!("restore over {repo}");
+    if caller.in_job_worktree {
+        return Verdict::Refuse(format!("{what}: refused inside a job worktree"));
+    }
+    match caller.face {
+        Face::Gui | Face::Cli if caller.role.is_none() || caller.face == Face::Gui => {
+            if caller.confirmed_in_app {
+                Verdict::Allow
+            } else {
+                Verdict::Refuse(format!("{what}: needs a confirm in the app"))
+            }
+        }
+        _ => Verdict::Refuse(format!("{what}: needs a confirm in the app")),
+    }
+}
+
+/// MCP-2, MCP-3, CLI-3: who may edit a budget pool (BUD-2: the cap, plan, reset or cost). The
+/// app may; the CLI and MCP only with the budget-manager role (MCP-2 gives it the pool cap);
+/// nothing inside a job worktree. A pool edit is not one of CORE-3's guarded actions, so it
+/// never becomes a Waiting on you item here; the saved edit adds its own (U5).
+pub fn guard_pool_edit(caller: &Caller, pool: &str) -> Verdict {
+    let what = format!("edit pool {pool}");
+    if caller.in_job_worktree {
+        return Verdict::Refuse(format!("{what}: refused inside a job worktree"));
+    }
+    match (caller.face, &caller.role) {
+        (Face::Gui, _) | (Face::Cli | Face::Mcp, Some(Role::BudgetManager)) => Verdict::Allow,
+        _ => Verdict::Refuse(format!(
+            "{what}: only the budget-manager role may edit a pool"
+        )),
+    }
+}
+
+/// #385: who may run an autopilot pass (`what`, e.g. `autopilot merge`) by hand. `needs` is the
+/// role whose work the pass is: the Project Manager's for the roadmap, review, merge and weekly
+/// passes (R32), the satellite's for a satellite tick. The app may (its own threads run them);
+/// the CLI and MCP only with that role; nothing inside a job worktree. A dry run is asked the
+/// same way.
+pub fn guard_autopilot(caller: &Caller, what: &str, needs: &Role) -> Verdict {
+    if caller.in_job_worktree {
+        return Verdict::Refuse(format!("{what}: refused inside a job worktree"));
+    }
+    match (caller.face, &caller.role) {
+        (Face::Gui, _) => Verdict::Allow,
+        (Face::Cli | Face::Mcp, Some(role)) if role == needs => Verdict::Allow,
+        _ => Verdict::Refuse(format!(
+            "{what}: only the {} role may run this pass",
+            needs.flag()
+        )),
+    }
+}
+
+/// MCP-2, MCP-3, CLI-3 (#384): who may use the front door's writes (`what` names one: an ask
+/// that is sent, a held request sent as a fleet job, a rating). The app may; the CLI and MCP
+/// only with the project-manager role; nothing inside a job worktree. Like a pool edit it is
+/// not one of CORE-3's guarded actions, so it never becomes a Waiting on you item.
+pub fn guard_front_door(caller: &Caller, what: &str) -> Verdict {
+    if caller.in_job_worktree {
+        return Verdict::Refuse(format!("{what}: refused inside a job worktree"));
+    }
+    match (caller.face, &caller.role) {
+        (Face::Gui, _) | (Face::Cli | Face::Mcp, Some(Role::ProjectManager)) => Verdict::Allow,
+        _ => Verdict::Refuse(format!(
+            "{what}: only the project-manager role may use the front door"
+        )),
     }
 }
 

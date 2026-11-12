@@ -18,7 +18,7 @@ export function StarPanel({ star, onClose }: { star: Star; onClose: () => void }
           <a href={pr.url} target="_blank" rel="noreferrer">{`PR #${pr.number} (${pr.state})`}</a>
         </p>
       ) : (
-        <p>No PR yet</p>
+        <p>{star.state === "closed" ? "Closed without a PR" : "No PR yet"}</p>
       )}
       <p>{`Review: ${pr?.verdict ?? "not reviewed"}`}</p>
       <p>{`Job: ${star.job ?? "none"}`}</p>

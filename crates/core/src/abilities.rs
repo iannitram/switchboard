@@ -57,6 +57,29 @@ impl FleetModels {
         FleetModels { qwen, claudeapi }
     }
 
+    /// `machines.<machine>.qwen_server_url` in a parsed `config.json`: where this machine's
+    /// local model server answers. `None` when the machine is unknown, not in `machines`, or has
+    /// no string `qwen_server_url`.
+    pub fn qwen_server_url(config: &Value, machine: Option<&str>) -> Option<String> {
+        machine
+            .and_then(|m| {
+                config
+                    .get("machines")?
+                    .get(m)?
+                    .get("qwen_server_url")?
+                    .as_str()
+            })
+            .map(str::to_string)
+    }
+
+    /// `qwen_server_url` from `<root>/tools/fleet/config.json`; `None` when the file is missing,
+    /// unreadable or not JSON, as for `read`.
+    pub fn read_qwen_server_url(fleet: &FleetBridge, machine: Option<&str>) -> Option<String> {
+        let text = std::fs::read_to_string(config_path(fleet)).ok()?;
+        let config: Value = serde_json::from_str(&text).ok()?;
+        Self::qwen_server_url(&config, machine)
+    }
+
     /// Read `<root>/tools/fleet/config.json` through the bridge's root (`budget::config_path`)
     /// for `machine`. `None` when the file is missing, unreadable or not JSON: the caller takes
     /// `FleetModels::default()` and the flagged services are skipped.
@@ -64,6 +87,30 @@ impl FleetModels {
         let text = std::fs::read_to_string(config_path(fleet)).ok()?;
         let config: Value = serde_json::from_str(&text).ok()?;
         Some(Self::from_config(&config, machine))
+    }
+
+    /// The labeller's model and server for `machine`: `machines.<machine>.qwen_model` and the
+    /// base URL of `machines.<machine>.qwen_server_url` (its `/v1/models` tail dropped). `None`
+    /// when either is missing or blank, so the caller labels by rules only.
+    pub fn qwen_endpoint(config: &Value, machine: Option<&str>) -> Option<(String, String)> {
+        let entry = config.get("machines")?.get(machine?)?;
+        let model = entry.get("qwen_model")?.as_str()?.trim();
+        let url = entry.get("qwen_server_url")?.as_str()?.trim();
+        let base = url.trim_end_matches('/');
+        let base = base.strip_suffix("/v1/models").unwrap_or(base);
+        let base = base.trim_end_matches('/');
+        (!model.is_empty() && !base.is_empty()).then(|| (model.to_string(), base.to_string()))
+    }
+
+    /// `qwen_endpoint` read from `<root>/tools/fleet/config.json`; `None` when the file cannot
+    /// be read or parsed.
+    pub fn read_qwen_endpoint(
+        fleet: &FleetBridge,
+        machine: Option<&str>,
+    ) -> Option<(String, String)> {
+        let text = std::fs::read_to_string(config_path(fleet)).ok()?;
+        let config: Value = serde_json::from_str(&text).ok()?;
+        Self::qwen_endpoint(&config, machine)
     }
 
     /// This machine's token the way the fleet tools find it (`local_machine` in the pipeline's
@@ -156,6 +203,9 @@ pub struct AbilitiesIndex {
     /// seeds "search the web" -> `web`, "write code" -> `code`, and "ask claude" and "open in
     /// claude" -> `claude`; `with_ask` adds one (a skill name). Phrases are tried in this order.
     pub asks: Vec<(String, String)>,
+    /// #428: per id, the Claude subscription tier `ok.claude` names (`sonnet`, `opus`), when it
+    /// is a string: the model a Claude handoff for that kind goes to.
+    pub claude_tiers: BTreeMap<String, String>,
 }
 
 impl AbilitiesIndex {
@@ -176,9 +226,17 @@ impl AbilitiesIndex {
         })?;
         let mut entries = Vec::with_capacity(map.len());
         let mut models = BTreeMap::new();
+        let mut claude_tiers = BTreeMap::new();
         for (id, entry) in map {
             entries.push(parse_entry(id, entry)?);
             models.insert(id.clone(), parse_models(id, entry, fleet)?);
+            if let Some(tier) = entry
+                .get("ok")
+                .and_then(|ok| ok.get("claude"))
+                .and_then(Value::as_str)
+            {
+                claude_tiers.insert(id.clone(), tier.to_string());
+            }
         }
         entries.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(AbilitiesIndex {
@@ -189,6 +247,7 @@ impl AbilitiesIndex {
                 .iter()
                 .map(|(phrase, need)| (phrase.to_string(), need.to_string()))
                 .collect(),
+            claude_tiers,
         })
     }
 

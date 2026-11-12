@@ -283,9 +283,43 @@ pub fn from_thread(thread_id: &str, rows: &[JobRow]) -> Report {
     }
 }
 
-/// REP-2: the moves of a thread, oldest first: one per change of service or model between
+/// The `role` of a front door thread's move row (`frontdoor::answer::MOVE_ROLE`).
+const MOVE_ROLE: &str = "move";
+/// The lane of a move row to a Claude handoff (`frontdoor::answer::CLAUDE_LANE`).
+const CLAUDE_LANE: &str = "claude";
+/// #433: the model a work-tree line shows for a Claude handoff Switchboard chose no model for.
+pub const CLAUDE_MODEL_UNCHOSEN: &str = "model not chosen by Switchboard";
+
+/// REP-2: the moves of a thread, oldest first.
+///
+/// A front door thread (FD-13: its rows carry a `role`) has one line per move row (FD-5: "each
+/// move is a line in the work tree"): from the row's `moved_from`, to its `lane` and `model`,
+/// why its `moved_why`. Its questions, ratings and summary are not moves.
+///
+/// Any other rows (a job's attempts): one line per change of service or model between
 /// consecutive rows (implicit rows left out), with the earlier row's outcome as the `why`.
 pub fn moves(rows: &[JobRow]) -> Vec<Move> {
+    if rows.iter().any(|r| r.role.is_some()) {
+        let or_not = |v: Option<&str>| v.unwrap_or(NOT_RECORDED).to_string();
+        return rows
+            .iter()
+            .filter(|r| r.role.as_deref() == Some(MOVE_ROLE))
+            .map(|r| {
+                let from = r.moved_from.as_deref().and_then(|f| f.split_once(' '));
+                Move {
+                    from_service: or_not(from.map(|(service, _)| service)),
+                    from_model: or_not(from.map(|(_, model)| model)),
+                    to_service: or_not(r.lane.as_deref()),
+                    // #433: a Claude handoff Switchboard chose no model for says so.
+                    to_model: match (r.lane.as_deref(), r.model.as_deref()) {
+                        (Some(CLAUDE_LANE), None) => CLAUDE_MODEL_UNCHOSEN.to_string(),
+                        (_, model) => or_not(model),
+                    },
+                    why: or_not(r.moved_why.as_deref()),
+                }
+            })
+            .collect();
+    }
     let kept: Vec<&JobRow> = rows.iter().filter(|r| !r.implicit).collect();
     let place = |r: &JobRow| (r.lane.clone(), r.model.clone());
     kept.windows(2)
@@ -337,6 +371,22 @@ pub fn newest_first(reports: &[Report]) -> Vec<Report> {
     sorted
 }
 
+/// `state_dir_from` with the pipeline checkout's own `git worktree list` (none when git cannot
+/// list them).
+pub fn state_dir(pipeline_root: &Path, env: Option<&OsStr>) -> PathBuf {
+    let worktrees = Command::new("git")
+        .arg("-C")
+        .arg(pipeline_root)
+        .args(["worktree", "list", "--porcelain"])
+        .stdin(Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    state_dir_from(pipeline_root, env, &worktrees)
+}
+
 /// The env var that names the fleet-state folder outright (the rule `fleet` uses too).
 pub const FLEET_STATE_DIR_ENV: &str = "FLEET_STATE_DIR";
 
@@ -373,7 +423,8 @@ pub fn state_dir_from(pipeline_root: &Path, env: Option<&OsStr>, worktrees: &str
 }
 
 /// The done cards in `<state_dir>/jobs/done/`: the `.json` files whose names do not end
-/// `.job.json`, by path, each kept when it parses to a JSON object. A missing folder is no
+/// `.job.json`, by path, each kept when it is UTF-8 and parses to a JSON object (any other file
+/// is skipped and named on stderr). A missing folder is no
 /// cards; any other folder or file error is `CoreError::Io`.
 pub fn read_done_cards(state_dir: &Path) -> Result<Vec<Value>, CoreError> {
     let done = state_dir.join("jobs").join("done");
@@ -395,16 +446,36 @@ pub fn read_done_cards(state_dir: &Path) -> Result<Vec<Value>, CoreError> {
 
     let mut cards = Vec::new();
     for path in paths {
-        let text = std::fs::read_to_string(&path)
-            .map_err(|e| CoreError::Io(format!("{}: {e}", path.display())))?;
-        if let Some(card) = serde_json::from_str::<Value>(&text)
+        let bytes =
+            std::fs::read(&path).map_err(|e| CoreError::Io(format!("{}: {e}", path.display())))?;
+        // A file that is not UTF-8 is skipped like one that is not JSON (#349): it must not
+        // hide every other report. It is named on stderr.
+        let card = String::from_utf8(bytes)
             .ok()
-            .filter(Value::is_object)
-        {
-            cards.push(card);
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            .filter(Value::is_object);
+        match card {
+            Some(card) => cards.push(card),
+            None => eprintln!(
+                "reports: skipped an unreadable done card: {}",
+                path.display()
+            ),
         }
     }
     Ok(cards)
+}
+
+/// REP-1 (#348): each chat thread in the thread store under `data` (the folder
+/// `ThreadStore::new` takes), in the store's sorted id order. A missing store folder gives none.
+/// A thread that cannot be read is skipped, so the other threads still show.
+pub fn thread_rows(data: &Path) -> Vec<(String, Vec<JobRow>)> {
+    let store = crate::frontdoor::thread::ThreadStore::new(data);
+    store
+        .list()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|id| store.read(&id).ok().map(|rows| (id, rows)))
+        .collect()
 }
 
 /// The reports for the done cards, then the threads, newest first (the ones without a time
@@ -434,17 +505,7 @@ pub fn load(
     f: Option<&Filter>,
 ) -> Result<Vec<Report>, CoreError> {
     let root = fleet.root();
-    let worktrees = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["worktree", "list", "--porcelain"])
-        .stdin(Stdio::null())
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-        .unwrap_or_default();
-    let state = state_dir_from(root, env, &worktrees);
+    let state = state_dir(root, env);
     let cards = read_done_cards(&state)?;
     let events = read_ledger(&ledger_files(root, &state))?;
     Ok(assemble(&cards, &events, threads, f))

@@ -13,7 +13,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
-use mcp::{serve, CoreWrites, ReadCore, WriteCore};
+use mcp::{serve_outside_job_worktree as serve, CoreWrites, ReadCore, WriteCore};
 use serde_json::{json, Value};
 use switchboard_core::clock::FixedClock;
 use switchboard_core::fleet::FleetBridge;
@@ -191,7 +191,14 @@ fn set_pool_cap_saves_config_a_ledger_row_and_a_waiting_item() {
             json!({ "pool": "deepseek", "cap": 25.0 }),
         )],
     );
-    assert_eq!(text(&replies[0]), (false, "set_pool_cap: done".to_string()));
+    // #362: the reply states the new cap (it said `set_pool_cap: done`).
+    assert_eq!(
+        text(&replies[0]),
+        (
+            false,
+            "set_pool_cap deepseek: cap_usd is now 25.0 (was 10)".to_string()
+        )
+    );
     let pool = &config(&root)["pools"]["deepseek"];
     assert_eq!(pool["cap_usd"], json!(25.0));
     assert_eq!(pool["note"], "keep me");
@@ -210,6 +217,71 @@ fn set_pool_cap_saves_config_a_ledger_row_and_a_waiting_item() {
         }
     );
     assert_eq!(items[0].since, NOW);
+}
+
+#[test]
+fn a_waiting_item_that_cannot_be_added_leaves_the_pool_as_it_was() {
+    // #340: the Waiting item is part of the save; `waiting/local.json` is a folder here.
+    let dir = fresh("cap-no-waiting");
+    let root = pipeline(&dir);
+    let data = dir.join("data");
+    std::fs::create_dir_all(LocalItems::new(&data).path()).unwrap();
+    let clock = FixedClock::at(NOW);
+    let writes = CoreWrites {
+        merge: &no_merge,
+        fleet: Some(FleetBridge::with_root(&root)),
+        data: Some(data.clone()),
+        clock: &clock,
+    };
+    let replies = run(
+        Role::BudgetManager,
+        &writes,
+        &[call(
+            3,
+            "set_pool_cap",
+            json!({ "pool": "deepseek", "cap": 25.0 }),
+        )],
+    );
+    let (is_error, said) = text(&replies[0]);
+    assert!(is_error, "{said}");
+    assert!(said.starts_with("set_pool_cap deepseek: "), "{said}");
+    assert!(said.contains("local.json"), "{said}");
+    assert_eq!(
+        config(&root),
+        serde_json::from_str::<Value>(CONFIG).unwrap()
+    );
+    assert!(!data.join("pool-edits.jsonl").exists());
+}
+
+#[test]
+fn pool_edit_saves_a_plan_and_states_it() {
+    let dir = fresh("plan");
+    let root = pipeline(&dir);
+    let data = dir.join("data");
+    let clock = FixedClock::at(NOW);
+    let writes = CoreWrites {
+        merge: &no_merge,
+        fleet: Some(FleetBridge::with_root(&root)),
+        data: Some(data.clone()),
+        clock: &clock,
+    };
+    let replies = run(
+        Role::BudgetManager,
+        &writes,
+        &[call(
+            3,
+            "pool_edit",
+            json!({ "pool": "deepseek", "cap": 12, "cost_usd": 3.5 }),
+        )],
+    );
+    let (is_error, said) = text(&replies[0]);
+    assert!(!is_error, "{said}");
+    assert!(
+        said.starts_with("pool_edit deepseek: cap_usd is now 12.0 (was 10)"),
+        "{said}"
+    );
+    assert_eq!(config(&root)["pools"]["deepseek"]["cap_usd"], json!(12.0));
+    assert_eq!(LocalItems::new(&data).load().unwrap().len(), 1);
 }
 
 #[test]
@@ -388,7 +460,10 @@ fn the_binary_set_pool_cap_writes_the_pipeline_config() {
     );
     assert_eq!(
         text(&replies(&out)[0]),
-        (false, "set_pool_cap: done".to_string())
+        (
+            false,
+            "set_pool_cap deepseek: cap_usd is now 25.0 (was 10)".to_string()
+        )
     );
     assert_eq!(config(&root)["pools"]["deepseek"]["cap_usd"], json!(25.0));
     assert_eq!(lines(&data.join("pool-edits.jsonl")).len(), 1);
@@ -545,4 +620,32 @@ fn inside_a_job_worktree_neither_write_tool_answers() {
     );
     assert!(lines(&root.join("tools/merge-pr/calls.log")).is_empty());
     assert!(!data.join("pool-edits.jsonl").exists());
+}
+
+/// #433: a checkout in a folder whose name holds `-fleet-` is not a job worktree: the binary
+/// started there still serves the write tools. (The in-process tests above pass the check in as
+/// a flag, so no checkout name changes them.)
+#[test]
+fn a_plain_checkout_named_with_fleet_in_it_still_has_the_write_tools() {
+    let dir = fresh("bin-fleet-name");
+    let root = pipeline(&dir);
+    let data = dir.join("data");
+    snapshot(&data, true);
+    let cwd = dir.join("my-fleet-checkout").join("switchboard");
+    std::fs::create_dir_all(cwd.join(".git")).unwrap();
+    let list = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }).to_string();
+    let out = switchboard(
+        &["mcp", "--role", "budget-manager"],
+        &cwd,
+        &root,
+        &data,
+        &[list],
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("set_pool_cap"), "{text}");
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("job worktree"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }

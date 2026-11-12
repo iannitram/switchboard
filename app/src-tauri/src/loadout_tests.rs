@@ -51,6 +51,7 @@ impl ProbeRunner for Stub {
         self.ran.fetch_add(1, Ordering::SeqCst);
         ProbeResult {
             name: probe.name.to_string(),
+            timed_out: false,
             exit_code: Some(0),
             stdout: if probe.name == "fleet status" {
                 self.busy_out.to_string()
@@ -65,6 +66,7 @@ impl ProbeRunner for Stub {
 fn expected(read_at: i64, busy: bool) -> Loadout {
     Loadout {
         read_at,
+        timed_out: Vec::new(),
         clis: vec![("claude".to_string(), true)],
         models_loaded: vec![],
         toolchains: vec!["cargo".to_string()],

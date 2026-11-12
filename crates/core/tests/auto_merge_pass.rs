@@ -6,9 +6,13 @@
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use switchboard_core::autopilot::passes::{autopilot_caller, merge_pass, Merged};
+use switchboard_core::autopilot::passes::{
+    autopilot_caller, clear_settled_merges, merge_pass, merge_would, record_refused_merges,
+    MergePass, Merged, RefusedMerge,
+};
 use switchboard_core::clock::FixedClock;
 use switchboard_core::github::poll::Poller;
+use switchboard_core::github::poll::{parse_repo, REPO_QUERY};
 use switchboard_core::github::snapshot::SnapshotStore;
 use switchboard_core::github::transport::{GitHubTransport, RestAnswer};
 use switchboard_core::github::{PullRequest, RepoSnapshot, ReviewVerdict};
@@ -23,8 +27,12 @@ here = os.path.dirname(os.path.abspath(__file__))
 args = sys.argv[1:]
 with open(os.path.join(here, "calls.log"), "a") as f:
     f.write(json.dumps(args) + "\n")
-code = os.path.join(here, "exit-" + args[-1].lstrip("-"))
-code = int(open(code).read()) if os.path.exists(code) else 0
+pr = args[args.index("--pr") + 1]
+code = 0
+for name in ("exit-" + args[-1].lstrip("-"), "exit-pr-" + pr):
+    path = os.path.join(here, name)
+    if os.path.exists(path):
+        code = code or int(open(path).read())
 if code:
     print("REFUSED: branch is behind main")
 sys.exit(code)
@@ -128,8 +136,18 @@ fn snap(repo: &str, pulls: Vec<PullRequest>) -> RepoSnapshot {
     }
 }
 
-/// Run `merge_pass` over `snaps` with a fresh fake transport; answer the result and the reads.
+/// Run `merge_pass` over `snaps` with a fresh fake transport; answer the merges (or the first
+/// refusal, as `CoreError::Refused`) and the reads.
 fn run(w: &World, snaps: &[RepoSnapshot]) -> (Result<Vec<Merged>, CoreError>, Vec<String>) {
+    let (pass, reads) = run_pass(w, snaps);
+    match pass.refused.first() {
+        Some(r) => (Err(CoreError::Refused(r.why.clone())), reads),
+        None => (Ok(pass.merged), reads),
+    }
+}
+
+/// Run `merge_pass` over `snaps` with a fresh fake transport; answer all it did and the reads.
+fn run_pass(w: &World, snaps: &[RepoSnapshot]) -> (MergePass, Vec<String>) {
     let t = Fake::default();
     let store = SnapshotStore::new(&w.pipeline.join("data"));
     let clock = FixedClock::at(1_800_000_000);
@@ -238,7 +256,9 @@ fn an_archived_repo_or_one_without_a_clone_is_skipped() {
 }
 
 #[test]
-fn a_refused_merge_stops_the_pass_with_merge_prs_reason() {
+fn a_refused_merge_is_reported_and_the_pass_goes_on() {
+    // #380: this test once asserted that the first refusal stopped the pass (only PR 7's dry
+    // run, and the error alone). Every PR is now tried and each refusal is reported.
     let w = world("refused");
     std::fs::write(w.stub_dir.join("exit-dry-run"), "1").unwrap();
     let snaps = vec![snap(
@@ -248,13 +268,272 @@ fn a_refused_merge_stops_the_pass_with_merge_prs_reason() {
             pr(8, Some(HEAD), "success", &[13]),
         ],
     )];
-    let (result, reads) = run(&w, &snaps);
+    let (pass, reads) = run_pass(&w, &snaps);
+    assert!(pass.merged.is_empty());
+    let why = "branch is behind main".to_string();
     assert_eq!(
-        result,
-        Err(CoreError::Refused("branch is behind main".to_string()))
+        pass.refused,
+        vec![
+            RefusedMerge {
+                repo: "iannitram/demo".to_string(),
+                pr: 7,
+                why: why.clone()
+            },
+            RefusedMerge {
+                repo: "iannitram/demo".to_string(),
+                pr: 8,
+                why
+            },
+        ]
     );
-    assert_eq!(calls(&w.stub_dir).len(), 1, "only PR 7's dry run");
+    assert_eq!(calls(&w.stub_dir).len(), 2, "each PR's dry run");
     assert!(reads.is_empty());
+}
+
+#[test]
+fn one_refusal_keeps_the_merges_before_and_after_it() {
+    // The #380 report: owner/second#31 merges, owner/throwaway#21 is refused, #29 still merges.
+    let w = world("one-refused");
+    std::fs::create_dir_all(w.dev.join("second")).unwrap();
+    std::fs::create_dir_all(w.dev.join("throwaway")).unwrap();
+    std::fs::write(w.stub_dir.join("exit-pr-21"), "1").unwrap();
+    let snaps = vec![
+        snap("owner/second", vec![pr(31, Some(HEAD), "success", &[3])]),
+        snap(
+            "owner/throwaway",
+            vec![
+                pr(29, Some(HEAD), "success", &[4]),
+                pr(21, Some(HEAD), "success", &[5]),
+            ],
+        ),
+    ];
+    let (pass, reads) = run_pass(&w, &snaps);
+    assert_eq!(
+        pass.merged,
+        vec![
+            ("owner/second".to_string(), vec![31], vec![3]),
+            ("owner/throwaway".to_string(), vec![29], vec![4]),
+        ]
+    );
+    assert_eq!(
+        pass.refused,
+        vec![RefusedMerge {
+            repo: "owner/throwaway".to_string(),
+            pr: 21,
+            why: "branch is behind main".to_string(),
+        }]
+    );
+    assert_eq!(reads, vec!["owner/second", "owner/throwaway"]);
+}
+
+#[test]
+fn a_refusal_in_one_repo_does_not_stop_the_repos_after_it() {
+    // #380, #419: the refusal is in the FIRST repo (its only PR), so nothing merged before it;
+    // the pass must still go on to the repos after it, and read only the ones that merged.
+    let w = world("first-repo-refused");
+    for repo in ["first", "second", "third"] {
+        std::fs::create_dir_all(w.dev.join(repo)).unwrap();
+    }
+    std::fs::write(w.stub_dir.join("exit-pr-21"), "1").unwrap();
+    let snaps = vec![
+        snap("owner/first", vec![pr(21, Some(HEAD), "success", &[5])]),
+        snap("owner/second", vec![pr(31, Some(HEAD), "success", &[3])]),
+        snap("owner/third", vec![pr(41, Some(HEAD), "success", &[4])]),
+    ];
+    let (pass, reads) = run_pass(&w, &snaps);
+    assert_eq!(
+        pass.refused,
+        vec![RefusedMerge {
+            repo: "owner/first".to_string(),
+            pr: 21,
+            why: "branch is behind main".to_string(),
+        }]
+    );
+    assert_eq!(
+        pass.merged,
+        vec![
+            ("owner/second".to_string(), vec![31], vec![3]),
+            ("owner/third".to_string(), vec![41], vec![4]),
+        ]
+    );
+    assert_eq!(reads, vec!["owner/second", "owner/third"]);
+    let tried: Vec<String> = calls(&w.stub_dir)
+        .iter()
+        .map(|args| args[args.iter().position(|a| a == "--pr").unwrap() + 1].clone())
+        .collect();
+    assert!(
+        tried.contains(&"31".to_string()) && tried.contains(&"41".to_string()),
+        "{tried:?}"
+    );
+}
+
+#[test]
+fn each_refusal_lands_in_waiting_once() {
+    let w = world("waiting");
+    let data = w.pipeline.join("data");
+    let refused = RefusedMerge {
+        repo: "owner/throwaway".to_string(),
+        pr: 21,
+        why: "branch is behind main".to_string(),
+    };
+    record_refused_merges(&data, std::slice::from_ref(&refused), 100).unwrap();
+    record_refused_merges(&data, &[refused], 200).unwrap();
+    let items = switchboard_core::waiting::LocalItems::new(&data)
+        .load()
+        .unwrap();
+    assert_eq!(
+        items.len(),
+        1,
+        "a second refusal of one PR replaces the first"
+    );
+    let item = &items[0];
+    assert_eq!(item.what, "Merge owner/throwaway#21");
+    assert!(item.why.contains("branch is behind main"), "{}", item.why);
+    assert_eq!(item.link, "https://github.com/owner/throwaway/pull/21");
+    // #432 (ruling 5): `since` is the first refusal's, kept across the later ones.
+    assert_eq!(item.since, 100);
+}
+
+fn refused(repo: &str, pr: u64) -> RefusedMerge {
+    RefusedMerge {
+        repo: repo.to_string(),
+        pr,
+        why: "branch is behind main".to_string(),
+    }
+}
+
+#[test]
+fn a_later_refusal_keeps_the_first_since_and_a_new_pr_gets_its_own() {
+    let w = world("since");
+    let data = w.pipeline.join("data");
+    record_refused_merges(&data, &[refused("o/r", 1)], 100).unwrap();
+    record_refused_merges(&data, &[refused("o/r", 1), refused("o/r", 2)], 300).unwrap();
+    let mut why = refused("o/r", 1);
+    why.why = "CI went red".to_string();
+    record_refused_merges(&data, &[why], 500).unwrap();
+    let items = switchboard_core::waiting::LocalItems::new(&data)
+        .load()
+        .unwrap();
+    let since: Vec<(&str, i64)> = items.iter().map(|i| (i.what.as_str(), i.since)).collect();
+    assert_eq!(since, [("Merge o/r#1", 100), ("Merge o/r#2", 300)]);
+    assert!(
+        items[0].why.contains("CI went red"),
+        "the reason is the latest"
+    );
+}
+
+#[test]
+fn a_refused_merge_item_goes_when_its_pr_merges_or_closes() {
+    let w = world("settled");
+    let data = w.pipeline.join("data");
+    let local = switchboard_core::waiting::LocalItems::new(&data);
+    record_refused_merges(
+        &data,
+        &[
+            refused("o/r", 21),
+            refused("o/r", 22),
+            refused("o/r", 23),
+            refused("o/r", 24),
+            refused("o/other", 21),
+        ],
+        100,
+    )
+    .unwrap();
+    let handoff = switchboard_core::waiting::handoff_item("h-1", "a handoff", 50);
+    local.add(handoff.clone()).unwrap();
+    let with = |number: u64, state: &str| PullRequest {
+        number,
+        state: state.to_string(),
+        ..Default::default()
+    };
+    let snaps = [snap(
+        "o/r",
+        vec![with(21, "merged"), with(22, "closed"), with(23, "open")],
+    )];
+    // Ruling 6: merged or closed on GitHub, or merged by this pass, clears the item.
+    let merged: Vec<Merged> = vec![("o/r".to_string(), vec![24], vec![])];
+    let cleared = clear_settled_merges(&data, &snaps, &merged).unwrap();
+    assert_eq!(
+        cleared,
+        [
+            ("o/r".to_string(), 21),
+            ("o/r".to_string(), 22),
+            ("o/r".to_string(), 24)
+        ]
+    );
+    let left: Vec<String> = local.load().unwrap().into_iter().map(|i| i.what).collect();
+    assert_eq!(
+        left,
+        ["Merge o/r#23", "Merge o/other#21", handoff.what.as_str()]
+    );
+    // Nothing more to clear writes nothing.
+    let before = std::fs::read(local.path()).unwrap();
+    assert!(clear_settled_merges(&data, &snaps, &merged)
+        .unwrap()
+        .is_empty());
+    assert_eq!(std::fs::read(local.path()).unwrap(), before);
+}
+
+#[test]
+fn a_draft_pr_is_skipped_by_the_merge_pass() {
+    let w = world("draft");
+    let mut draft = pr(30, Some(HEAD), "success", &[3]);
+    draft.draft = true;
+    let ready = pr(31, Some(HEAD), "success", &[4]);
+    let snaps = [snap("iannitram/demo", vec![draft, ready])];
+    // Ruling 7: not tried, not refused, nothing in Waiting; the dry run agrees.
+    assert_eq!(
+        merge_would(&snaps, &w.dev),
+        [("iannitram/demo".to_string(), vec![31], vec![4])]
+    );
+    let (pass, _) = run_pass(&w, &snaps);
+    assert_eq!(pass.refused, []);
+    assert_eq!(
+        pass.merged,
+        [("iannitram/demo".to_string(), vec![31], vec![4])]
+    );
+    let mut tried: Vec<String> = calls(&w.stub_dir)
+        .iter()
+        .map(|args| args[args.iter().position(|a| a == "--pr").unwrap() + 1].clone())
+        .collect();
+    tried.dedup();
+    assert_eq!(tried, ["31"]);
+}
+
+#[test]
+fn a_snapshot_saved_before_drafts_were_read_loads_with_no_drafts() {
+    // #432 (ruling 7): a snapshot on disk from before `draft` existed still loads; its PRs are
+    // not drafts, so the merge pass still offers them.
+    let w = world("old-snapshot");
+    let data = w.pipeline.join("data");
+    let store = SnapshotStore::new(&data);
+    store
+        .save(&snap("o/r", vec![pr(30, Some(HEAD), "success", &[3])]))
+        .unwrap();
+    let path = store.path_for("o/r");
+    let mut old: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    old["pulls"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("draft")
+        .unwrap();
+    std::fs::write(&path, old.to_string()).unwrap();
+    let loaded = store.load("o/r").unwrap().unwrap();
+    assert!(!loaded.pulls[0].draft);
+    assert_eq!(loaded.pulls[0].number, 30);
+}
+
+#[test]
+fn the_poll_reads_whether_a_pr_is_a_draft() {
+    assert!(REPO_QUERY.contains("isDraft"));
+    let data = json!({ "repository": { "pullRequests": { "nodes": [
+        { "number": 1, "state": "OPEN", "isDraft": true },
+        { "number": 2, "state": "OPEN", "isDraft": false },
+        { "number": 3, "state": "OPEN" }
+    ] } } });
+    let s = parse_repo("o/r", &data, 0).unwrap();
+    let drafts: Vec<bool> = s.pulls.iter().map(|p| p.draft).collect();
+    assert_eq!(drafts, [true, false, false]);
 }
 
 #[test]
@@ -266,4 +545,136 @@ fn the_code_map_names_the_merge_pass_present() {
     assert!(map.contains(
         "- AUTO-4 merge pass (`merge_pass` in `passes.rs`; the app's poll thread runs it after `after_poll`): present."
     ));
+}
+
+/// A transport that answers `GET /repos/<repo>/pulls/<n>` from a table and logs every request.
+struct Lookup {
+    pulls: Vec<(String, Result<Value, String>)>,
+    log: Mutex<Vec<String>>,
+}
+
+impl GitHubTransport for Lookup {
+    fn graphql(&self, _query: &str, _variables: &Value) -> Result<Value, CoreError> {
+        Err(CoreError::GitHub("no GraphQL here".to_string()))
+    }
+
+    fn rest_get(&self, path: &str, _etag: Option<&str>) -> Result<RestAnswer, CoreError> {
+        self.log.lock().unwrap().push(format!("GET {path}"));
+        match self.pulls.iter().find(|(p, _)| p == path) {
+            Some((_, Ok(body))) => Ok(RestAnswer {
+                status: 200,
+                etag: None,
+                body: body.clone(),
+            }),
+            Some((_, Err(e))) => Err(CoreError::GitHub(e.clone())),
+            None => Ok(RestAnswer {
+                status: 404,
+                etag: None,
+                body: json!({}),
+            }),
+        }
+    }
+}
+
+#[test]
+fn a_refused_item_whose_pr_left_the_poll_is_looked_up_and_cleared_when_settled() {
+    use switchboard_core::autopilot::passes::clear_vanished_merges;
+    let w = world("vanished");
+    let data = w.pipeline.join("data");
+    let local = switchboard_core::waiting::LocalItems::new(&data);
+    record_refused_merges(
+        &data,
+        &[
+            refused("o/r", 1),
+            refused("o/r", 2),
+            refused("o/r", 3),
+            refused("o/r", 4),
+            refused("o/r", 5),
+        ],
+        100,
+    )
+    .unwrap();
+    // 5 is still in the poll (open): never looked up. 1 merged, 2 closed, 3 open, 4 errors.
+    let open = PullRequest {
+        number: 5,
+        state: "open".to_string(),
+        ..Default::default()
+    };
+    let snaps = [snap("o/r", vec![open])];
+    let t = Lookup {
+        pulls: vec![
+            (
+                "/repos/o/r/pulls/1".to_string(),
+                Ok(json!({ "state": "closed", "merged": true })),
+            ),
+            (
+                "/repos/o/r/pulls/2".to_string(),
+                Ok(json!({ "state": "closed", "merged": false })),
+            ),
+            (
+                "/repos/o/r/pulls/3".to_string(),
+                Ok(json!({ "state": "open", "merged": false })),
+            ),
+            ("/repos/o/r/pulls/4".to_string(), Err("offline".to_string())),
+        ],
+        log: Mutex::new(Vec::new()),
+    };
+    let cleared = clear_vanished_merges(&data, &snaps, &t, 0).unwrap();
+    assert_eq!(cleared, [("o/r".to_string(), 1), ("o/r".to_string(), 2)]);
+    let left: Vec<String> = local.load().unwrap().into_iter().map(|i| i.what).collect();
+    assert_eq!(left, ["Merge o/r#3", "Merge o/r#4", "Merge o/r#5"]);
+    let log = t.log.lock().unwrap().clone();
+    assert_eq!(log.len(), 4);
+    assert!(!log.iter().any(|l| l.ends_with("/pulls/5")));
+}
+
+/// #433: no lookup storm: with more vanished items than `VANISHED_LOOKUPS_PER_PASS`, one pass
+/// looks up that many, and the next minute's pass looks up the next ones, round the list.
+#[test]
+fn vanished_lookups_are_bounded_per_pass_and_reach_every_item_in_turn() {
+    use switchboard_core::autopilot::passes::{clear_vanished_merges, VANISHED_LOOKUPS_PER_PASS};
+    assert_eq!(VANISHED_LOOKUPS_PER_PASS, 5);
+    let w = world("vanished-many");
+    let data = w.pipeline.join("data");
+    let all: Vec<RefusedMerge> = (1..=7).map(|n| refused("o/r", n)).collect();
+    record_refused_merges(&data, &all, 100).unwrap();
+    // Every PR is still open, so nothing clears and each pass asks again.
+    let t = Lookup {
+        pulls: (1..=7)
+            .map(|n| {
+                (
+                    format!("/repos/o/r/pulls/{n}"),
+                    Ok(json!({ "state": "open" })),
+                )
+            })
+            .collect(),
+        log: Mutex::new(Vec::new()),
+    };
+    let asked = |now: i64| {
+        t.log.lock().unwrap().clear();
+        assert!(clear_vanished_merges(&data, &[], &t, now)
+            .unwrap()
+            .is_empty());
+        let mut prs: Vec<u64> = t
+            .log
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|l| l.rsplit('/').next().unwrap().parse().unwrap())
+            .collect();
+        prs.sort_unstable();
+        prs
+    };
+    assert_eq!(asked(0), [1, 2, 3, 4, 5]);
+    assert_eq!(
+        asked(59),
+        [1, 2, 3, 4, 5],
+        "the same minute asks the same ones"
+    );
+    assert_eq!(
+        asked(60),
+        [1, 2, 3, 6, 7],
+        "the next minute moves on, round the list"
+    );
+    assert_eq!(asked(120), [1, 4, 5, 6, 7]);
 }

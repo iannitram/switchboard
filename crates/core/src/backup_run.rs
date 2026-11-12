@@ -16,10 +16,10 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BackupRow {
     pub repo: String,               // owner/name
-    pub outcome: String,            // "written" | "refused"
+    pub outcome: String,            // "written" | "refused" | "failed"
     pub folder: String,             // folder(backups, repo).display().to_string()
     pub manifest: Option<Manifest>, // Some when written
-    pub reason: Option<String>,     // Some when refused
+    pub reason: Option<String>,     // Some when refused or failed
 }
 
 /// BAK-1: `<NextCloud backups>/github/<owner>/<name>`, one `join` per part.
@@ -73,6 +73,18 @@ pub fn record(
     })
 }
 
+/// The row for a repo whose backup failed: the other repos were still tried (BAK-1), and the
+/// last backup of this one was kept.
+pub fn failed_row(backups: &Path, repo: &str, error: &CoreError) -> BackupRow {
+    BackupRow {
+        repo: repo.to_string(),
+        outcome: "failed".to_string(),
+        folder: folder(backups, repo).display().to_string(),
+        manifest: None,
+        reason: Some(error.to_string()),
+    }
+}
+
 /// The NextCloud backups folder, or the setting's error when it is unset or empty.
 fn backups_folder(settings: &Settings) -> Result<&Path, CoreError> {
     match settings.nextcloud_backups.as_deref() {
@@ -103,6 +115,9 @@ pub fn run_all(
     let names = repos(data_dir)?;
     backup::backup_all(settings, &names)?
         .iter()
-        .map(|(repo, outcome)| record(data_dir, backups, repo, outcome, now))
+        .map(|(repo, outcome)| match outcome {
+            Ok(outcome) => record(data_dir, backups, repo, outcome, now),
+            Err(e) => Ok(failed_row(backups, repo, e)),
+        })
         .collect()
 }

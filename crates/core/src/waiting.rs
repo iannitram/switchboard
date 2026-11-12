@@ -4,10 +4,11 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::clock::UnixSeconds;
+use crate::clock::{Clock, SystemClock, UnixSeconds};
 use crate::github::snapshot::SnapshotStore;
 use crate::github::RepoSnapshot;
 use crate::rules::GuardedAction;
+use crate::sky::model::PRIORITY_FILE;
 use crate::sky::priority::{self, PriorityCopy, STALE_DAYS};
 use crate::CoreError;
 
@@ -77,7 +78,8 @@ fn has_label(labels: &[String], label: &str) -> bool {
 }
 
 /// WAIT-1: the items GitHub's snapshot gives (needing-me labels, review FAILs without a fix,
-/// ladders at Fable), for every repo.
+/// ladders at Fable), for every repo. A FAIL counts only while it names the PR's head: a
+/// commit after it answered it (#342).
 pub fn from_snapshots(snaps: &[RepoSnapshot]) -> Vec<Item> {
     let mut items = Vec::new();
     for snap in snaps.iter().filter(|s| !s.archived) {
@@ -118,7 +120,7 @@ pub fn from_snapshots(snaps: &[RepoSnapshot]) -> Vec<Item> {
             if pr
                 .verdicts
                 .last()
-                .is_some_and(|v| v.verdict == "FAIL" && v.needs_me)
+                .is_some_and(|v| v.verdict == "FAIL" && v.needs_me && v.sha == pr.head_sha)
             {
                 items.push(Item {
                     what: what.clone(),
@@ -162,6 +164,19 @@ pub fn handoff_item(handoff_id: &str, summary: &str, at: UnixSeconds) -> Item {
         link: format!("handoff:{handoff_id}"),
         action: "Open in Claude".to_string(),
         since: at,
+    }
+}
+
+/// True when two requests ask for the same thing: both an archive or both a restore, of one
+/// repo. The repo's `owner/name` is compared without case, as GitHub compares it.
+fn same_request(a: &GuardedAction, b: &GuardedAction) -> bool {
+    match (a, b) {
+        (GuardedAction::DeleteRepo { repo: a }, GuardedAction::DeleteRepo { repo: b })
+        | (
+            GuardedAction::RestoreOverLive { repo: a },
+            GuardedAction::RestoreOverLive { repo: b },
+        ) => a.eq_ignore_ascii_case(b),
+        _ => false,
     }
 }
 
@@ -220,6 +235,33 @@ pub fn stale_priority_item(copy: &PriorityCopy, path: &Path, now: UnixSeconds) -
     })
 }
 
+/// WAIT-1, SKY-9 (#344): the priority copy's item from `<data>/priority.json`: none without a
+/// copy or while it is fresh; one when it is stale, or when it does not read (a copy the sky
+/// cannot use is no more trusted than a stale one).
+pub fn priority_items(data_dir: &Path, now: UnixSeconds) -> Vec<Item> {
+    let path = data_dir.join(PRIORITY_FILE);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(e) => return vec![unreadable_priority_item(&path, &e.to_string(), now)],
+    };
+    match priority::parse(&text) {
+        Ok(copy) => stale_priority_item(&copy, &path, now).into_iter().collect(),
+        Err(e) => vec![unreadable_priority_item(&path, &e.to_string(), now)],
+    }
+}
+
+fn unreadable_priority_item(path: &Path, why: &str, now: UnixSeconds) -> Item {
+    Item {
+        what: "Refresh the priority copy".to_string(),
+        why: format!("The priority copy does not read ({why}); the sky cannot use it."),
+        source: Source::StalePriority,
+        link: path.display().to_string(),
+        action: "Refresh in Claude".to_string(),
+        since: now,
+    }
+}
+
 /// WAIT-1: the items no snapshot holds, kept in `<data>/waiting/local.json`.
 pub struct LocalItems {
     path: PathBuf,
@@ -249,44 +291,106 @@ impl LocalItems {
 
     /// Replace the item with the same `source` in place, or push it at the end.
     pub fn add(&self, item: Item) -> Result<(), CoreError> {
-        let mut items = self.load()?;
-        match items.iter().position(|old| old.source == item.source) {
-            Some(i) => items[i] = item,
-            None => items.push(item),
-        }
-        self.write(&items)
+        self.change(|items| {
+            match items.iter().position(|old| old.source == item.source) {
+                Some(i) => items[i] = item,
+                None => items.push(item),
+            }
+            true
+        })
+        .map(|_| ())
+    }
+
+    /// Push `item` unless one is there already for its `source`, or for the archive or restore
+    /// it asks for, whichever face filed that one (#347); the one there is kept as it is. A
+    /// request asked for again must not reset a held restore's item, nor sit beside it as a
+    /// plain one: the next confirm of either would run the whole restore again. True when it
+    /// was added.
+    pub fn add_new(&self, item: Item) -> Result<bool, CoreError> {
+        let asks = crate::confirm::guarded_request(&item);
+        let there = |old: &Item| {
+            old.source == item.source
+                || asks.as_ref().is_some_and(|new| {
+                    crate::confirm::guarded_request(old)
+                        .is_some_and(|held| same_request(&held, new))
+                })
+        };
+        self.change(|items| {
+            if items.iter().any(there) {
+                return false;
+            }
+            items.push(item.clone());
+            true
+        })
     }
 
     /// True when an item was removed; nothing removed writes nothing.
     pub fn remove(&self, source: &Source) -> Result<bool, CoreError> {
+        // Not there now: nothing to take, no lock, no folder made. A remove that finds it is
+        // ordered before any add that follows.
+        if !self.load()?.iter().any(|item| item.source == *source) {
+            return Ok(false);
+        }
+        self.change(|items| {
+            let before = items.len();
+            items.retain(|item| item.source != *source);
+            items.len() != before
+        })
+    }
+
+    /// Change the items under the file's lock (#431): read them, let `change` change them, and
+    /// write them back when it says it changed something (its answer, which this returns). Every
+    /// writer of `local.json` goes through here, in every face, so a writer that read the file
+    /// before another's write never writes over that write: it waits, then reads it.
+    pub fn change(&self, change: impl FnOnce(&mut Vec<Item>) -> bool) -> Result<bool, CoreError> {
+        let io = |e: std::io::Error| CoreError::Io(format!("{}: {e}", self.path.display()));
+        if let Some(dir) = self.path.parent() {
+            std::fs::create_dir_all(dir).map_err(io)?;
+        }
+        let _held = crate::lock::FileLock::take_for(&self.path, LOCAL_LOCK_WAIT, LOCAL_HOLDER)?;
         let mut items = self.load()?;
-        let before = items.len();
-        items.retain(|item| item.source != *source);
-        if items.len() == before {
+        if !change(&mut items) {
             return Ok(false);
         }
         self.write(&items)?;
         Ok(true)
     }
 
-    /// Pretty JSON to `local.json.tmp`, then renamed over `local.json`.
+    /// Pretty JSON replaces `local.json` whole through `lock::write_whole` (the temp file of this
+    /// run's own, #416; the Windows rename retry). Only under the lock (`change`).
     fn write(&self, items: &[Item]) -> Result<(), CoreError> {
-        let io = |e: std::io::Error| CoreError::Io(format!("{}: {e}", self.path.display()));
-        if let Some(dir) = self.path.parent() {
-            std::fs::create_dir_all(dir).map_err(io)?;
-        }
         let mut text = serde_json::to_string_pretty(items)
             .map_err(|e| CoreError::Parse(format!("{}: {e}", self.path.display())))?;
         text.push('\n');
-        let tmp = self.path.with_extension("json.tmp");
-        std::fs::write(&tmp, text).map_err(io)?;
-        std::fs::rename(&tmp, &self.path).map_err(io)
+        crate::lock::write_whole(&self.path, text.as_bytes())
     }
 }
 
-/// WAIT-1: merge every source's items into one list, newest first; ties by `what`.
+/// How long a change to `local.json` waits for another's (#431): each is one read and one
+/// write.
+pub const LOCAL_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// What the lock on `local.json` says holds it.
+const LOCAL_HOLDER: &str = "a change to Waiting on you";
+
+/// #426: an archive request filed before the wording changed says `... to delete <owner/name>`;
+/// it is shown as `... to archive <owner/name>`. Only the shown `what` changes: the request's
+/// source text, which the confirm finds it by, stays as it was filed.
+fn shown(mut item: Item) -> Item {
+    if matches!(item.source, Source::GuardedAction { .. }) {
+        if let Some((head, repo)) = item.what.rsplit_once(" to delete ") {
+            if !repo.is_empty() && !repo.contains(' ') {
+                item.what = format!("{head} to archive {repo}");
+            }
+        }
+    }
+    item
+}
+
+/// WAIT-1: merge every source's items into one list, newest first; ties by `what`. An old
+/// `to delete` request is shown as `to archive` (#426).
 pub fn merge(lists: Vec<Vec<Item>>) -> Vec<Item> {
-    let mut items: Vec<Item> = lists.into_iter().flatten().collect();
+    let mut items: Vec<Item> = lists.into_iter().flatten().map(shown).collect();
     items.sort_by(|a, b| b.since.cmp(&a.since).then_with(|| a.what.cmp(&b.what)));
     items
 }
@@ -349,9 +453,18 @@ pub fn assemble(snaps: &[RepoSnapshot], local: &[Item]) -> Vec<Item> {
     merge(vec![from_snapshots(snaps), local.to_vec()])
 }
 
-/// WAIT-W: `assemble` over the snapshot store and the local items in the app data folder.
+/// WAIT-W: `load_at` now.
 pub fn load(data_dir: &Path) -> Result<Vec<Item>, CoreError> {
+    load_at(data_dir, SystemClock.now())
+}
+
+/// WAIT-W: `assemble` over the snapshot store and the local items in the app data folder, with
+/// the priority copy's item at `now` (`priority_items`, #344).
+pub fn load_at(data_dir: &Path, now: UnixSeconds) -> Result<Vec<Item>, CoreError> {
     let snaps = SnapshotStore::new(data_dir).load_all()?;
     let local = LocalItems::new(data_dir).load()?;
-    Ok(assemble(&snaps, &local))
+    Ok(merge(vec![
+        assemble(&snaps, &local),
+        priority_items(data_dir, now),
+    ]))
 }

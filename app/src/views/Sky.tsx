@@ -29,10 +29,12 @@ export type Manifest = {
   releases: number;
   closed_without_pr: number;
   wiki: boolean;
+  // The repo GitHub answered for, when the backed-up name was renamed or moved.
+  resolved_repo?: string;
 };
 export type BackupRow = {
   repo: string;
-  outcome: "written" | "refused";
+  outcome: "written" | "refused" | "failed";
   folder: string;
   manifest: Manifest | null;
   reason: string | null;
@@ -49,12 +51,17 @@ function when(rfc3339: string): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${h}${min}${ampm}`;
 }
 
-// One line per backup: what was written, or why the last backup was kept (BAK-2).
+// One line per backup: what was written, why the last backup was kept (BAK-2), or the error
+// that stopped this repo's backup while the others went on.
 export function backupLine(row: BackupRow): string {
   const m = row.manifest;
   if (row.outcome === "written" && m) {
     const wiki = m.wiki ? ", the wiki" : "";
-    return `${row.repo} backed up at ${when(m.taken_at)}: ${m.refs} refs, ${m.issues} issues, ${m.pulls} PRs, ${m.comments} comments, ${m.labels} labels, ${m.milestones} milestones${wiki}, in ${row.folder}`;
+    const renamed = m.resolved_repo ? ` (GitHub answered for ${m.resolved_repo}: renamed or moved)` : "";
+    return `${row.repo}${renamed} backed up at ${when(m.taken_at)}: ${m.refs} refs, ${m.issues} issues, ${m.pulls} PRs, ${m.comments} comments, ${m.labels} labels, ${m.milestones} milestones${wiki}, in ${row.folder}`;
+  }
+  if (row.outcome === "failed") {
+    return `${row.repo} backup failed, the last backup (if there was one) was kept: ${row.reason ?? "no reason given"}`;
   }
   return `${row.repo} not backed up, the last backup was kept: ${row.reason ?? "refused"}`;
 }
@@ -80,10 +87,11 @@ function BackUp({ repo }: { repo?: string }) {
     setLines(rows.length ? rows.map(backupLine) : ["No repos to back up."]);
   }
 
+  const label = repo === undefined ? "Back up all" : "Back up this repo";
   return (
     <div data-testid="backup">
-      <button className="btn" onClick={run} disabled={busy}>
-        {repo === undefined ? "Back up all" : "Back up"}
+      <button className="btn" onClick={run} disabled={busy} aria-label={label}>
+        {label}
       </button>
       {busy && <p role="status">Backing up…</p>}
       {lines.length > 0 && (
@@ -146,6 +154,12 @@ export function Sky() {
       stop.then((f) => f());
     };
   }, [load]);
+
+  // SKY-8 (#299): the picked star's panel is scrolled into view. jsdom has no scrollIntoView.
+  const panel = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    panel.current?.scrollIntoView?.({ block: "nearest" });
+  }, [picked]);
 
   if (answer && "error" in answer) {
     const { error } = answer;
@@ -215,18 +229,24 @@ export function Sky() {
 
   if (zoomed) {
     return (
-      <>
-        <ConstellationView
-          c={zoomed}
-          onBack={() => {
-            setOpen(null);
-            setPicked(null);
-          }}
-          onStar={setPicked}
-        />
-        <BackUp key={zoomed.repo} repo={zoomed.repo} />
-        {picked && <StarPanel star={picked} onClose={() => setPicked(null)} />}
-      </>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: "1em", alignItems: "flex-start" }}>
+        <div style={{ flex: "1 1 0", minWidth: 0 }}>
+          <ConstellationView
+            c={zoomed}
+            onBack={() => {
+              setOpen(null);
+              setPicked(null);
+            }}
+            onStar={setPicked}
+          />
+          <BackUp key={zoomed.repo} repo={zoomed.repo} />
+        </div>
+        {picked && (
+          <div ref={panel} style={{ flex: "0 0 22em" }}>
+            <StarPanel star={picked} onClose={() => setPicked(null)} />
+          </div>
+        )}
+      </div>
     );
   }
 

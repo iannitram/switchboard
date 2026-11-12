@@ -2,6 +2,7 @@
 //! The shell's `chat_rate` command is a thin call into `log_rating`.
 
 use super::adapters::Answer;
+use super::answer::hold_fallback_ask;
 use super::sticky::rating_row;
 use super::thread::ThreadStore;
 use crate::joblog::JobRow;
@@ -59,8 +60,15 @@ pub fn rating_entry(
     })
 }
 
-/// Append the turn's rating row to the chat's thread in the app data folder, and return it.
+/// Log the turn's rating row in the chat's thread in the app data folder, and return it. The
+/// thread must exist, `turn_index` must name one of its turns (`ThreadStore::turns`), that
+/// turn must be an answer, and `service` and `model` must be the ones that answered it; else it
+/// is refused (#372). A second rating of a turn replaces the first (`ThreadStore::upsert`).
 /// A refusal returns before any file is touched.
+///
+/// #427: on an answer the local Qwen lane gave as a fallback, the rating row carries that
+/// answer's `fallback` (so FD-4 never learns from it, `router::learned_pick`), and a thumbs
+/// down holds the same ask for Claude (`answer::hold_fallback_ask`); it never moves the chat.
 pub fn log_rating(
     data_dir: &Path,
     handoff_id: &str,
@@ -71,6 +79,76 @@ pub fn log_rating(
     kind: Option<&str>,
 ) -> Result<JobRow, CoreError> {
     let row = rating_entry(handoff_id, turn_index, rating, service, model, kind)?;
-    ThreadStore::new(data_dir).append(handoff_id, &row)?;
+    let store = ThreadStore::new(data_dir);
+    let turn = answer_turn(&store, handoff_id, turn_index)?;
+    let (lane, answered_by) = (
+        turn.lane.as_deref().unwrap_or(""),
+        turn.model.as_deref().unwrap_or(""),
+    );
+    if lane != service || answered_by != model {
+        return Err(CoreError::Refused(format!(
+            "turn {turn_index} of thread {handoff_id} was answered by {lane} {answered_by}, not {service} {model}"
+        )));
+    }
+    let row = JobRow {
+        fallback: turn.fallback.clone(),
+        ..row
+    };
+    store.upsert(handoff_id, &row)?;
+    if turn.fallback.is_some() && row.rating.as_deref() == Some("down") {
+        hold_fallback_ask(&store, handoff_id, turn_index)?;
+    }
     Ok(row)
+}
+
+/// The answer a rating names: turn `turn_index` of thread `handoff_id` (`ThreadStore::turns`).
+/// Refused when the thread does not exist, has no such turn, or the turn is not an answer.
+fn answer_turn(
+    store: &ThreadStore,
+    handoff_id: &str,
+    turn_index: u32,
+) -> Result<JobRow, CoreError> {
+    if !store.exists(handoff_id)? {
+        return Err(CoreError::Refused(format!("no thread {handoff_id}")));
+    }
+    let Some(turn) = store
+        .turns(handoff_id)?
+        .into_iter()
+        .nth(turn_index as usize)
+    else {
+        return Err(CoreError::Refused(format!(
+            "no turn {turn_index} in thread {handoff_id}"
+        )));
+    };
+    if turn.role.as_deref() != Some("assistant") {
+        return Err(CoreError::Refused(format!(
+            "turn {turn_index} of thread {handoff_id} is not an answer"
+        )));
+    }
+    Ok(turn)
+}
+
+/// #384: `log_rating` for a caller that holds only the thread and the turn (the CLI's `rate`,
+/// MCP's `rate`): the service, model and kind are read from the turn itself. The refusals are
+/// `log_rating`'s: an unknown rating, no such thread, no such turn, a turn that is not an
+/// answer. A refusal returns before any file is touched.
+pub fn rate_turn(
+    data_dir: &Path,
+    handoff_id: &str,
+    turn_index: u32,
+    rating: &str,
+) -> Result<JobRow, CoreError> {
+    if thumbs_from_name(rating).is_none() {
+        return Err(CoreError::Refused(format!("unknown rating: {rating}")));
+    }
+    let turn = answer_turn(&ThreadStore::new(data_dir), handoff_id, turn_index)?;
+    log_rating(
+        data_dir,
+        handoff_id,
+        turn_index,
+        rating,
+        turn.lane.as_deref().unwrap_or(""),
+        turn.model.as_deref().unwrap_or(""),
+        turn.kind.as_deref(),
+    )
 }

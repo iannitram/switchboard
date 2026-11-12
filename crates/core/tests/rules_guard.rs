@@ -2,7 +2,9 @@
 //! live repo). Qwen never edits this file.
 
 use std::path::{Path, PathBuf};
-use switchboard_core::rules::{guard, is_job_worktree, Caller, Face, GuardedAction, Role, Verdict};
+use switchboard_core::rules::{
+    guard, guard_restore_new, is_job_worktree, Caller, Face, GuardedAction, Role, Verdict,
+};
 
 const FACES: [Face; 3] = [Face::Gui, Face::Cli, Face::Mcp];
 
@@ -48,7 +50,7 @@ fn nothing_is_allowed_inside_a_job_worktree_from_any_face() {
         );
         assert_eq!(
             guard(&c, &delete()),
-            refuse("delete owner/app: refused inside a job worktree")
+            refuse("archive owner/app: refused inside a job worktree")
         );
         assert_eq!(
             guard(&c, &restore()),
@@ -91,7 +93,7 @@ fn delete_and_restore_from_the_app_need_a_confirm_in_the_app() {
     let no = caller(Face::Gui, None, false, false);
     assert_eq!(
         guard(&no, &delete()),
-        refuse("delete owner/app: needs a confirm in the app")
+        refuse("archive owner/app: needs a confirm in the app")
     );
     assert_eq!(
         guard(&no, &restore()),
@@ -111,7 +113,7 @@ fn delete_and_restore_from_the_cli_or_mcp_go_to_waiting_on_you_whatever_the_role
                 let c = caller(face, role.clone(), false, confirmed);
                 assert_eq!(
                     guard(&c, &delete()),
-                    Verdict::ToWaiting("delete owner/app: needs a confirm in the app".into())
+                    Verdict::ToWaiting("archive owner/app: needs a confirm in the app".into())
                 );
                 assert_eq!(
                     guard(&c, &restore()),
@@ -209,4 +211,47 @@ fn the_code_map_shows_core_rules_present() {
         .nth(1)
         .unwrap();
     assert!(line.contains("· present."), "{line}");
+}
+
+/// #426: a restore into a new private repo is the app's after my confirm, or the CLI's after the
+/// repo's name was typed and with no role; never MCP, never a role, never in a job worktree.
+#[test]
+fn a_restore_into_a_new_repo_is_the_apps_or_the_clis_typed_confirm_only() {
+    let needs = "restore over owner/app: needs a confirm in the app";
+    let worktree = "restore over owner/app: refused inside a job worktree";
+    let roles = [
+        None,
+        Some(Role::ProjectManager),
+        Some(Role::BudgetManager),
+        Some(Role::Satellite),
+    ];
+    for role in roles {
+        for confirmed in [false, true] {
+            let ask = |face| {
+                guard_restore_new(&caller(face, role.clone(), false, confirmed), "owner/app")
+            };
+            // The app: only my confirm counts, whatever the role flag says.
+            assert_eq!(
+                ask(Face::Gui),
+                if confirmed {
+                    Verdict::Allow
+                } else {
+                    refuse(needs)
+                }
+            );
+            // The CLI: the typed name, and no role.
+            let cli = if confirmed && role.is_none() {
+                Verdict::Allow
+            } else {
+                refuse(needs)
+            };
+            assert_eq!(ask(Face::Cli), cli);
+            assert_eq!(ask(Face::Mcp), refuse(needs));
+            for face in FACES {
+                let got =
+                    guard_restore_new(&caller(face, role.clone(), true, confirmed), "owner/app");
+                assert_eq!(got, refuse(worktree));
+            }
+        }
+    }
 }

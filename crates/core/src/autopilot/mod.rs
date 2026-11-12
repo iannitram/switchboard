@@ -5,8 +5,10 @@
 pub mod classify;
 pub mod driver;
 pub mod instructions;
+pub mod loops;
 pub mod passes;
 pub mod review;
+pub mod run;
 pub mod weekly;
 
 pub use passes::{after_poll, AfterPoll};

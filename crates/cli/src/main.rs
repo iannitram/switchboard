@@ -4,8 +4,9 @@
 // The test crates compile this file in as a module and leave `main` and others unused.
 #![allow(dead_code)]
 
+pub mod autopilot;
 mod cli;
-mod mcp;
+pub mod mcp;
 
 use std::process::ExitCode;
 
@@ -85,72 +86,179 @@ impl mcp::ReadCore for Core {
                 items.truncate(limit);
                 serde_json::to_value(items).map_err(cli::Fail::from)
             }),
-            "reports" => cli::reports_answer().and_then(|mut reports| {
+            // REP-3 (#358): the same filters as `reports --project/--outcome/--pool`.
+            "reports" => cli::reports_answer(&switchboard_core::reports::Filter {
+                project: text("project").map(str::to_string),
+                outcome: text("outcome").map(str::to_string),
+                pool: text("pool").map(str::to_string),
+            })
+            .and_then(|mut reports| {
                 reports.truncate(limit);
                 serde_json::to_value(reports).map_err(cli::Fail::from)
             }),
             "budget" => cli::budget_rows()
                 .and_then(|rows| serde_json::to_value(rows).map_err(cli::Fail::from)),
+            // #375: the satellite's read tool (`mcp::role_read_tools`).
+            "errors" => cli::errors_answer(self.data()?).map(|answer| answer.to_json()),
             other => return Err(format!("unknown tool: {other}")),
         };
         answer.map_err(|fail| fail.message)
     }
 }
 
-/// MCP-2: the `--role <role>` flag of `switchboard mcp`; `None` without one. Any other value
-/// is an error, so `serve` never starts.
-fn mcp_role(words: &[String]) -> Result<Option<rules::Role>, String> {
-    let mut words = words.iter();
-    let mut role = None;
+/// The usage text `switchboard mcp --help` prints.
+pub const MCP_USAGE: &str = "usage: switchboard [--role <role>] mcp\n\
+                             Serves the MCP tools over stdin and stdout (MCP-1 to MCP-3); \
+                             --role <role> unlocks that role's write tools (MCP-2).";
+
+/// What a command line that names `mcp` asks for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpCall {
+    /// Serve, with the `--role` flag's role (`None` without one).
+    Serve(Option<rules::Role>),
+    /// `--help` or `-h` anywhere on the line: print `MCP_USAGE`.
+    Help,
+    /// `--version` or `-V` anywhere on the line: print the version.
+    Version,
+}
+
+/// MCP-2 (#354): the command line read as `switchboard mcp`, or `None` when its command is not
+/// `mcp`. `--role <role>` (or `--role=<role>`) and `--json` may come before or after `mcp`; any
+/// other flag, an extra word, or a role that is not one is an error, so `serve` never starts.
+pub fn mcp_call(argv: &[String]) -> Option<Result<McpCall, String>> {
+    let mut words = argv.iter();
+    let mut role: Option<&str> = None;
+    let mut command: Vec<&str> = Vec::new();
+    let mut help = false;
+    let mut version = false;
+    let mut error: Option<String> = None;
     while let Some(word) = words.next() {
-        let value = match word.as_str() {
-            "--role" => words
-                .next()
-                .map(String::as_str)
-                .ok_or_else(|| "--role needs a value".to_string())?,
-            other => match other.strip_prefix("--role=") {
-                Some(value) => value,
-                None => continue,
+        match word.as_str() {
+            "--role" => match words.next() {
+                Some(value) if !value.starts_with("--") => role = Some(value),
+                _ => {
+                    error.get_or_insert_with(|| "--role needs a value".to_string());
+                }
             },
-        };
-        role = Some(rules::Role::parse(value).ok_or_else(|| format!("unknown role: {value}"))?);
+            "--json" => {}
+            // The reports filters take a value, so a value such as `mcp` is not the command.
+            "--project" | "--outcome" | "--pool" => {
+                words.next();
+                error.get_or_insert_with(|| format!("{word} is for reports"));
+            }
+            // The pool edit's flags take a value too (#374).
+            "--plan" | "--cap" | "--reset" | "--cost" => {
+                words.next();
+                error.get_or_insert_with(|| format!("{word} is for pool_edit"));
+            }
+            // The front door's value flags (#384).
+            "--thread" | "--unmet" => {
+                words.next();
+                error.get_or_insert_with(|| format!("{word} is for ask or ask_as_job"));
+            }
+            "--help" | "-h" => help = true,
+            "--version" | "-V" => version = true,
+            flag if flag.starts_with("--role=") => role = Some(&flag["--role=".len()..]),
+            flag if flag.starts_with("--") => {
+                error.get_or_insert_with(|| format!("unknown flag: {flag}"));
+            }
+            other => command.push(other),
+        }
     }
-    Ok(role)
+    if command.first() != Some(&"mcp") {
+        return None;
+    }
+    if help {
+        return Some(Ok(McpCall::Help));
+    }
+    if version {
+        return Some(Ok(McpCall::Version));
+    }
+    if let Some(e) = error {
+        return Some(Err(e));
+    }
+    if let Some(extra) = command.get(1) {
+        return Some(Err(format!("mcp takes no other words, got {extra}")));
+    }
+    Some(match role {
+        None => Ok(McpCall::Serve(None)),
+        Some(value) => rules::Role::parse(value)
+            .map(|role| McpCall::Serve(Some(role)))
+            .ok_or_else(|| format!("unknown role: {value}")),
+    })
+}
+
+/// The arguments as text (#335): a word that is not valid UTF-8 is an error naming it, so the
+/// CLI never panics on one.
+pub fn utf8_args(
+    args: impl IntoIterator<Item = std::ffi::OsString>,
+) -> Result<Vec<String>, String> {
+    args.into_iter()
+        .map(|word| {
+            word.into_string().map_err(|word| {
+                format!(
+                    "an argument is not valid UTF-8: {}",
+                    word.to_string_lossy().escape_debug()
+                )
+            })
+        })
+        .collect()
 }
 
 fn main() -> ExitCode {
-    let argv: Vec<String> = std::env::args().skip(1).collect();
-    match argv.first().map(String::as_str) {
-        Some("mcp") => {
-            let role = match mcp_role(&argv[1..]) {
-                Ok(role) => role,
-                Err(e) => {
-                    eprintln!("switchboard mcp: {e}");
-                    return ExitCode::from(2);
-                }
-            };
-            // MCP-2: the real write core: the CLI's own merge, the pipeline checkout and the
-            // app data folder from the environment, the real clock.
-            let merge = cli::real_merge;
-            let writes = mcp::CoreWrites {
-                merge: &merge,
-                fleet: cli::pipeline_dir().map(|root| FleetBridge::new(&root)),
-                data: cli::data_dir(),
-                clock: &SystemClock,
-            };
-            let stdin = std::io::stdin();
-            let core = Core {
-                data: cli::data_dir(),
-            };
-            match mcp::serve(stdin.lock(), std::io::stdout().lock(), &core, role, &writes) {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(e) => {
-                    eprintln!("switchboard mcp: {e}");
-                    ExitCode::from(1)
-                }
-            }
+    let argv = match utf8_args(std::env::args_os().skip(1)) {
+        Ok(argv) => argv,
+        Err(e) => {
+            eprintln!("switchboard: {e}");
+            eprintln!("{}", cli::USAGE);
+            return ExitCode::from(2);
         }
-        _ => cli::run(&argv),
+    };
+    let role = match mcp_call(&argv) {
+        None => match autopilot::command(&argv) {
+            Some(code) => return code,
+            None => return cli::run(&argv),
+        },
+        Some(Ok(McpCall::Help)) => return cli::emit(&format!("{MCP_USAGE}\n")),
+        Some(Ok(McpCall::Version)) => return cli::emit(&format!("{}\n", cli::version_text())),
+        Some(Ok(McpCall::Serve(role))) => role,
+        Some(Err(e)) => {
+            eprintln!("switchboard mcp: {e}");
+            eprintln!("{MCP_USAGE}");
+            return ExitCode::from(2);
+        }
+    };
+    // MCP-2: the real write core: the CLI's own merge, the pipeline checkout and the
+    // app data folder from the environment, the real clock.
+    let merge = cli::real_merge;
+    let writes = mcp::CoreWrites {
+        merge: &merge,
+        fleet: cli::pipeline_dir().map(|root| FleetBridge::new(&root)),
+        data: cli::data_dir(),
+        clock: &SystemClock,
+    };
+    let stdin = std::io::stdin();
+    let core = Core {
+        data: cli::data_dir(),
+    };
+    // #385: the autopilot tools, over the same folders.
+    let transport = || cli::live_transport();
+    let headless = autopilot::Headless::from_env(&SystemClock, &transport, &autopilot::real_backup);
+    let core = autopilot::McpCore {
+        reads: &core,
+        headless: &headless,
+    };
+    let served = mcp::serve(stdin.lock(), std::io::stdout().lock(), &core, role, &writes);
+    // The loops and launchers this server started are waited for before it exits (#379).
+    headless.finish();
+    match served {
+        Ok(()) => ExitCode::SUCCESS,
+        // #334: the client closed its end of stdout; there is no one left to answer.
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("switchboard mcp: {e}");
+            ExitCode::from(1)
+        }
     }
 }
 

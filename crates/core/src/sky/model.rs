@@ -13,6 +13,7 @@ use crate::sky::chain;
 use crate::sky::codemap;
 use crate::sky::drift::{self, Drift};
 use crate::sky::features::{self, Feature, FeatureBlock, Release};
+use crate::sky::jobs;
 use crate::sky::layout::{self, Placement};
 use crate::sky::priority::{self, PriorityCopy};
 use crate::CoreError;
@@ -150,8 +151,19 @@ pub fn build(
     })
 }
 
-/// The snapshot store and the priority copy in the app data folder, then `build`.
+/// The snapshot store and the priority copy in the app data folder, then `build`, with no job
+/// in flight.
 pub fn load(data_dir: &Path, now: UnixSeconds) -> Result<SkyModel, CoreError> {
+    load_with_ledger(data_dir, &[], now)
+}
+
+/// `load`, with the jobs in flight read from the fleet ledger's `events` (`jobs::in_flight`),
+/// the same jobs `star` names (SKY-4, #343).
+pub fn load_with_ledger(
+    data_dir: &Path,
+    events: &[serde_json::Value],
+    now: UnixSeconds,
+) -> Result<SkyModel, CoreError> {
     let snaps = SnapshotStore::new(data_dir).load_all()?;
     let path = data_dir.join(PRIORITY_FILE);
     let copy = match std::fs::read_to_string(&path) {
@@ -159,7 +171,9 @@ pub fn load(data_dir: &Path, now: UnixSeconds) -> Result<SkyModel, CoreError> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(CoreError::Io(format!("{}: {e}", path.display()))),
     };
-    build(&snaps, copy.as_ref(), &[], now)
+    let repos: Vec<String> = snaps.iter().map(|snap| snap.repo.clone()).collect();
+    let jobs = jobs::in_flight(events, &repos);
+    build(&snaps, copy.as_ref(), &jobs, now)
 }
 
 fn constellation(

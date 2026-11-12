@@ -47,6 +47,16 @@ pub fn age_days(copy: &PriorityCopy, now: UnixSeconds) -> i64 {
     (now - copy.updated_at).max(0).div_euclid(86_400)
 }
 
+/// SKY-9 (#345): the line `sky` prints for the copy's age in days (`None` without a copy):
+/// `priority copy: <n> days old`, or `priority copy: none`.
+pub fn age_line(age_days: Option<i64>) -> String {
+    match age_days {
+        Some(1) => "priority copy: 1 day old\n".to_string(),
+        Some(days) => format!("priority copy: {days} days old\n"),
+        None => "priority copy: none\n".to_string(),
+    }
+}
+
 pub fn is_stale(copy: &PriorityCopy, now: UnixSeconds) -> bool {
     now - copy.updated_at > STALE_DAYS * 86_400
 }

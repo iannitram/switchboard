@@ -13,8 +13,9 @@ function typeAndSend(text: string) {
 
 const ANSWER: ChatRoute = {
   step: "rules",
-  kind: null,
+  kind: "coding",
   pick: { to: "service", service: "gemini", model: "flash" },
+  handoff_id: "h-1",
   text: "Use the labeller's first list.",
   service: "gemini",
   model: "flash",
@@ -53,7 +54,14 @@ test("pressing thumbs down calls rate once with the turn index and marks it pres
 
   fireEvent.click(down());
   expect(rate).toHaveBeenCalledTimes(1);
-  expect(rate).toHaveBeenCalledWith(1, "down");
+  expect(rate).toHaveBeenCalledWith({
+    turnIndex: 1,
+    rating: "down",
+    handoffId: "h-1",
+    service: "gemini",
+    model: "flash",
+    kind: "coding",
+  });
   expect(down().getAttribute("aria-pressed")).toBe("true");
   expect(up().getAttribute("aria-pressed")).toBe("false");
 });
@@ -66,7 +74,14 @@ test("pressing thumbs up after thumbs down calls rate with up and moves the mark
 
   fireEvent.click(down());
   fireEvent.click(up());
-  expect(rate).toHaveBeenNthCalledWith(2, 1, "up");
+  expect(rate).toHaveBeenNthCalledWith(2, {
+    turnIndex: 1,
+    rating: "up",
+    handoffId: "h-1",
+    service: "gemini",
+    model: "flash",
+    kind: "coding",
+  });
   expect(up().getAttribute("aria-pressed")).toBe("true");
   expect(down().getAttribute("aria-pressed")).toBe("false");
 });
@@ -82,4 +97,24 @@ test("a failing rate shows the error banner and clears the mark", async () => {
   expect(screen.getByText("chat_rate")).toBeTruthy();
   await waitFor(() => expect(up().getAttribute("aria-pressed")).toBe("false"));
   expect(down().getAttribute("aria-pressed")).toBe("false");
+});
+
+test("an answer without a thread id, service or model shows no thumbs", async () => {
+  const bare: ChatSend = vi.fn(async () => ({ ok: { ...ANSWER, handoff_id: undefined } }));
+  render(<Chat send={bare} rate={vi.fn(async () => ({ ok: null }))} />);
+  typeAndSend("hi");
+  await screen.findByText("Use the labeller's first list.");
+  expect(screen.queryByRole("button", { name: "Thumbs up" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Thumbs down" })).toBeNull();
+});
+
+test("the second send carries the thread id from the first reply", async () => {
+  const send = vi.fn(async () => ({ ok: ANSWER }) as CoreResult<ChatRoute>);
+  render(<Chat send={send} rate={vi.fn(async () => ({ ok: null }))} />);
+  typeAndSend("one");
+  await screen.findByText("Use the labeller's first list.");
+  typeAndSend("two");
+  await waitFor(() => expect(send).toHaveBeenCalledTimes(2));
+  expect(send).toHaveBeenNthCalledWith(1, "one", undefined);
+  expect(send).toHaveBeenNthCalledWith(2, "two", "h-1");
 });

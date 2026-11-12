@@ -31,6 +31,7 @@ fn snap(repo: &str, read_at: i64) -> RepoSnapshot {
             closed_by_pr: None,
         }],
         pulls: vec![PullRequest {
+            draft: false,
             number: 60,
             title: "Snapshot store".to_string(),
             state: "open".to_string(),

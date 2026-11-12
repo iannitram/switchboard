@@ -43,6 +43,33 @@ pub struct JobRow {
     pub implicit: bool,
     /// FD-10: Some(true) when this thumbs-down also moved the chat to another model, Some(false) when it did not; None on every other row.
     pub moved: Option<bool>,
+    /// FD-13: on a chat turn's row, `user` or `assistant`; None on every other row.
+    pub role: Option<String>,
+    /// FD-13: on a chat turn's row, the turn's text; None on every other row.
+    pub text: Option<String>,
+    /// FD-5: on a chat's move row, the service and model the chat moved off, as
+    /// `<service> <model>` (the row's own `lane` and `model` are where it moved to); None on
+    /// every other row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moved_from: Option<String>,
+    /// FD-5: on a chat's move row, why the chat moved (the work tree's line, REP-2); None on
+    /// every other row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moved_why: Option<String>,
+    /// FD-3: on an answer the local Qwen lane gave because the picked pool was braked or over
+    /// budget, why; the chat is not moved by it. None on every other row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<String>,
+    /// FD-6 (#428): on a chat's rolling-summary row, how many of the thread's turns (queued
+    /// asks included) the summary covers, so a handoff reuses it until new turns arrive and
+    /// then summarises only those. None on every other row, and on a summary stored before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub covers_turns: Option<u32>,
+    /// #433: on a summary row, the content hash of the turns it covers
+    /// (`answer::turns_hash`), so it is reused only while they are unchanged. None on every
+    /// other row, and on a summary stored before (a cache miss).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub covers_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -131,6 +158,13 @@ pub fn row_from_ledger(event: &Value) -> JobRow {
         source: RowSource::Ledger,
         implicit: false,
         moved: None,
+        role: None,
+        text: None,
+        moved_from: None,
+        moved_why: None,
+        fallback: None,
+        covers_turns: None,
+        covers_hash: None,
     }
 }
 
@@ -217,8 +251,9 @@ pub fn read_ledger(files: &[PathBuf]) -> Result<Vec<Value>, CoreError> {
     let mut kept: Vec<Value> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     for path in files {
-        let text = match std::fs::read_to_string(path) {
-            Ok(text) => text,
+        // Bytes that are not UTF-8 spoil only their own line (#349), not the whole read.
+        let text = match std::fs::read(path) {
+            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => return Err(CoreError::Io(format!("{}: {e}", path.display()))),
         };

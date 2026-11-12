@@ -495,3 +495,57 @@ fn the_code_map_marks_the_command_present() {
         "- REP-W command (`state_dir_from`, `read_done_cards`, `assemble`, `load`, `reports`): present."
     ));
 }
+
+/// #349: a done card that is not UTF-8 is skipped; the good cards still load.
+#[test]
+fn a_non_utf8_done_card_does_not_hide_the_good_ones() {
+    let state = scratch("non-utf8-card");
+    let done = state.join("jobs").join("done");
+    write(
+        &done.join("good.json"),
+        r#"{"id":"job-good","outcome":"passed"}"#,
+    );
+    fs::write(done.join("bad.json"), b"\xff\xfe{bad").unwrap();
+    let cards = read_done_cards(&state).unwrap();
+    assert_eq!(cards.len(), 1);
+    assert_eq!(cards[0]["id"], "job-good");
+    let _ = fs::remove_dir_all(&state);
+}
+
+/// #349: a ledger file with bad bytes keeps its good lines and does not fail the read.
+#[test]
+fn a_non_utf8_ledger_file_does_not_fail_the_read() {
+    let dir = scratch("non-utf8-ledger");
+    let file = dir.join("l.jsonl");
+    let mut bytes = b"{\"event\":\"end\",\"id\":\"job-a\"}\n".to_vec();
+    bytes.extend_from_slice(b"\xff\xfe\n");
+    fs::write(&file, bytes).unwrap();
+    let events = switchboard_core::joblog::read_ledger(&[file]).unwrap();
+    assert_eq!(events.len(), 1);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// #348: the thread store's threads come back as `(id, rows)` for `load`/`assemble`.
+#[test]
+fn thread_rows_reads_the_thread_store() {
+    let data = scratch("thread-rows");
+    let store = switchboard_core::frontdoor::thread::ThreadStore::new(&data);
+    for (lane, outcome) in [("qwen", "failed"), ("gemini", "passed")] {
+        let row = JobRow {
+            lane: Some(lane.to_string()),
+            outcome: Some(outcome.to_string()),
+            handoff_id: Some("thread-9".to_string()),
+            source: switchboard_core::joblog::RowSource::Chat,
+            ..JobRow::default()
+        };
+        store.append("thread-9", &row).unwrap();
+    }
+    let threads = switchboard_core::reports::thread_rows(&data);
+    assert_eq!(threads.len(), 1);
+    assert_eq!(threads[0].0, "thread-9");
+    let reports = assemble(&[], &[], &threads, None);
+    assert_eq!(ids(&reports), ["thread-9"]);
+    assert_eq!(reports[0].moves.len(), 1);
+    assert!(switchboard_core::reports::thread_rows(&data.join("none")).is_empty());
+    let _ = fs::remove_dir_all(&data);
+}

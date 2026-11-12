@@ -62,6 +62,10 @@ _Avoid_: bug, incident, alert
 A fault in a project's own code, such as Z13-Helper's tests failing. It's filed as a bug in that project's repo, never as an IT ticket.
 _Avoid_: IT ticket, fleet error
 
+**Adopted loop**:
+A satellite loop whose run ended while it still ran (the window closed, a headless run killed). It stays on disk, and the next satellite tick on that machine, from any face, takes it over and watches it to its end instead of starting another copy.
+_Avoid_: orphan, zombie
+
 **Repo backup**:
 The one latest copy of a repo, enough to rebuild it if GitHub loses it: all of its git history plus its issues, PRs, comments, labels, milestones, releases and wiki. Each new backup replaces the last one; no older versions are kept.
 _Avoid_: snapshot (that is the cached GitHub read), archive, mirror
@@ -95,11 +99,11 @@ A named type of ask in the abilities index, such as quick-lookup or web-research
 _Avoid_: intent, category, task type
 
 **Packet**:
-What travels with a chat when it moves to another model: one summary of the whole thread so far (rewritten at each handoff, never stacked), the last 6 turns word for word, and every file link gathered so far. It never carries the full transcript.
+What travels with a chat when it moves to another model: one summary of the whole thread so far (rewritten at each handoff, never stacked, and reused until new messages arrive), the last 6 turns word for word, and every file link gathered so far. It never carries the full transcript.
 _Avoid_: context dump, transcript
 
 **Sticky chat**:
-A chat stays on its model until a signal moves it: I say "ask Claude" or name an agent, I give a thumbs down, or the model replies with the handoff marker.
+A chat stays on its model until a signal moves it: I say "ask Claude" or name an agent, I give a thumbs down, or the model replies with the handoff marker. When its pool is braked, the chat moves to a pool with budget and says so, and moves back when the brake lifts.
 _Avoid_: pinned chat, session lock
 
 **Handoff marker**:

@@ -15,6 +15,7 @@ fn err(code: i32, stderr: &str) -> FleetError {
         exit_code: Some(code),
         stderr: stderr.into(),
         reason: FleetErrorReason::Exit,
+        undo_note: None,
     }
 }
 

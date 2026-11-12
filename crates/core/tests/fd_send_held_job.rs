@@ -270,10 +270,14 @@ fn the_command_is_a_thin_call_into_send_held_job() {
         .find("pub fn chat_send_as_job(")
         .expect("commands.rs has pub fn chat_send_as_job(");
     let before = &commands[..at];
-    let attr = before.rfind("#[tauri::command]").expect("an attribute");
+    // #429 (owner ruling 2026-11-11; this pinned `#[tauri::command]`, a blocking command): the
+    // send runs off the main thread, so the window stays usable while it is filed.
+    let attr = before
+        .rfind("#[tauri::command(async)]")
+        .expect("an async attribute");
     assert!(
         !before[attr..].contains("fn "),
-        "#[tauri::command] is not on chat_send_as_job"
+        "#[tauri::command(async)] is not on chat_send_as_job"
     );
     let body_end = commands[at..]
         .find("\n}\n")
@@ -283,13 +287,16 @@ fn the_command_is_a_thin_call_into_send_held_job() {
         "kind: String",
         "request: String",
         "unmet: Vec<String>",
-        "\"FLEET_MACHINE\"",
-        "this_machine(",
-        "send_held_job(",
+        // #384: the command calls the core's `ask::send_as_job`, as the CLI and MCP do.
+        "ask::send_as_job(",
         "record_fleet_error(",
         "FaceError::new(\"chat_send_as_job\"",
     ] {
         assert!(body.contains(part), "missing {part}: {body}");
+    }
+    let ask = include_str!("../src/frontdoor/ask.rs");
+    for part in ["\"FLEET_MACHINE\"", "this_machine(", "send_held_job("] {
+        assert!(ask.contains(part), "ask.rs: missing {part}");
     }
 }
 

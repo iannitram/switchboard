@@ -178,7 +178,8 @@ fn a_claude_handoff_pick_carries_its_reason() {
     assert_eq!(
         ChatRoute::from(&r).pick,
         ChatPick::ClaudeHandoff {
-            reason: "big with tools".to_string()
+            reason: "big with tools".to_string(),
+            model: None,
         }
     );
 }
@@ -448,7 +449,7 @@ fn route_message_is_the_real_router_over_the_fleet() {
     let index = AbilitiesIndex::load_with(&fleet, FleetModels::local_machine().as_deref()).unwrap();
     for message in ["hello there", "search the web for llama-swap"] {
         let got = route_message(&fleet, message, DEFAULT_COMPLEXITY).unwrap();
-        let want = router::route(message, &index, &AllowAll, DEFAULT_COMPLEXITY);
+        let want = router::route(message, &index, &AllowAll, DEFAULT_COMPLEXITY, None);
         assert_eq!(got, ChatRoute::from(&want), "{message}");
     }
 }
@@ -512,7 +513,7 @@ fn a_qwen_first_kind_routes_to_qwen_with_this_machines_model() {
         Some("strix-halo"),
         "search the web for llama-swap",
         Complexity::Small,
-        router::route,
+        |m, i, g, c| router::route(m, i, g, c, None),
     )
     .unwrap();
     assert_eq!(
@@ -537,7 +538,7 @@ fn a_big_no_tools_message_routes_to_the_claude_api_sonnet_model() {
         Some("strix-halo"),
         "hello there",
         Complexity::BigNoTools,
-        router::route,
+        |m, i, g, c| router::route(m, i, g, c, None),
     )
     .unwrap();
     assert_eq!(
@@ -581,7 +582,8 @@ fn the_chat_route_command_is_a_thin_call_into_route_message() {
         .find("pub fn chat_route(")
         .expect("commands.rs has pub fn chat_route(");
     let before = &commands[..at];
-    let attr = before.rfind("#[tauri::command]").expect("an attribute");
+    // `#[tauri::command(async)]` counts: chat_route calls a model, so it runs off the main thread.
+    let attr = before.rfind("#[tauri::command").expect("an attribute");
     assert!(
         !before[attr..].contains("fn "),
         "#[tauri::command] is not on chat_route"
@@ -591,8 +593,13 @@ fn the_chat_route_command_is_a_thin_call_into_route_message() {
         .map_or(commands.len(), |i| at + i);
     let body = &commands[at..body_end];
     assert!(body.contains("message: String"), "{body}");
-    assert!(body.contains("route_message("), "{body}");
-    assert!(body.contains("estimate_complexity(&message)"), "{body}");
+    // #384: the command calls the core's `ask::ask`, the same call the CLI and MCP make.
+    assert!(body.contains("ask::ask("), "{body}");
+    // #378: in an open thread the chat stays on its model (FD-5), so `ask` routes with
+    // `route_in_thread_on`, which is `route_message` for a new chat.
+    let ask = include_str!("../src/frontdoor/ask.rs");
+    assert!(ask.contains("chat::route_in_thread_on("), "{ask}");
+    assert!(ask.contains("chat::estimate_complexity(message)"), "{ask}");
     assert!(body.contains("FaceError::new(\"chat_route\""), "{body}");
     assert!(body.contains("record_fleet_error("), "{body}");
 }

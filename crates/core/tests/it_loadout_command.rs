@@ -52,6 +52,7 @@ impl ProbeRunner for Stub {
         self.asked.lock().unwrap().push(probe.name.to_string());
         ProbeResult {
             name: probe.name.to_string(),
+            timed_out: false,
             exit_code: Some(0),
             stdout: probe.name.to_string(),
         }
@@ -120,6 +121,7 @@ fn a_missing_program_gives_no_exit_code_and_empty_stdout() {
         result,
         ProbeResult {
             name: "missing".to_string(),
+            timed_out: false,
             exit_code: None,
             stdout: String::new(),
         }
@@ -138,6 +140,7 @@ fn the_real_runner_feeds_read_loadout() {
 fn fixture() -> Loadout {
     Loadout {
         read_at: NOW,
+        timed_out: Vec::new(),
         clis: vec![("claude".to_string(), true), ("codex".to_string(), false)],
         models_loaded: vec!["qwen3.8-27b".to_string()],
         toolchains: vec!["cargo".to_string(), "node".to_string()],
@@ -181,6 +184,7 @@ fn the_loadout_serialises_field_for_field() {
 fn an_empty_loadout_serialises_with_empty_lists() {
     let empty = Loadout {
         read_at: NOW,
+        timed_out: Vec::new(),
         ..Loadout::default()
     };
     assert_eq!(
@@ -251,4 +255,53 @@ fn the_code_map_lists_the_loadout_command_present() {
         ),
         "{section:?}"
     );
+}
+
+/// #339: a probe that runs past the limit is killed and has no exit code; a quick one still
+/// answers. The slow program is `sleep`, so this runs on unix only.
+#[cfg(unix)]
+#[test]
+fn a_slow_probe_is_killed_at_the_time_limit() {
+    use std::time::{Duration, Instant};
+    use switchboard_core::it::run_probe_within;
+    const SLOW: Probe = Probe {
+        name: "slow",
+        program: "sleep",
+        args: &["30"],
+    };
+    let start = Instant::now();
+    let result = run_probe_within(&SLOW, Duration::from_millis(300));
+    assert!(start.elapsed() < Duration::from_secs(5));
+    assert_eq!(result.name, "slow");
+    assert_eq!(result.exit_code, None);
+    assert!(result.timed_out, "a killed probe says it timed out");
+
+    let fast = run_probe_within(&CARGO_VERSION, Duration::from_secs(30));
+    assert_eq!(fast.exit_code, Some(0));
+    assert!(!fast.timed_out);
+    assert!(fast.stdout.contains("cargo"));
+}
+
+/// #339: the kill reaches what the probe started, not only the probe. The probe is a shell that
+/// starts a `sleep` with an odd length and waits for it; after the time limit no such `sleep`
+/// is left running. Linux only: it looks for the process in `/proc`.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_killed_probe_leaves_no_child_running() {
+    use std::time::Duration;
+    use switchboard_core::it::run_probe_within;
+    const SHELL: Probe = Probe {
+        name: "shell",
+        program: "sh",
+        args: &["-c", "sleep 31337 & wait"],
+    };
+    let result = run_probe_within(&SHELL, Duration::from_millis(500));
+    assert_eq!(result.exit_code, None);
+    std::thread::sleep(Duration::from_millis(300));
+    let running = std::fs::read_dir("/proc").unwrap().flatten().any(|entry| {
+        std::fs::read(entry.path().join("cmdline"))
+            .map(|c| String::from_utf8_lossy(&c).contains("sleep\x0031337"))
+            .unwrap_or(false)
+    });
+    assert!(!running, "the probe's child is still running");
 }

@@ -55,19 +55,29 @@ pub fn as_prompt(packet: &Packet) -> String {
     )
 }
 
+/// FD-7 (#428): `text` as open questions are matched: trimmed, lower-cased, and every run of
+/// whitespace collapsed to one space. No fuzzy matching.
+pub fn normalised(text: &str) -> String {
+    text.split_whitespace()
+        .map(str::to_lowercase)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// FD-7: the file links and open questions the summary leaves out (empty when it names all).
-/// A link or question counts as named when its exact text appears in the summary.
+/// A link counts as named when its exact text appears in the summary; an open question when it
+/// appears after both are `normalised` (#428).
 pub fn missing_from_summary(
     summary: &str,
     links: &[String],
     open_questions: &[String],
 ) -> Vec<String> {
-    links
+    let plain = normalised(summary);
+    let missing_links = links.iter().filter(|link| !summary.contains(link.as_str()));
+    let missing_questions = open_questions
         .iter()
-        .chain(open_questions.iter())
-        .filter(|item| !summary.contains(item.as_str()))
-        .cloned()
-        .collect()
+        .filter(|question| !plain.contains(&normalised(question)));
+    missing_links.chain(missing_questions).cloned().collect()
 }
 
 /// FD-7: the summary to use. Calls `ask_again` at most once, with the missing items, when `first`
