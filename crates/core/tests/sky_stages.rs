@@ -132,3 +132,29 @@ fn missing_stages_preserve_the_legacy_sky_shape() {
         .get("stages")
         .is_none());
 }
+
+#[test]
+fn an_issue_under_features_in_two_stages_counts_in_the_first_only() {
+    let snap = RepoSnapshot {
+        repo: "owner/demo".into(),
+        roadmap_md: Some(format!(
+            "features:
+- sky: Sky
+- cli: CLI
+
+{}",
+            TABLE
+                .replace("`sky`, `cli`", "`sky`")
+                .replace("all with a view", "`cli`")
+        )),
+        issues: vec![Issue {
+            number: 2,
+            labels: vec!["feature:sky".into(), "feature:cli".into()],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let sky = build(&[snap], None, &[], 0).unwrap();
+    let stages = sky.constellations[0].stages.as_ref().unwrap();
+    assert_eq!((stages[1].total, stages[2].total), (1, 0));
+}

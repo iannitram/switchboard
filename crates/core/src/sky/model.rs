@@ -220,6 +220,8 @@ fn constellation(
             .as_deref()
             .and_then(features::parse_stages)
             .map(|stages| {
+                // An issue under features in two stages counts once, in the first.
+                let mut counted = std::collections::HashSet::new();
                 stages
                     .into_iter()
                     .map(|stage| {
@@ -231,6 +233,7 @@ fn constellation(
                                     .features
                                     .iter()
                                     .any(|id| issue.labels.contains(&format!("feature:{id}")))
+                                    && counted.insert(issue.number)
                             })
                             .collect();
                         let total = issues.len();
