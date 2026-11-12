@@ -136,6 +136,51 @@ fn private_word_is_refused_before_any_text_is_written() {
 }
 
 #[test]
+fn private_word_after_a_newline_is_refused() {
+    let words = vec!["Zelda".to_string()];
+    let mut r = report("r1", None);
+    r.symptom = "crash\nZelda".into();
+    assert!(matches!(
+        intake::issue_text(&r, &words),
+        Err(CoreError::Refused(_))
+    ));
+    let text = serde_json::to_string(&r).unwrap();
+    assert!(matches!(
+        intake::validate(&text, &words),
+        Err(CoreError::Refused(_))
+    ));
+}
+
+#[test]
+fn private_word_in_a_step_is_refused() {
+    let words = vec!["Zelda".to_string()];
+    let mut r = report("r1", None);
+    r.steps = vec!["Open a note".into(), "Send it to\tzelda".into()];
+    assert!(matches!(
+        intake::issue_text(&r, &words),
+        Err(CoreError::Refused(_))
+    ));
+    let text = serde_json::to_string(&r).unwrap();
+    assert!(matches!(
+        intake::validate(&text, &words),
+        Err(CoreError::Refused(_))
+    ));
+}
+
+#[test]
+fn private_word_written_with_unicode_escapes_is_refused() {
+    let words = vec!["Zelda".to_string()];
+    let text = serde_json::to_string(&report("r1", None))
+        .unwrap()
+        .replace("Open a note", r"\u007a\u0065\u006c\u0064\u0061");
+    assert!(text.contains(r"\u007a"));
+    assert!(matches!(
+        intake::validate(&text, &words),
+        Err(CoreError::Refused(_))
+    ));
+}
+
+#[test]
 fn validate_checks_the_form() {
     let ok = serde_json::to_string(&report("r1", Some("s"))).unwrap();
     assert_eq!(intake::validate(&ok, &[]).unwrap().app, "notes");

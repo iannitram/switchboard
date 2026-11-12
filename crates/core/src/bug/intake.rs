@@ -201,13 +201,30 @@ pub fn scan_private(text: &str, words: &[String]) -> Result<(), CoreError> {
     }
 }
 
-/// `bug validate`: the private-word scan of the whole text first, then the report form: every
-/// required field present and non-empty, and `source`, `report_class` and `severity` one of
-/// their listed values.
+/// Refuse a parsed JSON value if any decoded string in it holds a private word. Each string is
+/// scanned on its own, so JSON escapes (`\n`, `\u0041`) cannot hide a word.
+fn scan_private_value(value: &serde_json::Value, words: &[String]) -> Result<(), CoreError> {
+    use serde_json::Value;
+    match value {
+        Value::String(s) => scan_private(s, words),
+        Value::Array(items) => items.iter().try_for_each(|v| scan_private_value(v, words)),
+        Value::Object(map) => map.iter().try_for_each(|(k, v)| {
+            scan_private(k, words)?;
+            scan_private_value(v, words)
+        }),
+        _ => Ok(()),
+    }
+}
+
+/// `bug validate`: parse the report, scan every decoded string in it for private words, then
+/// check the form: every required field present and non-empty, and `source`, `report_class` and
+/// `severity` one of their listed values.
 pub fn validate(text: &str, private_words: &[String]) -> Result<Report, CoreError> {
-    scan_private(text, private_words)?;
-    let report: Report =
+    let value: serde_json::Value =
         serde_json::from_str(text).map_err(|e| CoreError::Parse(format!("report: {e}")))?;
+    scan_private_value(&value, private_words)?;
+    let report: Report =
+        serde_json::from_value(value).map_err(|e| CoreError::Parse(format!("report: {e}")))?;
     let bad = |field: &str| CoreError::Refused(format!("report field `{field}` is not valid"));
     for (field, value) in [
         ("id", &report.id),
@@ -277,8 +294,8 @@ pub fn issue_text(
     report: &Report,
     private_words: &[String],
 ) -> Result<(String, String), CoreError> {
-    let whole = serde_json::to_string(report).unwrap_or_default();
-    scan_private(&whole, private_words)?;
+    let value = serde_json::to_value(report).map_err(|e| CoreError::Parse(e.to_string()))?;
+    scan_private_value(&value, private_words)?;
     let mut body = format!(
         "**Symptom:** {}\n\n**Severity:** {}\n",
         report.symptom, report.severity
