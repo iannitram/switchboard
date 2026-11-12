@@ -200,3 +200,44 @@ fn a_pipeline_step_goes_through_the_fleet_bridge_not_the_runner() {
     let r = engine(&fake, &store, &busy).step(&spec, "v").unwrap();
     assert_eq!(r, StepReport::NotNow);
 }
+
+#[test]
+fn basic_checks_fail_closed_on_text_they_do_not_understand() {
+    let out = ok(json!({"errors": [], "stage": "fix"}));
+    let held = |text: &str| {
+        let check = Check {
+            check: text.into(),
+            exists: false,
+        };
+        use switchboard_core::runner::engine::Checker;
+        BasicChecks.holds(&check, &out)
+    };
+    // The grammar, consumed whole, holds.
+    assert!(held("exit 0"));
+    assert!(held("exit 0 with JSON on stdout"));
+    assert!(held("exit 0 and JSON .errors == []"));
+    // Anything left over is unmet.
+    assert!(!held(
+        "exit 0: the original's sha256 equals the pushed raw copy's"
+    ));
+    assert!(!held("exit 0; gh pr view <pr> shows 'Closes #<issue>'"));
+    assert!(!held("exit 0 and JSON .stage is repro"));
+    assert!(!held("exit 0 and JSON .errors == []: ignored tail"));
+    assert!(!held("exit 0 and JSON .errors == []; and more"));
+    assert!(!held("exit 0 and JSON .errors == [] and more"));
+    assert!(!held("exit 0 and JSON .class is coding or fleet"));
+    assert!(!held("exit 0 with JSON on stdout and more"));
+}
+
+#[test]
+fn a_pipeline_model_task_goes_through_the_fleet_bridge() {
+    let cmd = "python3 -I tools/fleet/fleet.py actions --json";
+    let mut spec = spec_with(0, "fail", "pipeline", cmd);
+    spec.steps[0].run.kind = RunKind::ModelTask;
+    spec.steps[0].done_when[0].check = "exit 0 with JSON on stdout".into();
+    let store = StateStore::new(&tmp("bridge-model"));
+    let fake = Fake::new(vec![]);
+    let r = engine(&fake, &store, &stub()).step(&spec, "u").unwrap();
+    assert!(matches!(r, StepReport::Done { .. }));
+    assert_eq!(*fake.1.borrow(), 0);
+}

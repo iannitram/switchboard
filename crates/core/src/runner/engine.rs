@@ -1,12 +1,15 @@
 //! The step engine: runs one step of a loaded spec for one unit and moves its saved run state.
 //!
-//! A command whose home is the pipeline goes through the fleet bridge. Every other command and
-//! every model task or question goes to the `StepRunner` the caller gives; the engine starts no
-//! process of its own.
+//! A step whose home is the pipeline and that has a command goes through the fleet bridge, whatever
+//! its kind. Every other step goes to the `StepRunner` the caller gives; the engine starts no
+//! process of its own. A placeholder such as `<repo>` or `<issue>` in a pipeline command reaches
+//! `fleet.py` unchanged; filling in unit values belongs to a later node. After a retryable failure
+//! the saved state is already `to_state_fail`, but the pending retry pins the failed step, so any
+//! step that leaves `to_state_fail` waits until the retries are used up.
 
 use serde_json::Value;
 
-use super::spec::{Check, RunKind, Spec, Step};
+use super::spec::{Check, Spec, Step};
 use super::state::{Halt, Last, RunState, StateStore};
 use crate::fleet::FleetBridge;
 use crate::CoreError;
@@ -30,43 +33,47 @@ pub trait Checker {
     fn holds(&self, check: &Check, outcome: &Outcome) -> bool;
 }
 
-/// Understands `exit 0`, `with JSON` and `JSON .field == []`; every other check text is unmet,
-/// never guessed to hold.
+/// Understands exactly `exit 0`, `exit 0 with JSON on stdout` and `exit 0 and JSON .path == <json
+/// literal>`. Fails closed: a check text the grammar does not consume entirely (prose after
+/// `exit 0`, a `:` or `;` tail, another JSON phrasing) is unmet, never guessed to hold.
 pub struct BasicChecks;
 
 impl Checker for BasicChecks {
     fn holds(&self, check: &Check, outcome: &Outcome) -> bool {
-        let Outcome::Exit { code, json } = outcome else {
+        let Outcome::Exit { code: 0, json } = outcome else {
             return false;
         };
-        let text = check.check.as_str();
-        if !text.starts_with("exit 0") {
+        let Some(rest) = check.check.trim().strip_prefix("exit 0") else {
             return false;
+        };
+        if rest.is_empty() {
+            return true;
         }
-        if *code != 0 {
-            return false;
-        }
-        if let Some(at) = text.find("JSON .") {
-            let rest = &text[at + "JSON .".len()..];
-            let Some((path, tail)) = rest.split_once(" == ") else {
-                return json.is_some();
-            };
-            let want = tail.split([':', ';']).next().unwrap_or("").trim();
-            let Some(mut value) = json.as_ref() else {
-                return false;
-            };
-            for key in path.split('.') {
-                match value.get(key) {
-                    Some(next) => value = next,
-                    None => return false,
-                }
-            }
-            return serde_json::from_str::<Value>(want).is_ok_and(|w| &w == value);
-        }
-        if text.contains("with JSON") || text.contains("JSON") {
+        if rest == " with JSON on stdout" {
             return json.is_some();
         }
-        true
+        let Some(rest) = rest.strip_prefix(" and JSON .") else {
+            return false;
+        };
+        let Some((path, literal)) = rest.split_once(" == ") else {
+            return false;
+        };
+        let Ok(want) = serde_json::from_str::<Value>(literal) else {
+            return false;
+        };
+        if path.is_empty() || path.contains(char::is_whitespace) {
+            return false;
+        }
+        let Some(mut value) = json.as_ref() else {
+            return false;
+        };
+        for key in path.split('.') {
+            match value.get(key) {
+                Some(next) => value = next,
+                None => return false,
+            }
+        }
+        *value == want
     }
 }
 
@@ -188,10 +195,10 @@ impl Engine<'_> {
         Ok(report)
     }
 
-    /// Start the step: a pipeline command through the fleet bridge, anything else through the
+    /// Start the step: a step with home `pipeline` and a command, of any kind, through the fleet bridge, anything else through the
     /// runner.
     fn start(&self, step: &Step, unit: &str) -> Result<Outcome, CoreError> {
-        if step.run.kind != RunKind::Command || step.run.home != "pipeline" {
+        if step.run.home != "pipeline" || step.run.command.trim().is_empty() {
             return self.runner.run(step, unit);
         }
         let words: Vec<&str> = step
