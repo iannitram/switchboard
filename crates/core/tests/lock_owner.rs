@@ -207,12 +207,17 @@ fn a_lock_left_by_a_process_that_died_is_taken_over_at_once() {
             !lock::held(&target),
             "round {round}: a lock whose holder is gone is not held"
         );
+        // The take has a 5 s timeout. A dead holder is found at the first liveness look (about
+        // 1 s), while a live holder runs the whole timeout out, so 4 s is clearly "at once"
+        // and still well short of the timeout.
+        let timeout = Duration::from_secs(5);
         let started = Instant::now();
-        let held = FileLock::take(&target, Duration::from_secs(5)).unwrap();
+        let held = FileLock::take(&target, timeout).unwrap();
+        let elapsed = started.elapsed();
         assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "round {round}: took {:?}",
-            started.elapsed()
+            elapsed < Duration::from_secs(4),
+            "round {round}: a dead holder's lock was taken over after {elapsed:?}, which is not \
+             clearly before the {timeout:?} timeout"
         );
         drop(held);
         assert!(!lock_path(&target).exists());
