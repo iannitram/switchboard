@@ -100,7 +100,7 @@ export function Settings() {
           <input type="text" value={fields[name]} onChange={(e) => edit(name, e.target.value)} />
         </label>
       ))}
-      <p>
+      <p className={view.missing.length === 0 ? "hint ok" : "hint"}>
         {view.missing.length === 0
           ? "All paths set"
           : `Not set: ${view.missing.map(labelOf).join(", ")}`}
@@ -108,7 +108,7 @@ export function Settings() {
       <button type="button" onClick={save}>
         Save
       </button>
-      {saved && <p>Saved</p>}
+      {saved && <p className="hint ok">Saved</p>}
       {saveError && <Failed error={saveError} />}
     </section>
   );

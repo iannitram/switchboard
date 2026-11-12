@@ -12,7 +12,7 @@ export function DriftList({ drift }: { drift: (DriftItem & { repo: string })[] }
         <ul>
           {drift.map((d, i) => (
             <li key={`${d.repo}#${i}`} data-kind={d.kind}>
-              <a href={d.link}>{`${d.repo.slice(d.repo.lastIndexOf("/") + 1)}: ${d.text}`}</a>
+              <a href={d.link} target="_blank" rel="noreferrer">{`${d.repo.slice(d.repo.lastIndexOf("/") + 1)}: ${d.text}`}</a>
             </li>
           ))}
         </ul>
