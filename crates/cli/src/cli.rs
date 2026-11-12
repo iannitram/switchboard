@@ -39,6 +39,7 @@ use switchboard_core::joblog::{self, NOT_RECORDED};
 use switchboard_core::platform::{current_os, default_dev_root, GhAuthToken, Os};
 use switchboard_core::reports::{self, Filter, Report};
 use switchboard_core::rules::{self, Caller, Face, GuardedAction, Role, Verdict};
+use switchboard_core::runner::waiting::{RunnerItems, WaitingItem};
 use switchboard_core::settings::{self, Settings};
 use switchboard_core::sky;
 use switchboard_core::waiting::{self, guarded_item, Item, LocalItems};
@@ -73,7 +74,7 @@ const NO_SNAPSHOT: &str = "switchboard: no snapshot yet; run switchboard refresh
 
 pub const USAGE: &str = "usage: switchboard [--help | --version] [--json] [--role <role>] \
                      [--project <repo>] [--outcome <o>] [--pool <p>] \
-                     <sky | waiting | reports | errors | budget [--refresh] | loadout | settings | \
+                     <sky | waiting [list] | reports | errors | budget [--refresh] | loadout | settings | \
                      ask \"<text>\" [--dry-run] [--thread <id>] | \
                      ask_as_job <kind> \"<text>\" [--unmet <need>[,<need>]] [--thread <id>] | \
                      rate <thread> <turn> <up|down> | \
@@ -602,7 +603,7 @@ pub fn run_with(
     }
     if matches!(
         command,
-        Some("sky" | "waiting" | "reports" | "errors" | "budget" | "loadout" | "settings")
+        Some("sky" | "reports" | "errors" | "budget" | "loadout" | "settings")
     ) {
         if let Some(code) = no_more_words(&args) {
             return code;
@@ -652,7 +653,7 @@ pub fn run_with(
                 ExitCode::from(2)
             }
         },
-        Some("waiting") => waiting(args.json),
+        Some("waiting") => waiting_command(&args),
         Some("reports") => reports(args.json, &filter),
         Some("errors") => errors_command(args.json),
         Some("spec") => spec_command(&args),
@@ -1795,6 +1796,50 @@ fn waiting(json: bool) -> ExitCode {
         return print_json("waiting", serde_json::to_string_pretty(&items));
     }
     emit(&waiting_text(&items))
+}
+
+/// `switchboard waiting` or `waiting list`. `list` is the open items the runner's owner steps
+/// raised (runner-waiting), oldest first: one line each (text) or the items as a JSON array.
+fn waiting_command(args: &super::Args) -> ExitCode {
+    match args.command.get(1..) {
+        None | Some([]) => waiting(args.json),
+        Some([verb]) if verb == "list" => runner_waiting_list(args.json),
+        Some(_) => no_more_words(args).unwrap_or(ExitCode::from(2)),
+    }
+}
+
+fn runner_waiting_list(json: bool) -> ExitCode {
+    let items = match data_or_fail().and_then(|data| {
+        RunnerItems::new(&data)
+            .list()
+            .map_err(|e| fail(1, format!("switchboard waiting list: {e}")))
+    }) {
+        Ok(items) => items,
+        Err(fail) => return exit_with(fail),
+    };
+    if json {
+        return print_json("waiting list", serde_json::to_string_pretty(&items));
+    }
+    emit(&runner_waiting_text(&items))
+}
+
+fn runner_waiting_text(items: &[WaitingItem]) -> String {
+    if items.is_empty() {
+        return format!("{NOTHING_WAITING}\n");
+    }
+    items
+        .iter()
+        .map(|item| {
+            format!(
+                "{} {} {}: {} [{}]\n",
+                item.id,
+                item.unit,
+                item.step,
+                item.needs,
+                item.choices.join(" | ")
+            )
+        })
+        .collect()
 }
 
 /// MCP-1: the items `waiting` prints, newest first.
