@@ -6,7 +6,7 @@
 use crate::fleet::FleetBridge;
 use crate::github::queue::{self, Create, QueueStatus, Queued};
 use crate::github::transport::{GitHubTransport, HttpTransport};
-use crate::lock::FileLock;
+use crate::lock::{self, FileLock};
 use crate::renumber::{renumber_for, Now, Refs};
 use crate::rules::{self, Caller, GuardedAction, Verdict};
 use crate::settings::Settings;
@@ -99,7 +99,7 @@ pub fn write_json(
     }
     for (name, _) in &files {
         let tmp = out_dir.join(format!("{name}.new"));
-        std::fs::rename(&tmp, out_dir.join(name)).map_err(|e| io_error(&tmp, e))?;
+        lock::rename_retrying(&tmp, &out_dir.join(name)).map_err(|e| io_error(&tmp, e))?;
     }
     Ok(manifest)
 }
@@ -241,7 +241,7 @@ pub fn write_release_list(
         let _ = std::fs::remove_file(&tmp);
         return Err(io_error(&tmp, e));
     }
-    if let Err(e) = std::fs::rename(&tmp, out_dir.join("releases.json")) {
+    if let Err(e) = lock::rename_retrying(&tmp, &out_dir.join("releases.json")) {
         let _ = std::fs::remove_file(&tmp);
         return Err(io_error(&tmp, e));
     }
@@ -353,7 +353,7 @@ fn fetch_into(
                     )));
                 }
             }
-            std::fs::rename(tmp.path(), &path).map_err(|e| io_error(&path, e))?;
+            lock::rename_retrying(tmp.path(), &path).map_err(|e| io_error(&path, e))?;
             tmp.keep();
             count += 1;
         }
@@ -376,7 +376,7 @@ pub fn fetch_release_files(
         if live.exists() {
             std::fs::remove_dir_all(&live).map_err(|e| io_error(&live, e))?;
         }
-        std::fs::rename(&staging, &live).map_err(|e| io_error(&staging, e))?;
+        lock::rename_retrying(&staging, &live).map_err(|e| io_error(&staging, e))?;
         Ok(count)
     });
     if result.is_err() {
@@ -408,7 +408,8 @@ fn io_error(path: &Path, e: std::io::Error) -> CoreError {
 /// BAK-1: bundle every ref of the mirror; verified; returns the ref count.
 ///
 /// Runs `git bundle create <out_dir>/repo.bundle.new --all` in the mirror clone, then
-/// `git bundle verify` on it, then renames it over `repo.bundle`. `out_dir` is made if missing.
+/// `git bundle verify` on it, then renames it over `repo.bundle` through `lock::rename_retrying`.
+/// `out_dir` is made if missing.
 /// A mirror with no refs, a failed create or a failed verify is an error; the half-written
 /// `.new` file is removed and any older `repo.bundle` is left as it was.
 pub fn bundle(mirror: &Path, out_dir: &Path) -> Result<u64, CoreError> {
@@ -433,7 +434,7 @@ pub fn bundle(mirror: &Path, out_dir: &Path) -> Result<u64, CoreError> {
         }
     };
     let file = out_dir.join("repo.bundle");
-    if let Err(e) = std::fs::rename(&tmp, &file) {
+    if let Err(e) = lock::rename_retrying(&tmp, &file) {
         let _ = std::fs::remove_file(&tmp);
         return Err(io_error(&tmp, e));
     }
@@ -496,7 +497,7 @@ pub fn copy_wiki(
     if copy.exists() {
         std::fs::remove_dir_all(&copy).map_err(|e| io_error(&copy, e))?;
     }
-    std::fs::rename(&tmp, &copy).map_err(|e| io_error(&tmp, e))?;
+    lock::rename_retrying(&tmp, &copy).map_err(|e| io_error(&tmp, e))?;
     manifest.wiki = true;
     Ok(())
 }
@@ -1057,14 +1058,14 @@ fn swap_in_steps(
 ) -> Result<(), CoreError> {
     let had_old = folder.exists();
     if had_old {
-        if let Err(e) = std::fs::rename(folder, aside) {
+        if let Err(e) = lock::rename_retrying(folder, aside) {
             let _ = std::fs::remove_dir_all(staging);
             return Err(io_error(folder, e));
         }
         after(SwapStep::OldAside);
     }
-    if let Err(e) = std::fs::rename(staging, folder) {
-        let put_back = had_old && std::fs::rename(aside, folder).is_ok();
+    if let Err(e) = lock::rename_retrying(staging, folder) {
+        let put_back = had_old && lock::rename_retrying(aside, folder).is_ok();
         let _ = std::fs::remove_dir_all(staging);
         if had_old && !put_back && folder.join("manifest.json").exists() {
             let _ = std::fs::remove_dir_all(aside);
@@ -1107,7 +1108,7 @@ fn settle(parent: &Path, name: &str) -> Result<(), CoreError> {
     let folder = parent.join(name);
     if !folder.exists() {
         if let Some((_, newest)) = asides.pop() {
-            std::fs::rename(&newest, &folder).map_err(|e| io_error(&newest, e))?;
+            lock::rename_retrying(&newest, &folder).map_err(|e| io_error(&newest, e))?;
         }
     }
     for (_, aside) in asides {
@@ -1547,12 +1548,7 @@ impl Marks {
         let mut body = serde_json::to_string_pretty(all)
             .map_err(|e| CoreError::Parse(format!("{}: {e}", self.path.display())))?;
         body.push('\n');
-        let tmp = crate::lock::temp_path(&self.path, ".tmp");
-        std::fs::write(&tmp, body).map_err(io)?;
-        std::fs::rename(&tmp, &self.path).map_err(|e| {
-            let _ = std::fs::remove_file(&tmp);
-            io(e)
-        })
+        lock::write_whole(&self.path, body.as_bytes())
     }
 
     /// Reads the record, lets `change` change it and writes it back, holding the record's lock

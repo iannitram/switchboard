@@ -3,6 +3,7 @@
 Newest first. One line per change of stage, release or decision that the next session needs.
 
 
+- 2026-11-12 Backup renames (#447): restore marks use `lock::write_whole`; `releases.json`, the bundle, staged publications, folder moves and the aside swap share `lock::rename_retrying` and its bounded Windows retry, with the swap order and failure cleanup unchanged.
 - 2026-11-11 Fleet-state write research (#401): recommend checking the base tree and publishing with an explicit expected-SHA lease; compare Git push, Contents API and Git Data API races in research/fleet-state-write.md; no code change.
 - 2026-11-11 Lock owner test bound (#448): `a_lock_left_by_a_process_that_died_is_taken_over_at_once` keeps the 5 s take timeout and asserts a dead holder's lock is taken over in under 4 s (a live holder runs the whole timeout out), printing the measured time and round on failure; test only, no product change.
 - 2026-11-11 Whole-file writes (#447): settings, budget config, front-door threads, fleet error trim and autopilot loops replace their file through `lock::write_whole`, so a brief Windows sharing violation is retried instead of failing; backup.rs moves are left for a follow-up.

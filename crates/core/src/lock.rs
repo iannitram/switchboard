@@ -62,11 +62,21 @@ pub fn write_whole(target: &Path, text: &[u8]) -> Result<(), CoreError> {
         let _ = std::fs::remove_file(&tmp);
         return Err(io(e));
     }
+    if let Err(e) = rename_retrying(&tmp, target) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(io(e));
+    }
+    Ok(())
+}
+
+/// Rename a file or folder (#447). On Windows, retry a brief access refusal up to 100
+/// times, 10 ms apart; elsewhere this is a plain rename. The caller handles any cleanup.
+pub fn rename_retrying(from: &Path, to: &Path) -> std::io::Result<()> {
     let mut tries = 0;
     loop {
-        match std::fs::rename(&tmp, target) {
+        match std::fs::rename(from, to) {
             Ok(()) => return Ok(()),
-            // On Windows a file another rename is replacing refuses access for a moment.
+            // On Windows a file being replaced or held open refuses access for a moment.
             Err(e)
                 if cfg!(windows)
                     && e.kind() == std::io::ErrorKind::PermissionDenied
@@ -75,10 +85,7 @@ pub fn write_whole(target: &Path, text: &[u8]) -> Result<(), CoreError> {
                 tries += 1;
                 std::thread::sleep(POLL);
             }
-            Err(e) => {
-                let _ = std::fs::remove_file(&tmp);
-                return Err(io(e));
-            }
+            Err(e) => return Err(e),
         }
     }
 }
@@ -584,6 +591,54 @@ fn take_over(path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rename_retrying_moves_a_folder() {
+        let dir = std::env::temp_dir().join(format!("sb-447-rename-{}", run_tag()));
+        let from = dir.join("staging");
+        let to = dir.join("live");
+        std::fs::create_dir_all(from.join("nested")).unwrap();
+        std::fs::write(from.join("nested/file"), b"whole").unwrap();
+        rename_retrying(&from, &to).unwrap();
+        assert!(!from.exists());
+        assert_eq!(std::fs::read(to.join("nested/file")).unwrap(), b"whole");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rename_retrying_waits_for_a_folder_file_handle_to_close() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let dir = std::env::temp_dir().join(format!("sb-447-held-{}", run_tag()));
+        let from = dir.join("staging");
+        let to = dir.join("live");
+        std::fs::create_dir_all(&from).unwrap();
+        let path = from.join("file");
+        std::fs::write(&path, b"whole").unwrap();
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&path)
+            .unwrap();
+        // Prove the handle blocks the rename before starting its release countdown.
+        assert_eq!(
+            std::fs::rename(&from, &to).unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            drop(held);
+        });
+        let started = Instant::now();
+        let renamed = rename_retrying(&from, &to);
+        release.join().unwrap();
+        renamed.unwrap();
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert!(!from.exists());
+        assert_eq!(std::fs::read(to.join("file")).unwrap(), b"whole");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     /// A lock file read while its holder writes it may end mid-line; a cut-short process id
     /// would name another process, so only whole lines count.
