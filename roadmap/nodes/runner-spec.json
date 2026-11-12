@@ -1,0 +1,33 @@
+{
+  "id": "runner-spec",
+  "what": "Load a workflow spec JSON (specs/*.json) into typed records, states, steps, scorers and invariants, and expose `switchboard spec validate <file> --json`.",
+  "expectations": [
+    "A spec with a missing step key, an unknown state id or an unknown actor is refused with the step id and key named.",
+    "specs/roadmap-run.json and specs/bug-loop.json both validate.",
+    "The command prints JSON and exits 0; an invalid spec exits non-zero with .errors listed."
+  ],
+  "files_allowed": [
+    "crates/core/src/runner/mod.rs",
+    "crates/core/src/runner/spec.rs",
+    "crates/core/tests/runner_spec.rs"
+  ],
+  "test_files": [
+    "crates/core/tests/runner_spec.rs"
+  ],
+  "verify": [
+    {
+      "name": "tests",
+      "cmd": "cargo test -p switchboard-core --test runner_spec",
+      "expect": "fail-before"
+    },
+    {
+      "name": "lint",
+      "cmd": "cargo clippy --all-targets -- -D warnings",
+      "expect": "pass"
+    }
+  ],
+  "code_map_entries": [
+    "crates/core/src/runner/mod.rs",
+    "crates/core/src/runner/spec.rs"
+  ]
+}

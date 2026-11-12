@@ -5,6 +5,7 @@ import { PromptComposer } from "../brocrew/PromptComposer";
 import type { ResolveMessageLink } from "../brocrew/message-links";
 import { UserMessage } from "../brocrew/UserMessage";
 import { AssistantMessage } from "../brocrew/AssistantMessage";
+import { DEV_CHAT_TURNS } from "../dev-fixtures";
 import { call, type CoreError, type CoreResult } from "../core";
 
 // The Chat view (feature:frontdoor, SPEC.md). FD-1: the composer sends a message to the core's
@@ -195,6 +196,11 @@ export function moveLine(route: ChatRoute): string | null {
   return `${route.moved_from.replace(" ", "/")} → ${to}: ${route.moved_why ?? "not recorded"}`;
 }
 
+// DEV only: VITE_FIXTURE=1 starts the thread with sample turns (see dev-fixtures.ts).
+function devTurns(): ChatTurn[] {
+  return import.meta.env.DEV && import.meta.env.MODE === "development" && import.meta.env.VITE_FIXTURE ? DEV_CHAT_TURNS : [];
+}
+
 export function Chat({
   handoff,
   held,
@@ -215,11 +221,24 @@ export function Chat({
   const [route, setRoute] = useState<ChatRoute | null>(null);
   // FD-8: the handoff the last route made, with the message that made it. The `handoff` prop wins.
   const [routed, setRouted] = useState<{ reason: string; prompt: string; label?: string } | null>(null);
-  const [turns, setTurns] = useState<ChatTurn[]>([]);
+  const [turns, setTurns] = useState<ChatTurn[]>(devTurns);
   const [errors, setErrors] = useState<CoreError[]>([]);
   // One rating per turn: the last press. Keyed by the turn's index in the thread.
   const [ratings, setRatings] = useState<Record<number, "up" | "down">>({});
   const inFlight = useRef(false);
+  const scroller = useRef<HTMLDivElement>(null);
+
+  // The newest turn stays in view.
+  useEffect(() => {
+    const el = scroller.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+    const frame = requestAnimationFrame(() => {
+      el.scrollTop = el.scrollHeight;
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [turns]);
+
   // The thread the answers were stored in; sent back so the next message continues it.
   const [threadId, setThreadId] = useState<string | undefined>(undefined);
 
@@ -322,7 +341,8 @@ export function Chat({
   };
 
   return (
-    <div>
+    <div className="chat">
+      <div className="chat-scroll" ref={scroller}>
       <ErrorBanner errors={errors} />
       {handoff || routed || held ? (
         <section aria-label="Chat">
@@ -375,13 +395,16 @@ export function Chat({
           )}
         </section>
       )}
-      <PromptComposer value={draft} onChange={setDraft} onSend={onSend} busy={busy} />
-      {route && (
-        <p>{`Picked by: ${route.step}${route.kind ? ` (${route.kind})` : ""}`}</p>
-      )}
-      {route?.queued && <p role="status">{`Queued: ${route.queued}. The ask is kept in this chat.`}</p>}
-      {route?.fallback && <p role="status" data-part="fallback">{`Qwen answered: ${route.fallback}.`}</p>}
-      {route && moveLine(route) && <p data-part="move">{`Moved: ${moveLine(route)}`}</p>}
+      </div>
+      <div className="chat-dock">
+        <PromptComposer value={draft} onChange={setDraft} onSend={onSend} busy={busy} />
+        {route && (
+          <p>{`Picked by: ${route.step}${route.kind ? ` (${route.kind})` : ""}`}</p>
+        )}
+        {route?.queued && <p role="status">{`Queued: ${route.queued}. The ask is kept in this chat.`}</p>}
+        {route?.fallback && <p role="status" data-part="fallback">{`Qwen answered: ${route.fallback}.`}</p>}
+        {route && moveLine(route) && <p data-part="move">{`Moved: ${moveLine(route)}`}</p>}
+      </div>
     </div>
   );
 }

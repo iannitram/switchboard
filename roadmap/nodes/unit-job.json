@@ -1,0 +1,31 @@
+{
+  "id": "unit-job",
+  "what": "`switchboard unit job` writes the fleet job JSON and brief for a claimed unit from its node spec file: files_allowed, the locked test files, the verify commands and the pasted code map lines.",
+  "expectations": [
+    "The job validates against the dev repo's job check.",
+    "The brief contains the node's what, expectations and code map lines and nothing from outside the node file.",
+    "A unit with no claim is refused."
+  ],
+  "files_allowed": [
+    "crates/core/src/unit/job.rs",
+    "crates/core/tests/unit_job.rs"
+  ],
+  "test_files": [
+    "crates/core/tests/unit_job.rs"
+  ],
+  "verify": [
+    {
+      "name": "tests",
+      "cmd": "cargo test -p switchboard-core --test unit_job",
+      "expect": "fail-before"
+    },
+    {
+      "name": "lint",
+      "cmd": "cargo clippy --all-targets -- -D warnings",
+      "expect": "pass"
+    }
+  ],
+  "code_map_entries": [
+    "crates/core/src/unit/job.rs"
+  ]
+}

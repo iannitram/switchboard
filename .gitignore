@@ -4,4 +4,5 @@
 /app/src-tauri/gen/
 /app/src-tauri/target/
 *.AppImage
+/app/.env.*.local
 __pycache__/

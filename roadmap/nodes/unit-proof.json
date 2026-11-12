@@ -1,0 +1,33 @@
+{
+  "id": "unit-proof",
+  "what": "`switchboard unit red-check` requires a test command to fail on a branch; `switchboard unit codemap-check` compares the files a change touched with the code map's modules: lines for that node and requires status and date to be updated in the same change.",
+  "expectations": [
+    "A test that passes, or does not run, fails the red check.",
+    "A change that adds a file under a module with no matching modules: line fails the code map check.",
+    "A change whose node's entries moved from planned to present passes."
+  ],
+  "files_allowed": [
+    "crates/core/src/unit/proof.rs",
+    "crates/core/src/sky/codemap.rs",
+    "crates/core/tests/unit_proof.rs"
+  ],
+  "test_files": [
+    "crates/core/tests/unit_proof.rs"
+  ],
+  "verify": [
+    {
+      "name": "tests",
+      "cmd": "cargo test -p switchboard-core --test unit_proof",
+      "expect": "fail-before"
+    },
+    {
+      "name": "lint",
+      "cmd": "cargo clippy --all-targets -- -D warnings",
+      "expect": "pass"
+    }
+  ],
+  "code_map_entries": [
+    "crates/core/src/unit/proof.rs",
+    "crates/core/src/sky/codemap.rs"
+  ]
+}

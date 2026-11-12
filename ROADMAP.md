@@ -25,6 +25,7 @@ features:
 - fleet-rust: Porting fleet to Rust (release: after-1.0)
 - dashboard: Retiring the fleet dashboard, only with my yes again (release: after-1.0)
 - plugins: Plugins: add views, commands and MCP tools to Switchboard without changing the core (release: after-1.0)
+- runner: The step runner: Switchboard runs a project's roadmap and its bug fixes from spec files (release: after-1.0)
 - gamification: A gamification plugin (release: after-2.0)
 
 ## The features block
@@ -69,6 +70,36 @@ In work (open): #384 the front door from the CLI and MCP; #385 the autopilot fro
 **Rulings, 2026-11-11.** #377: a queued ask stays manual and is never sent again on its own; an ask whose picked pool is braked or over budget falls back to local Qwen when the Qwen lane is up, and is queued only when Qwen is down too. #378: build all four leftovers (FD-5's work-tree line, "Send as job" with the packet, FD-7's open questions in the summary, the face's `chat_implicit` callers). #347: build all four leftovers (turning a request down, CORE-3 worded "archive", a restore to a new private repo from the face, MCP tools that file a delete or restore request while the typed confirm stays with me). #365: a label already in the live repo keeps its live colour and is named in the report; renumbering also rewrites full links and `owner/name#N`, for the restored repo only. Accepted as built: a cap of at most 100000 dollars and at least one cent; lock waits of 10 s for a pool edit and 2 s for saving an error, stale after 10 min; the MCP `errors` tool for the satellite role only.
 
 After 1.0 the dark stars above get their own Specs and issues (the after-2.0 stars wait for 2.0); `platforms` turns the Mac and Windows seams on.
+
+## The roadmap graph
+
+Draft format, first used by `runner`. One line per node: `- <id>: <title> (feature: <id>, type: build|research|prototype|grilling|task, size: easy|medium|hard, kind: <k>, after: <ids separated by spaces, or none>)`. A node is one unit of work; `after` lists the nodes that must be done first. Each node's detail is `roadmap/nodes/<id>.json`. An issue is made from a node, never the other way round. `unspecified:` holds what is known to be missing: `- <id>: <gist> (waits on: <ids>)`. The workflows that run this graph are in `specs/`; the `roadmap-graph` node settles the format.
+
+nodes:
+- runner-spec: Spec files load and validate (feature: runner, type: build, size: medium, kind: data-shape, after: none)
+- runner-engine: The step engine: run one step and move the state (feature: runner, type: build, size: hard, kind: state, after: runner-spec)
+- runner-waiting: Owner steps raise one Waiting on you item (feature: runner, type: build, size: medium, kind: state, after: runner-engine)
+- roadmap-graph: Read the roadmap graph and lint it (feature: runner, type: build, size: medium, kind: data-shape, after: runner-spec)
+- roadmap-units: Turn nodes into issues and link them in order (feature: runner, type: build, size: medium, kind: wiring, after: roadmap-graph)
+- roadmap-drift: Compute drift between the roadmap and the issues (feature: runner, type: build, size: easy, kind: pure-fn, after: roadmap-graph)
+- fleet-state-write: Can Switchboard write fleet-state files safely? (feature: runner, type: research, size: easy, after: none)
+- unit-frontier: List ready work and choose the next unit (feature: runner, type: build, size: medium, kind: pure-fn, after: roadmap-units)
+- unit-claim: Claim a unit with a lock two workers cannot share (feature: runner, type: build, size: hard, kind: state, after: unit-frontier fleet-state-write)
+- unit-job: Write the build job from the node file (feature: runner, type: build, size: medium, kind: data-shape, after: unit-claim)
+- unit-proof: Prove a test is red and the code map matches the change (feature: runner, type: build, size: medium, kind: pure-fn, after: roadmap-graph)
+- unit-land: Open the pull request and record the result (feature: runner, type: build, size: medium, kind: wiring, after: unit-job unit-proof)
+- roadmap-run-live: roadmap-run builds one project end to end (feature: runner, type: build, size: hard, kind: wiring, after: runner-waiting roadmap-drift unit-land)
+- bug-intake: Collect a bug report into one tracked bug (feature: runner, type: build, size: hard, kind: data-shape, after: runner-engine fleet-state-write)
+- bug-fix: Reproduce, fix and record one bug (feature: runner, type: build, size: hard, kind: state, after: bug-intake unit-claim unit-proof)
+- bug-sweep: Check sister apps for the same bug (feature: runner, type: build, size: medium, kind: wiring, after: bug-fix)
+- bug-loop-live: bug-loop fixes one reported bug end to end (feature: runner, type: build, size: hard, kind: wiring, after: runner-waiting bug-sweep unit-land)
+- run-scoring: Score a sample of runs and propose changes to the specs (feature: runner, type: build, size: hard, kind: state, after: roadmap-run-live)
+- sky-roadmap-graph: The Roadmap lens draws the node graph (feature: runner, type: build, size: medium, kind: ui, after: roadmap-graph)
+
+unspecified:
+- approval-lines: Who writes the dated approval line into SPEC.md and ROADMAP.md after you answer (waits on: runner-waiting)
+- picked-lane: Whether `fleet run` honours a lane `fleet pick` already chose, or picks again (waits on: unit-job)
+- fleet-pick-exits: `fleet pick` answers with exits 3, 4 and 5; the runner reads only 0 and 75 today (waits on: runner-engine)
 
 ## Code map and skeleton
 
