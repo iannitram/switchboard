@@ -98,8 +98,8 @@ const RESTORE: &str = "I was asked from the CLI to restore over o/switchboard";
 #[test]
 fn drop_removes_the_request_the_command_of_that_name_left() {
     let s = setup("both");
-    run(&["delete", "switchboard"], &s);
-    run(&["restore", "switchboard"], &s);
+    let _ = run(&["delete", "switchboard"], &s);
+    let _ = run(&["restore", "switchboard"], &s);
     assert_eq!(waiting(&s), [ARCHIVE, RESTORE]);
 
     let (code, err) = run(&["drop", "archive", "switchboard"], &s);
@@ -115,7 +115,7 @@ fn drop_removes_the_request_the_command_of_that_name_left() {
 #[test]
 fn dropping_what_is_not_waiting_is_refused_and_changes_nothing() {
     let s = setup("none");
-    run(&["restore", "switchboard"], &s);
+    let _ = run(&["restore", "switchboard"], &s);
     let before = std::fs::read_to_string(LocalItems::new(&s.data).path()).unwrap();
     let (code, err) = run(&["drop", "archive", "switchboard"], &s);
     assert_eq!(code, ExitCode::from(1));
@@ -142,7 +142,7 @@ fn dropping_what_is_not_waiting_is_refused_and_changes_nothing() {
 #[test]
 fn drop_inside_a_job_worktree_is_refused_whatever_the_role() {
     let s = setup("worktree");
-    run(&["delete", "switchboard"], &s);
+    let _ = run(&["delete", "switchboard"], &s);
     let (code, err) = run_in(
         &[
             "--role",
@@ -165,7 +165,7 @@ fn drop_inside_a_job_worktree_is_refused_whatever_the_role() {
 #[test]
 fn drop_without_a_kind_and_one_repo_is_a_usage_error() {
     let s = setup("usage");
-    run(&["delete", "switchboard"], &s);
+    let _ = run(&["delete", "switchboard"], &s);
     for argv in [
         &["drop"][..],
         &["drop", "switchboard"][..],
@@ -188,13 +188,13 @@ fn drop_without_a_kind_and_one_repo_is_a_usage_error() {
 #[test]
 fn asking_again_leaves_a_held_restore_as_it_is() {
     let s = setup("held-again");
-    run(&["restore", "switchboard"], &s);
+    let _ = run(&["restore", "switchboard"], &s);
     let local = LocalItems::new(&s.data);
     let mut held = local.load().unwrap().remove(0);
     held.action = switchboard_core::confirm::HELD_ACTION.to_string();
     held.since = NOW - 60;
     local.add(held.clone()).unwrap();
-    run(&["restore", "o/switchboard"], &s);
+    let _ = run(&["restore", "o/switchboard"], &s);
     assert_eq!(local.load().unwrap(), [held]);
 }
 
@@ -215,11 +215,11 @@ fn a_restore_held_from_mcp_gets_no_second_request_from_the_cli() {
     held.action = switchboard_core::confirm::HELD_ACTION.to_string();
     local.add(held.clone()).unwrap();
     for repo in ["switchboard", "o/switchboard"] {
-        run(&["restore", repo], &s);
+        let _ = run(&["restore", repo], &s);
         assert_eq!(local.load().unwrap(), [held.clone()], "{repo}");
     }
     // An archive request for the same repo is another action and is filed.
-    run(&["delete", "switchboard"], &s);
+    let _ = run(&["delete", "switchboard"], &s);
     assert_eq!(waiting(&s).len(), 2);
     assert_eq!(waiting(&s)[1], ARCHIVE);
 }
@@ -229,16 +229,16 @@ fn a_restore_held_from_mcp_gets_no_second_request_from_the_cli() {
 #[test]
 fn delete_is_a_silent_alias_of_archive() {
     let s = setup("alias");
-    run(&["delete", "switchboard"], &s);
+    let _ = run(&["delete", "switchboard"], &s);
     assert_eq!(waiting(&s), [ARCHIVE]);
     // Asking by either word keeps one item.
-    run(&["archive", "o/switchboard"], &s);
+    let _ = run(&["archive", "o/switchboard"], &s);
     assert_eq!(waiting(&s), [ARCHIVE]);
     let (code, err) = run(&["drop", "delete", "switchboard"], &s);
     assert_eq!((code, err.as_str()), (ExitCode::SUCCESS, ""));
     assert!(waiting(&s).is_empty());
 
-    run(&["archive", "switchboard"], &s);
+    let _ = run(&["archive", "switchboard"], &s);
     let (code, _) = run(&["drop", "archive", "o/switchboard"], &s);
     assert_eq!(code, ExitCode::SUCCESS);
     assert!(waiting(&s).is_empty());
@@ -264,7 +264,7 @@ fn an_old_to_delete_request_and_a_new_to_archive_request_are_the_same() {
         .add(guarded_item(&action, old, NOW))
         .unwrap();
 
-    run(&["archive", "switchboard"], &s);
+    let _ = run(&["archive", "switchboard"], &s);
     assert_eq!(waiting(&s), [old], "no second item for the same request");
 
     let (code, err) = run(&["drop", "archive", "switchboard"], &s);

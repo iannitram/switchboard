@@ -254,7 +254,7 @@ fn merge_never_asks_whether_the_repo_is_known() {
         unknown: true,
         ..Default::default()
     };
-    run(
+    let _ = run(
         &["--role", "project-manager", "merge", "switchboard#7"],
         &folder("merge-known", false),
         &fake,
@@ -282,8 +282,8 @@ fn the_app_reads_the_delete_and_restore_requests_back_from_the_cli_items() {
     use switchboard_core::rules::GuardedAction;
     let fake = Fake::default();
     let cwd = folder("confirm-roundtrip", false);
-    run(&["delete", "owner/alpha"], &cwd, &fake);
-    run(&["restore", "owner/alpha"], &cwd, &fake);
+    let _ = run(&["delete", "owner/alpha"], &cwd, &fake);
+    let _ = run(&["restore", "owner/alpha"], &cwd, &fake);
     let repo = "owner/alpha".to_string();
     let waiting = fake.waiting.borrow();
     assert_eq!(
