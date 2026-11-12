@@ -1,6 +1,6 @@
 # Roadmap: Switchboard
 
-Updated: 2026-11-11
+Updated: 2026-11-12
 
 features:
 - core: The core and the fleet bridge, with the abilities index (release: 1.0)
@@ -73,7 +73,7 @@ After 1.0 the dark stars above get their own Specs and issues (the after-2.0 sta
 
 ## The roadmap graph
 
-Draft format, first used by `runner`. One line per node: `- <id>: <title> (feature: <id>, type: build|research|prototype|grilling|task, size: easy|medium|hard, kind: <k>, after: <ids separated by spaces, or none>)`. A node is one unit of work; `after` lists the nodes that must be done first. Each node's detail is `roadmap/nodes/<id>.json`. An issue is made from a node, never the other way round. `unspecified:` holds what is known to be missing: `- <id>: <gist> (waits on: <ids>)`. The workflows that run this graph are in `specs/`; the `roadmap-graph` node settles the format.
+The format, settled by `roadmap-graph`. One line per node: `- <id>: <title> (feature: <id>, type: build|research|prototype|grilling|task, size: easy|medium|hard, kind: <k>, after: <ids separated by spaces, or none>)`; `kind` is optional. A node is one unit of work; `after` lists the nodes that must be done first. Each node's detail is `roadmap/nodes/<id>.json`. An issue is made from a node, never the other way round. `unspecified:` holds what is known to be missing: `- <id>: <gist> (waits on: <ids>)`. `switchboard roadmap lint <clone>` checks the graph and names each problem by id: ids are unique and lowercase, every `after` and `waits on` id is a node, no dependency cycle, every node has its spec file, a build node has `verify`, `files_allowed`, `test_files` and `code_map_entries`, and each node's feature is in the features block. A feature with no node is a warning. The workflows that run this graph are in `specs/`.
 
 nodes:
 - runner-spec: Spec files load and validate (feature: runner, type: build, size: medium, kind: data-shape, after: none)

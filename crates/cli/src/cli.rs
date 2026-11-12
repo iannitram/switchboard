@@ -9,7 +9,8 @@
 //! `rules::guard_pool_edit` and `budget::save_pool_edit`, as MCP's tools do (#357, #374).
 //! `budget --refresh` re-reads the pools first (#374); `settings` prints the settings file (#373).
 //! The front door (#384): `ask`, `ask_as_job` and `rate`, in `cli_frontdoor.rs`.
-//! Workflow documents: `spec validate <file>` checks the core's typed spec without running it.
+//! Workflow documents: `spec validate <file>` checks the core's typed spec without running it;
+//! `roadmap lint <clone>` checks the roadmap graph (#398) and names each problem by id.
 //!
 //! The raw `fleet` CLI stays the documented escape hatch: Switchboard keeps no state that only
 //! it can read.
@@ -81,7 +82,7 @@ pub const USAGE: &str = "usage: switchboard [--help | --version] [--json] [--rol
                      drop <archive | restore> <repo> | merge <repo>#<pr> | set_pool_cap <pool> <cap> | \
                      pool_edit <pool> [--plan <p>] [--cap <n>] [--reset <day time>] [--cost <n>] | \
                      autopilot <roadmap | review | merge | weekly | satellite> [--dry-run] | \
-                     autopilot status | spec validate <file> | mcp>";
+                     autopilot status | spec validate <file> | roadmap lint <clone> | mcp>";
 
 /// The writes a CLI command can reach (CLI-3). The real ones are `CliWrites`; the tests pass
 /// fakes.
@@ -655,6 +656,7 @@ pub fn run_with(
         Some("reports") => reports(args.json, &filter),
         Some("errors") => errors_command(args.json),
         Some("spec") => spec_command(&args),
+        Some("roadmap") => roadmap_command(&args),
         Some("loadout") => loadout_command(
             &it::read_this_machine(&it::SystemProbeRunner, SystemClock.now()),
             args.json,
@@ -1678,6 +1680,79 @@ fn spec_command(args: &super::Args) -> ExitCode {
     } else {
         code
     }
+}
+
+/// `roadmap lint <clone>`: the roadmap graph's checks over a clone (#398). Exit 1 when a check
+/// fails; a warning is printed and does not fail the lint.
+fn roadmap_command(args: &super::Args) -> ExitCode {
+    let clone = match args.command.get(1..) {
+        Some([verb, clone]) if verb == "lint" => clone,
+        _ => {
+            eprintln!("switchboard: roadmap needs lint <clone>");
+            eprintln!("{USAGE}");
+            return ExitCode::from(2);
+        }
+    };
+    let report = match switchboard_core::roadmap::lint(Path::new(clone)) {
+        Ok(report) => report,
+        Err(error) => {
+            eprintln!(
+                "switchboard roadmap lint: {}",
+                terminal_safe(&error.to_string())
+            );
+            return ExitCode::from(1);
+        }
+    };
+    let code = if args.json {
+        print_json(
+            "roadmap lint",
+            serde_json::to_string_pretty(&json!({
+                "ok": report.ok(),
+                "nodes": report.nodes,
+                "unspecified": report.unspecified,
+                "errors": findings_json(&report.errors),
+                "warnings": findings_json(&report.warnings),
+            })),
+        )
+    } else {
+        let mut text = format!(
+            "roadmap: {} nodes, {} unspecified\n",
+            report.nodes, report.unspecified
+        );
+        for finding in &report.errors {
+            text.push_str(&format!(
+                "error {} [{}]: {}\n",
+                terminal_safe(&finding.id),
+                finding.check,
+                terminal_safe(&finding.message)
+            ));
+        }
+        for finding in &report.warnings {
+            text.push_str(&format!(
+                "warning {} [{}]: {}\n",
+                terminal_safe(&finding.id),
+                finding.check,
+                terminal_safe(&finding.message)
+            ));
+        }
+        emit(&text)
+    };
+    if report.ok() {
+        code
+    } else {
+        ExitCode::from(1)
+    }
+}
+
+fn findings_json(findings: &[switchboard_core::roadmap::Finding]) -> Value {
+    Value::Array(
+        findings
+            .iter()
+            .map(|finding| {
+                json!({ "check": finding.check, "id": finding.id, "message": finding.message })
+            })
+            .collect(),
+    )
 }
 
 /// One line per fleet error as the app's banner words it, then one per open IT ticket.
