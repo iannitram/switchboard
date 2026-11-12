@@ -164,6 +164,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - REP-3 filter bar (`FilterBar`, `Reports`): present.
 - REP-W command (`state_dir_from`, `read_done_cards`, `assemble`, `load`, `reports`): present.
 - REP follow-up, chat threads in reports (`reports::thread_rows`, read from the thread store in the app data folder; the CLI and MCP pass them too, #348): present. A done card or ledger file that is not UTF-8 is skipped, not fatal (#349).
+- REP unreadable threads (#331): `crates/core/src/reports.rs` `thread_rows_with_warnings` skips unreadable threads and names each id and reason; `ReportsAnswer` carries `reports` and `warnings` through `app/src-tauri/src/commands.rs` to the existing banner in `app/src/views/Reports.tsx`. CLI and MCP keep their list-only answers. Covered by `crates/core/tests/reports_thread_warnings.rs` and `app/src/views/ReportsWarnings.test.tsx`.
 
 ### budget
 `crates/core/src/budget.rs`, `app/src/views/Budget.tsx` · BUD-1 to BUD-4 · planned. Rows from `fleet budget --json`, edits to `config.json` with a ledger row (U5: landed through review), refresh on a timer, Claude's pool as reading plus a labelled estimate from local session logs.

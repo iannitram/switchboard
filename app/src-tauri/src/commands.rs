@@ -11,7 +11,7 @@ use switchboard_core::fleet::{FleetBridge, FleetError, FleetErrorLog};
 use switchboard_core::frontdoor::implicit_log::log_implicit;
 use switchboard_core::it::{self, Loadout, ProbeRunner};
 use switchboard_core::platform::{current_os, loadout_probes, Probe};
-use switchboard_core::reports::{self, thread_rows, Filter, Report, FLEET_STATE_DIR_ENV};
+use switchboard_core::reports::{self, Filter, ReportsAnswer, FLEET_STATE_DIR_ENV};
 use switchboard_core::settings::{self, Settings};
 // The test modules (`confirm_guarded_tests.rs`, `pool_edit_tests.rs`) take it in through `super::*`.
 #[cfg(test)]
@@ -478,7 +478,7 @@ pub fn reports(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     filter: Option<Filter>,
-) -> Result<Vec<Report>, FaceError> {
+) -> Result<ReportsAnswer, FaceError> {
     bridge(&state.settings_path)
         .and_then(|fleet| {
             let env = std::env::var_os(FLEET_STATE_DIR_ENV);
@@ -486,8 +486,9 @@ pub fn reports(
                 .path()
                 .app_data_dir()
                 .map_err(|e| CoreError::Io(format!("app data dir: {e}")))?;
-            let threads = thread_rows(&data);
+            let (threads, warnings) = reports::thread_rows_with_warnings(&data);
             reports::load(&fleet, env.as_deref(), &threads, filter.as_ref())
+                .map(|reports| ReportsAnswer { reports, warnings })
         })
         .map_err(|e| {
             record_fleet_error(&state, &e);

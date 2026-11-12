@@ -27,6 +27,14 @@ export function ReportList({ reports }: { reports: Report[] }) {
 export type Filter = { project: string | null; outcome: string | null; pool: string | null };
 export const NO_FILTER: Filter = { project: null, outcome: null, pool: null };
 
+/** The reports command's answer, including non-fatal thread read warnings. */
+export type ReportsAnswer = { reports: Report[]; warnings: string[] };
+
+// Accept the earlier list-only answer as well (older shells and report fixtures).
+function answer(value: ReportsAnswer | Report[]): ReportsAnswer {
+  return Array.isArray(value) ? { reports: value, warnings: [] } : value;
+}
+
 const FIELDS: { field: keyof Filter; label: string; valueOf: (r: Report) => string | null }[] = [
   { field: "project", label: "Project", valueOf: (r) => r.project },
   { field: "outcome", label: "Outcome", valueOf: (r) => r.outcome },
@@ -66,16 +74,21 @@ export function Reports() {
   const [shown, setShown] = useState<Report[] | null>(null); // null: show all
   const [filter, setFilter] = useState<Filter>(NO_FILTER);
   const [error, setError] = useState<CoreError | null>(null);
+  const [allWarnings, setAllWarnings] = useState<string[]>([]);
+  const [warnings, setWarnings] = useState<string[]>([]);
   const latest = useRef(0);
 
   useEffect(() => {
     let live = true;
-    call<Report[]>("reports").then((res) => {
+    call<ReportsAnswer | Report[]>("reports").then((res) => {
       if (!live) return;
       if ("error" in res) {
         setError(res.error);
       } else {
-        setAll(res.ok);
+        const loaded = answer(res.ok);
+        setAll(loaded.reports);
+        setAllWarnings(loaded.warnings);
+        setWarnings(loaded.warnings);
         setError(null);
       }
     });
@@ -90,14 +103,17 @@ export function Reports() {
     if (next.project === null && next.outcome === null && next.pool === null) {
       setShown(null);
       setError(null);
+      setWarnings(allWarnings);
       return;
     }
-    call<Report[]>("reports", { filter: next }).then((res) => {
+    call<ReportsAnswer | Report[]>("reports", { filter: next }).then((res) => {
       if (request !== latest.current) return; // an answer for an older filter
       if ("error" in res) {
         setError(res.error);
       } else {
-        setShown(res.ok);
+        const loaded = answer(res.ok);
+        setShown(loaded.reports);
+        setWarnings(loaded.warnings);
         setError(null);
       }
     });
@@ -105,12 +121,13 @@ export function Reports() {
 
   return (
     <>
-      {error ? (
+      {error || warnings.length > 0 ? (
         <div role="alert">
-          <p>{error.command} failed</p>
-          {error.lines.map((line, i) => (
+          <p>{error ? `${error.command} failed` : "reports warnings"}</p>
+          {error?.lines.map((line, i) => (
             <p key={i}>{line}</p>
           ))}
+          {warnings.map((line, i) => <p key={`warning-${i}`}>{line}</p>)}
         </div>
       ) : null}
       {all.length > 0 ? <FilterBar reports={all} filter={filter} onChange={choose} /> : null}

@@ -469,13 +469,40 @@ pub fn read_done_cards(state_dir: &Path) -> Result<Vec<Value>, CoreError> {
 /// `ThreadStore::new` takes), in the store's sorted id order. A missing store folder gives none.
 /// A thread that cannot be read is skipped, so the other threads still show.
 pub fn thread_rows(data: &Path) -> Vec<(String, Vec<JobRow>)> {
+    thread_rows_with_warnings(data).0
+}
+
+/// The stored thread rows, paired with warnings naming each skipped thread and its reason.
+/// A missing store is empty; a store that cannot be listed carries its own warning.
+pub fn thread_rows_with_warnings(data: &Path) -> (ThreadRows, Vec<String>) {
     let store = crate::frontdoor::thread::ThreadStore::new(data);
-    store
-        .list()
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|id| store.read(&id).ok().map(|rows| (id, rows)))
-        .collect()
+    let ids = match store.list() {
+        Ok(ids) => ids,
+        Err(e) => {
+            return (
+                Vec::new(),
+                vec![format!("Could not list chat threads: {e}")],
+            )
+        }
+    };
+    let mut threads = Vec::new();
+    let mut warnings = Vec::new();
+    for id in ids {
+        match store.read(&id) {
+            Ok(rows) => threads.push((id, rows)),
+            Err(e) => warnings.push(format!("Skipped unreadable thread {id}: {e}")),
+        }
+    }
+    (threads, warnings)
+}
+
+pub type ThreadRows = Vec<(String, Vec<JobRow>)>;
+
+/// The app's report answer: readable reports plus non-fatal thread-store warnings (#331).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ReportsAnswer {
+    pub reports: Vec<Report>,
+    pub warnings: Vec<String>,
 }
 
 /// The reports for the done cards, then the threads, newest first (the ones without a time

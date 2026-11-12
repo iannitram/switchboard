@@ -3,6 +3,7 @@
 Newest first. One line per change of stage, release or decision that the next session needs.
 
 
+- 2026-11-12 Reports unreadable thread (#331): skipped chat threads carry their id and reason in the report answer and the existing Reports error banner; readable reports still show.
 - 2026-11-12 Backup renames (#447): restore marks use `lock::write_whole`; `releases.json`, the bundle, staged publications, folder moves and the aside swap share `lock::rename_retrying` and its bounded Windows retry, with the swap order and failure cleanup unchanged.
 - 2026-11-11 Fleet-state write research (#401): recommend checking the base tree and publishing with an explicit expected-SHA lease; compare Git push, Contents API and Git Data API races in research/fleet-state-write.md; no code change.
 - 2026-11-11 Lock owner test bound (#448): `a_lock_left_by_a_process_that_died_is_taken_over_at_once` keeps the 5 s take timeout and asserts a dead holder's lock is taken over in under 4 s (a live holder runs the whole timeout out), printing the measured time and round on failure; test only, no product change.
