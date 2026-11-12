@@ -26,6 +26,7 @@ pub mod lock;
 pub mod platform;
 pub mod renumber;
 pub mod reports;
+pub mod roadmap;
 pub mod rules;
 pub mod runner;
 pub mod settings;
