@@ -60,21 +60,24 @@ fn repo_roadmap_parses_nodes_and_unspecified() {
     assert_eq!(first.size, roadmap::graph::Size::Medium);
     assert_eq!(first.node_type, roadmap::graph::NodeType::Build);
     assert!(first.after.is_empty());
-    let fleet = graph.nodes.iter().find(|n| n.id == "fleet-state-write").unwrap();
+    let fleet = graph
+        .nodes
+        .iter()
+        .find(|n| n.id == "fleet-state-write")
+        .unwrap();
     assert_eq!(fleet.node_type, roadmap::graph::NodeType::Research);
     assert_eq!(graph.unspecified.len(), 3);
     assert_eq!(graph.unspecified[0].id, "approval-lines");
-    assert_eq!(graph.unspecified[0].waits_on, vec!["runner-waiting".to_string()]);
+    assert_eq!(
+        graph.unspecified[0].waits_on,
+        vec!["runner-waiting".to_string()]
+    );
 }
 
 #[test]
 fn repo_nodes_block_lints_clean() {
     let report = roadmap::lint(&repo_root()).expect("lint reads the repo");
-    assert!(
-        report.errors.is_empty(),
-        "repo errors: {:?}",
-        report.errors
-    );
+    assert!(report.errors.is_empty(), "repo errors: {:?}", report.errors);
     assert!(report.ok());
 }
 
@@ -88,8 +91,10 @@ fn valid_fixture_lints_clean() {
 
 #[test]
 fn dependency_cycle_is_reported_by_id() {
-    let md = ROADMAP.replace("- a: First (feature: runner, type: build, size: easy, after: none)",
-        "- a: First (feature: runner, type: build, size: easy, after: b)");
+    let md = ROADMAP.replace(
+        "- a: First (feature: runner, type: build, size: easy, after: none)",
+        "- a: First (feature: runner, type: build, size: easy, after: b)",
+    );
     let specs = [("a", build_spec("a")), ("b", build_spec("b"))];
     let report = lint_fixture("cycle", &md, &specs);
     assert!(has(&report.errors, "cycle", "a"), "{:?}", report.errors);
@@ -112,11 +117,17 @@ fn unknown_after_id_is_reported_by_id() {
 
 #[test]
 fn duplicate_id_is_reported_by_id() {
-    let md = ROADMAP.replace("- b: Second (feature: runner, type: build, size: easy, after: a)",
-        "- a: Again (feature: runner, type: build, size: easy, after: none)");
+    let md = ROADMAP.replace(
+        "- b: Second (feature: runner, type: build, size: easy, after: a)",
+        "- a: Again (feature: runner, type: build, size: easy, after: none)",
+    );
     let specs = [("a", build_spec("a")), ("b", build_spec("b"))];
     let report = lint_fixture("duplicate", &md, &specs);
-    assert!(has(&report.errors, "duplicate_id", "a"), "{:?}", report.errors);
+    assert!(
+        has(&report.errors, "duplicate_id", "a"),
+        "{:?}",
+        report.errors
+    );
 }
 
 #[test]
@@ -147,11 +158,17 @@ fn build_node_missing_required_fields_is_reported() {
 
 #[test]
 fn feature_without_node_is_reported_as_a_warning() {
-    let md = ROADMAP.replace("- runner: The runner (release: after-1.0)\n",
-        "- runner: The runner (release: after-1.0)\n- lonely: Nothing yet (release: 1.0)\n");
+    let md = ROADMAP.replace(
+        "- runner: The runner (release: after-1.0)\n",
+        "- runner: The runner (release: after-1.0)\n- lonely: Nothing yet (release: 1.0)\n",
+    );
     let specs = [("a", build_spec("a")), ("b", build_spec("b"))];
     let report = lint_fixture("feature-warning", &md, &specs);
-    assert!(has(&report.warnings, "feature_without_node", "lonely"), "{:?}", report.warnings);
+    assert!(
+        has(&report.warnings, "feature_without_node", "lonely"),
+        "{:?}",
+        report.warnings
+    );
     assert!(report.errors.is_empty(), "{:?}", report.errors);
     assert!(report.ok());
 }
@@ -161,5 +178,9 @@ fn unknown_wait_in_unspecified_is_reported_by_id() {
     let md = ROADMAP.replace("(waits on: a)", "(waits on: ghost)");
     let specs = [("a", build_spec("a")), ("b", build_spec("b"))];
     let report = lint_fixture("unknown-wait", &md, &specs);
-    assert!(has(&report.errors, "unknown_wait", "c"), "{:?}", report.errors);
+    assert!(
+        has(&report.errors, "unknown_wait", "c"),
+        "{:?}",
+        report.errors
+    );
 }
