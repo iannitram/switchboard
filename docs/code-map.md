@@ -139,6 +139,9 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 ### sky-face
 `app/src/views/Sky.tsx` (+ `app/src/sky/`) · SKY-1, SKY-3, SKY-4, SKY-5, SKY-6, SKY-7, SKY-8 · present. SVG: the sky, the zoomed constellation (clusters, stars, blocked-by lines, milestone rings), star states, the drift list, reuse lines, the chain highlight, the star panel. Paints what the core worked out.
 
+### sky-layers
+`app/src/sky/layers.ts` · SKY-3 · present, no caller yet (#392's stage columns and #413's layer columns call it). Pure functions over issue numbers and `Constellation.edges`: dependency layers (cycles share one), the order inside each column (a barycenter pass), and how many open issues wait on each. Ported from obsidian-wayfinder (MIT, #455), its notice in the file.
+
 ### waiting
 `crates/core/src/waiting.rs`, `app/src/views/Waiting.tsx` · WAIT-1, WAIT-2, WAIT-3 · planned. Items from the snapshot, CalDAV (U7), handoffs, guarded actions, IT tickets, refused backups, the stale priority copy and pool edits (U5); merged newest first; carried between reads. `LocalItems` (`<data>/waiting/local.json`): every change (`add`, `add_new`, `remove`, `change`) is one read, change and write under the file's `FileLock` (#431). The item view is ported from BroCrew.
 

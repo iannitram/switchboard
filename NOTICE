@@ -15,6 +15,11 @@ Files lifted from BroCrew, each with its notice and a line saying what was chang
 - app/src/brocrew/UserMessage.tsx
 - app/src/brocrew/WaitingItem.tsx
 
+This product includes software from obsidian-wayfinder (https://github.com/ocuclaw/obsidian-wayfinder),
+copyright 2026 ocuclaw, licensed under the MIT License. The file carries that license's text
+and a line saying what was changed:
+- app/src/sky/layers.ts
+
 This product bundles three.js (https://threejs.org), copyright 2010-2024 three.js authors,
 licensed under the MIT License.
 
