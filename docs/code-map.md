@@ -4,7 +4,7 @@ Updated: 2026-11-12
 
 What each module owns, the Musts it carries (`SPEC.md`), what it talks to, and its status. An issue that fills a module moves its status from **planned** to **present** in the same PR (RUBRIC). Words are the glossary's (`GLOSSARY.md`).
 
-Status today: the core and faces have the present modules listed below; remaining skeleton bodies are `todo!("<Must id>")`. The runner's spec loader, the roadmap graph's lint, and unit-proof's red check and code map check are present; the runner's engine and the other roadmap nodes remain planned.
+Status today: the core and faces have the present modules listed below; remaining skeleton bodies are `todo!("<Must id>")`. The runner's spec loader, the roadmap graph's lint and its drift, and unit-proof's red check and code map check are present; the runner's engine and the other roadmap nodes remain planned.
 
 reuses:
 - brocrew: the chat parts, the Waiting on you item, the work report entry and the fixed-report shape (Apache-2.0; our fork is archived, read and copied from only)
@@ -27,7 +27,7 @@ crates/core/                  switchboard-core: every rule, read and write
   src/frontdoor/              router, labeller, adapters, packet, sticky, thread
   src/autopilot/              review, driver, instructions, classify, weekly
   src/runner/                 workflow spec types, loading and validation
-  src/roadmap/                the roadmap graph (ROADMAP's nodes and unspecified blocks, node spec files) and its lint
+  src/roadmap/                the roadmap graph (ROADMAP's nodes and unspecified blocks, node spec files), its lint and its drift against the issues
   src/unit/                   proof: the red check of a unit's test command
   src/workloop/               planned (after 1.0, `local-only`): backlog, run, packet, judge, progress, handoff
   tests/                      one test file per issue; fixtures/ (fleet stub, recorded answers)
@@ -271,6 +271,8 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 `crates/core/src/roadmap/mod.rs` · roadmap-graph (#398) · present. `lint(clone)` reads the clone's ROADMAP.md and `roadmap/nodes/<id>.json` and returns a `LintReport`: `errors` (fail the lint) and `warnings`, each a `Finding` with its `check`, the `id` it is about and a message. Refused outright only when ROADMAP.md is unreadable or a line of its blocks does not parse.
 
 `crates/core/src/roadmap/graph.rs` · roadmap-graph (#398) · present. `parse` reads the `nodes:` and `unspecified:` blocks into a `Graph` (node type, size, feature, `after`; unspecified `waits_on`); `check` reports by id: a duplicate id, an invalid id, an unknown feature, an unknown `after` or `waits on` id, a dependency cycle (each node on it, with the loop), a node with no spec file or a spec that does not match it, a build node missing `verify`, `files_allowed`, `test_files` or `code_map_entries`. A feature with no node is a warning. Tests: `crates/core/tests/roadmap_graph.rs`.
+
+`crates/core/src/roadmap/drift.rs` · roadmap-drift (#400) · present. `find(roadmap_md, issues, today)` returns one `DriftItem` per gap, each `kind`, `ref` and `message` (JSON keys the same): `node-without-unit` (a node with no issue labelled `node:<id>`; `ref` the node id), `unit-without-node` (an issue whose `node:` labels name no node; `ref` `#<n>`), `stale-date` (ROADMAP's `Updated:` missing or more than 14 days old, the SKY-5 rule read from `sky::drift`; `ref` `ROADMAP.md`) and `fog-ready` (an unspecified item whose `waits on` nodes are all done, a node being done when its issue is closed; `ref` the item id). Pure; refused only when ROADMAP.md does not parse. The `switchboard roadmap drift <repo> --json` face is not wired yet. Tests: `crates/core/tests/roadmap_drift.rs`.
 
 ### unit
 `crates/core/src/unit/proof.rs` · unit-proof (#405) · present. `red_check(exit_code, output)` judges one run of a unit's test command: red only when the command exited non-zero and a test that ran failed, counted from cargo test's `test result:` lines (summed over every test binary; ignored tests count as neither). A run where every test passed, where no test ran (none matched, all ignored, a build that failed before any ran), or where the command did not exit is not red; `Verdict` says which. The caller runs the command; the module runs nothing. The `switchboard unit red-check` and `codemap-check` faces are not in `cli.rs` yet. Tests: `crates/core/tests/unit_proof.rs`.
