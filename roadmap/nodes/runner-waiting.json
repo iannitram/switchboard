@@ -1,0 +1,32 @@
+{
+  "id": "runner-waiting",
+  "what": "A step with actor human writes one waiting_item (needs, why, choices, recommended) into Waiting on you and the engine resumes when it is answered; add `switchboard waiting list --json`, oldest first.",
+  "expectations": [
+    "Each human step raises exactly one open item; re-running the step does not raise a second.",
+    "The item shows the step's needs and why lines and its choices, with the recommended one first.",
+    "An answered item moves the unit to the state the answer maps to.",
+    "`switchboard waiting list --json` lists open items oldest first."
+  ],
+  "files_allowed": [
+    "crates/core/src/runner/waiting.rs",
+    "crates/core/tests/runner_waiting.rs"
+  ],
+  "test_files": [
+    "crates/core/tests/runner_waiting.rs"
+  ],
+  "verify": [
+    {
+      "name": "tests",
+      "cmd": "cargo test -p switchboard-core --test runner_waiting",
+      "expect": "fail-before"
+    },
+    {
+      "name": "lint",
+      "cmd": "cargo clippy --all-targets -- -D warnings",
+      "expect": "pass"
+    }
+  ],
+  "code_map_entries": [
+    "crates/core/src/runner/waiting.rs"
+  ]
+}

@@ -20,5 +20,6 @@ Switchboard borrows ideas, and where the license allows, code, from:
 
 - [BroCrew](https://github.com/brocrew/brocrew) (Apache-2.0): the work tree, the "Waiting on you" view and the fixed report.
 - [rengwu/wayfinder-maps](https://github.com/rengwu/wayfinder-maps) (MIT): the map of a project's roadmap as a navigable sky.
+- [ocuclaw/obsidian-wayfinder](https://github.com/ocuclaw/obsidian-wayfinder) (MIT): the dependency layers and in-column order behind the Roadmap lens (`app/src/sky/layers.ts`).
 
 Any code lifted from them keeps its license notice and credit.

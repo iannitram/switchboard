@@ -1,0 +1,32 @@
+{
+  "id": "bug-fix",
+  "what": "`switchboard bug next`, `job`, `attempts`, `lesson-check`, `signature-check` and `status-row`: choose the next bug, write the repro job then the fix job with the repro test locked, stop after three tries or a repeated diff, and check the one pitfalls line, the search patterns and the status row.",
+  "expectations": [
+    "A fix job is written only after the repro test failed on main with the reported signature.",
+    "The fix job's files_allowed excludes the repro test.",
+    "The third failed try parks the bug and raises one Waiting on you item; no dollar cap is applied.",
+    "A fix with no pitfalls line, or with two, fails the lesson check."
+  ],
+  "files_allowed": [
+    "crates/core/src/bug/fix.rs",
+    "crates/core/tests/bug_fix.rs"
+  ],
+  "test_files": [
+    "crates/core/tests/bug_fix.rs"
+  ],
+  "verify": [
+    {
+      "name": "tests",
+      "cmd": "cargo test -p switchboard-core --test bug_fix",
+      "expect": "fail-before"
+    },
+    {
+      "name": "lint",
+      "cmd": "cargo clippy --all-targets -- -D warnings",
+      "expect": "pass"
+    }
+  ],
+  "code_map_entries": [
+    "crates/core/src/bug/fix.rs"
+  ]
+}

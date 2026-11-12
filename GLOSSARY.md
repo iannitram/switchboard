@@ -84,6 +84,18 @@ _Avoid_: size, difficulty, Qwen-fit
 A scripted background loop that feeds a project to a local model piece by piece. The model writes code-map snippets, briefs and handoffs until enough stars are ready to run unattended.
 _Avoid_: indexing, warm-up
 
+**Work loop**:
+The loop that builds ready stars unattended, in dependency order. Each turn is one fleet job with a fresh context; the harness, never the builder, runs the star's locked checks and decides whether it is good.
+_Avoid_: build loop, agent loop, Make
+
+**Catch-up packet**:
+What a fresh-context builder is given at the start of every work-loop turn: the star's brief, its code-map snippet, where the star stands, the last turn's handoff and the failing output. Code builds it to fit the model's context window.
+_Avoid_: session, memory, resume
+
+**Unverified**:
+A check result for something nobody could compare or measure. It is neither passed nor failed, never counts as good, and is named in the report.
+_Avoid_: skipped, unknown, pending
+
 ## Routing
 
 **Pool**:

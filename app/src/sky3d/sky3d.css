@@ -1,0 +1,803 @@
+/* The 3D Sky's own dark look (#297). The shell and the other views are styled later. */
+.sky3d {
+  /* The shell's tokens (theme.css), with this view's old values as the fallback. */
+  --sky-bg: var(--bg, #04060d);
+  --sky-ink: var(--ink, #dde6f6);
+  --sky-dim: var(--ink-dim, #8d9ab5);
+  --sky-faint: var(--ink-faint, #5d6a85);
+  --sky-line: var(--line, rgba(148, 163, 184, 0.2));
+  --sky-glass: var(--glass, rgba(9, 14, 28, 0.78));
+  --sky-accent: var(--accent, #7dd3fc);
+  --sky-amber: var(--amber, #f5a524);
+  --sky-gold: var(--gold, #fbbf24);
+  --sky-radius: var(--radius-sm, 7px);
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  top: 0;
+  overflow: hidden;
+  color: var(--sky-ink);
+  background:
+    radial-gradient(70% 55% at 50% 52%, rgba(40, 30, 60, 0.35) 0%, rgba(10, 14, 32, 0) 70%),
+    radial-gradient(130% 100% at 50% 55%, #0a1026 0%, #060915 50%, var(--sky-bg) 100%);
+  touch-action: none;
+  cursor: grab;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", Cantarell, "Helvetica Neue", Arial, sans-serif;
+  font-size: 13px;
+  line-height: 1.35;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.sky3d-anchor {
+  height: 0;
+}
+.sky3d-stage,
+.sky3d-canvas,
+.sky3d-layer {
+  position: absolute;
+  inset: 0;
+}
+.sky3d:active {
+  cursor: grabbing;
+}
+.sky3d-canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.sky3d-layer {
+  pointer-events: none;
+}
+
+/* Controls wear the shell's Astrolabe plates (theme.css .btn, .seg, .badge). Rows (crumbs,
+   search hits) and the invisible hit targets shed the plate the pane gives every button. */
+.sky3d a.btn {
+  color: var(--brass-hi);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.sky3d .sky3d-hit,
+.sky3d .sky3d-star,
+.sky3d .sky3d-crumbs li button,
+.sky3d .sky3d-search li button {
+  font: inherit;
+  letter-spacing: normal;
+  text-shadow: none;
+  box-shadow: none;
+  background: transparent;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  transition: none;
+}
+.sky3d .sky3d-hit:active,
+.sky3d .sky3d-star:active,
+.sky3d .sky3d-crumbs li button:active,
+.sky3d .sky3d-search li button:active {
+  box-shadow: none;
+}
+.sky3d .sky3d-crumbs li button:active,
+.sky3d .sky3d-search li button:active {
+  transform: none;
+}
+/* Hit targets: invisible until hovered or focused, then a thin ring. */
+.sky3d .sky3d-hit,
+.sky3d .sky3d-star {
+  position: absolute;
+  left: 0;
+  top: 0;
+  padding: 0;
+  border-radius: 50%;
+  background: transparent;
+  border: 1px solid transparent;
+  pointer-events: auto;
+  visibility: hidden;
+  will-change: transform;
+}
+.sky3d .sky3d-hit:hover,
+.sky3d .sky3d-hit.is-hovered,
+.sky3d .sky3d-hit:focus-visible {
+  background: transparent;
+  border-color: rgba(125, 211, 252, 0.45);
+  box-shadow: 0 0 18px rgba(125, 211, 252, 0.18);
+  outline: none;
+}
+.sky3d .sky3d-star {
+  width: 18px;
+  height: 18px;
+}
+.sky3d .sky3d-star:hover,
+.sky3d .sky3d-star:focus-visible {
+  background: transparent;
+  border-color: rgba(186, 230, 253, 0.7);
+  outline: none;
+}
+/* A picked star wears one ring: the one drawn round it in the sky (SkyScene STAR_FS). */
+
+/* Labels: crisp HTML, placed by the frame loop, never overlapping. */
+.sky3d-label {
+  position: absolute;
+  left: 0;
+  top: 0;
+  white-space: nowrap;
+  visibility: hidden;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  color: rgba(221, 230, 246, 0.86);
+  /* A dark halo hugging each glyph, so a name reads over bright gas as well as black sky. */
+  text-shadow:
+    0 0 1px rgba(1, 2, 8, 1),
+    0 0 3px rgba(1, 2, 8, 0.95),
+    0 1px 2px rgba(1, 2, 8, 0.95),
+    0 0 7px rgba(1, 2, 8, 0.9),
+    0 0 16px rgba(1, 2, 8, 0.75);
+  will-change: transform;
+}
+.sky3d-label.is-top {
+  font-size: 13px;
+  font-weight: 600;
+  color: #f1f5ff;
+}
+.sky3d-drift {
+  display: none;
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 15px;
+  color: #1a1204;
+  background: var(--sky-amber);
+  text-shadow: none;
+  vertical-align: 1px;
+}
+.sky3d-layer.is-near .sky3d-drift,
+.sky3d-label.is-hovered .sky3d-drift {
+  display: inline-block;
+}
+.sky3d-feature {
+  pointer-events: auto;
+  font-size: 11.5px;
+  color: rgba(228, 236, 252, 0.94);
+}
+/* A feature with no issue yet: dimmer than a populated one, still upright and legible. */
+.sky3d-feature.is-dark {
+  color: rgba(178, 190, 214, 0.8);
+  font-weight: 400;
+}
+.sky3d-count {
+  margin-left: 5px;
+  font-size: 10px;
+  color: var(--sky-dim);
+}
+.sky3d-ring {
+  padding: 1px 7px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: rgba(165, 222, 252, 0.9);
+  background: rgba(6, 10, 22, 0.62);
+  border: 1px solid rgba(125, 211, 252, 0.28);
+  border-radius: 999px;
+}
+.sky3d-tip {
+  font-size: 12px;
+  color: #f8fbff;
+  background: rgba(9, 14, 28, 0.86);
+  border: 1px solid var(--sky-line);
+  border-radius: 6px;
+  padding: 3px 8px;
+  text-shadow: none;
+}
+.sky3d-tip:empty {
+  display: none;
+}
+
+/* Panels: frosted glass, anchored beside their object. */
+.sky3d-panel {
+  position: absolute;
+  left: 0;
+  top: 0;
+  visibility: hidden;
+  background: linear-gradient(180deg, rgba(24, 34, 58, 0.86) 0%, rgba(11, 17, 32, 0.92) 100%);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+  border: 1px solid var(--brass-lo);
+  border-radius: var(--radius);
+  box-shadow:
+    var(--glass-hl),
+    0 10px 40px rgba(0, 0, 0, 0.45);
+  pointer-events: auto;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.sky3d-panel h3 {
+  margin: 0 0 4px;
+  font-size: 14px;
+  font-weight: 600;
+}
+.sky3d-panel p {
+  margin: 3px 0;
+}
+.sky3d-project {
+  width: 240px;
+  padding: 12px 14px;
+  pointer-events: none;
+}
+.sky3d-rank,
+.sky3d-dim {
+  color: var(--sky-dim);
+}
+.is-warn {
+  color: var(--sky-amber);
+}
+.sky3d-progress {
+  height: 4px;
+  margin: 8px 0 6px;
+  border-radius: 2px;
+  background: rgba(148, 163, 184, 0.18);
+  overflow: hidden;
+}
+.sky3d-progress span {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, #60a5fa, #fde68a);
+}
+.sky3d-starpanel {
+  width: 320px;
+  max-height: calc(100% - 24px);
+  overflow: auto;
+}
+.sky3d-starpanel aside {
+  padding: 12px 14px;
+}
+.sky3d-starpanel ul {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  list-style: none;
+  margin: 6px 0;
+  padding: 0;
+}
+.sky3d-starpanel li {
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: var(--radius-sm);
+  background: var(--glass-fill);
+  border: 1px solid var(--brass-rule);
+}
+.sky3d a {
+  color: var(--sky-accent);
+}
+.sky3d-starpanel aside > a {
+  display: inline-block;
+  margin: 6px 12px 0 0;
+}
+.sky3d-starpanel aside > .btn {
+  margin-top: 6px;
+}
+
+/* Fixed chrome: controls top-left, galaxy title top-centre, drift top-right, ages bottom. */
+.sky3d-toolbar {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 8px;
+  max-width: min(560px, calc(100% - 180px));
+}
+.sky3d-toolbar > div {
+  display: contents;
+}
+.sky3d-toolbar p,
+.sky3d-toolbar ul {
+  flex-basis: 100%;
+  margin: 0;
+  padding: 8px 10px;
+  font-size: 12px;
+  background: var(--sky-glass);
+  border: 1px solid var(--sky-line);
+  border-radius: 8px;
+  list-style: none;
+  max-height: 28vh;
+  overflow: auto;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.sky3d-toolbar [role="alert"] {
+  color: #fca5a5;
+}
+/* The open project's GitHub links, on their own row under Back: one compact group. */
+.sky3d-actions {
+  order: 1;
+  flex-basis: 100%;
+  display: flex;
+  gap: 6px;
+}
+.sky3d .sky3d-actions a.btn {
+  padding: 5px 12px;
+  font-size: 11.5px;
+}
+.sky3d-actions a::after {
+  content: "↗";
+  color: var(--brass-idle);
+  font-size: 11px;
+}
+/* The title block keeps a clear band of its own: a soft dark scrim behind it, and (as a label
+   blocker) a margin round it that no feature or ring name may enter. */
+.sky3d-head {
+  position: absolute;
+  top: 44px;
+  left: 50%;
+  transform: translateX(-50%);
+  text-align: center;
+  pointer-events: none;
+  max-width: calc(100% - 600px);
+  min-width: 260px;
+  padding: 4px 26px 10px;
+  border-radius: 28px;
+  background: radial-gradient(ellipse at 50% 50%, rgba(2, 4, 12, 0.78) 0%, rgba(2, 4, 12, 0.6) 55%, rgba(2, 4, 12, 0) 100%);
+  text-shadow:
+    0 0 2px rgba(1, 2, 8, 1),
+    0 0 8px rgba(1, 2, 8, 0.9);
+}
+.sky3d-head h2 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+.sky3d-head p {
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: rgba(196, 208, 230, 0.92);
+}
+.sky3d-head [data-testid="chain-count"] {
+  color: var(--sky-gold);
+}
+.sky3d-uncharted {
+  width: 260px;
+  padding: 16px 18px;
+  text-align: center;
+}
+.sky3d-uncharted h3 {
+  font-size: 12px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--sky-accent);
+}
+.sky3d-uncharted p {
+  color: var(--sky-dim);
+}
+.sky3d-uncharted dl {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 4px 12px;
+  margin: 12px 0;
+  text-align: left;
+}
+.sky3d-uncharted dt {
+  color: var(--sky-dim);
+}
+.sky3d-uncharted dd {
+  margin: 0;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.sky3d .sky3d-drawer-toggle {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 3;
+}
+.sky3d-drawer-toggle b {
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  color: var(--brass-lit);
+}
+.sky3d-drawer-toggle.has-drift b {
+  color: var(--amber);
+}
+.sky3d-drawer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 2;
+  width: min(400px, 88%);
+  padding: 52px 16px 16px;
+  box-sizing: border-box;
+  overflow: auto;
+  background: rgba(7, 11, 24, 0.92);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+  border-left: 1px solid var(--sky-line);
+  transform: translateX(105%);
+  transition: transform 0.18s ease-out;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.sky3d-drawer.is-open {
+  transform: none;
+}
+.sky3d-still .sky3d-drawer {
+  transition: none;
+}
+.sky3d-drawer h3 {
+  margin: 0 0 10px;
+  font-size: 14px;
+}
+.sky3d-drawer ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.sky3d-drawer li {
+  padding: 6px 0;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.1);
+  font-size: 12px;
+}
+.sky3d-drawer li[data-kind="orphan"]::before,
+.sky3d-drawer li[data-kind="dark"]::before,
+.sky3d-drawer li[data-kind="stale"]::before {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 8px;
+  border-radius: 50%;
+  background: var(--sky-amber);
+  vertical-align: 1px;
+}
+.sky3d-drawer li[data-kind="dark"]::before {
+  background: transparent;
+  border: 1px dashed var(--sky-dim);
+}
+.sky3d-drawer li[data-kind="stale"]::before {
+  background: #f87171;
+}
+.sky3d-drawer a {
+  text-decoration: none;
+}
+.sky3d .sky3d-drawer-close {
+  position: absolute;
+  top: 12px;
+  left: 14px;
+  padding: 3px 11px;
+}
+
+/* Wayfinding: the breadcrumb and search, top centre. */
+.sky3d-crumbs {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: calc(100% - 520px);
+  min-width: 220px;
+  justify-content: center;
+  cursor: default;
+}
+.sky3d-crumbs ol {
+  display: flex;
+  align-items: center;
+  margin: 0;
+  padding: 3px 10px;
+  list-style: none;
+  border-radius: var(--radius);
+  background: var(--glass);
+  border: 1px solid var(--glass-line);
+  box-shadow: var(--glass-hl);
+  white-space: nowrap;
+  overflow: hidden;
+}
+.sky3d-crumbs li {
+  display: flex;
+  align-items: center;
+  font-size: 12px;
+  color: var(--sky-ink);
+  min-width: 0;
+}
+.sky3d-crumbs li + li::before {
+  content: "›";
+  margin: 0 7px;
+  color: var(--brass-lo);
+}
+.sky3d .sky3d-crumbs li button {
+  padding: 2px 4px;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  color: var(--brass-idle);
+}
+.sky3d .sky3d-crumbs li button:hover {
+  color: var(--brass-hi);
+  background: transparent;
+}
+.sky3d-crumbs [aria-current] {
+  color: var(--brass-lit);
+  padding: 2px 4px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sky3d .sky3d-search-open {
+  padding: 4px 11px;
+  font-size: 14px;
+  line-height: 1;
+}
+/* The open search: a narrow glass column docked at the left edge, below the toolbar and above
+   the bottom bar, so the galaxy stays in full view while non-matches wink out. Results scroll
+   inside it. */
+.sky3d-search {
+  position: absolute;
+  top: 104px;
+  left: 14px;
+  bottom: 72px;
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  width: min(280px, calc(100% - 28px));
+  max-height: calc(100% - 176px);
+  height: max-content;
+  padding: 8px;
+  box-sizing: border-box;
+  background: var(--glass);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--glass-line);
+  border-radius: 4px;
+  box-shadow:
+    var(--glass-hl),
+    0 14px 50px rgba(0, 0, 0, 0.45);
+  cursor: default;
+}
+.sky3d-search input {
+  flex: 0 0 auto;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 7px 10px;
+  font: inherit;
+  font-size: 14px;
+  color: var(--sky-ink);
+  background: rgba(2, 5, 12, 0.55);
+  border: 1px solid var(--glass-line);
+  border-radius: 4px;
+  outline: none;
+  user-select: text;
+}
+.sky3d-search input:focus-visible {
+  border-color: var(--aether);
+  box-shadow: 0 0 0 1px var(--accent-glow);
+}
+.sky3d-search ul {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+@media (max-width: 1100px) {
+  .sky3d-search {
+    bottom: 120px;
+    max-height: calc(100% - 224px);
+  }
+}
+.sky3d-search li.sky3d-dim {
+  padding: 6px 8px;
+}
+.sky3d .sky3d-search li button {
+  display: grid;
+  grid-template-columns: 52px 1fr;
+  gap: 0 8px;
+  width: 100%;
+  text-align: left;
+  color: var(--sky-ink);
+  background: transparent;
+  border: 0;
+  border-left: 2px solid transparent;
+  border-radius: 0;
+  padding: 5px 8px;
+}
+.sky3d .sky3d-search li[aria-selected="true"] button {
+  background: var(--glass-fill-strong);
+  border-left-color: var(--aether);
+}
+.sky3d-search b {
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sky3d-search small {
+  grid-column: 2;
+  color: var(--sky-dim);
+  font-size: 11px;
+}
+.sky3d-kind {
+  grid-row: span 2;
+  font-style: normal;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--brass-idle);
+  padding-top: 2px;
+}
+
+/* The bottom bar: snapshot ages left, the lens switch centred, the legend right. They share one
+   row and wrap instead of overlapping (the legend steps up to a row of its own); below 1100px
+   the legend folds into a small toggle. Only the controls take the pointer. */
+.sky3d-bottom {
+  position: absolute;
+  left: 14px;
+  right: 14px;
+  bottom: 10px;
+  display: flex;
+  flex-wrap: wrap-reverse;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 8px 16px;
+  pointer-events: none;
+}
+.sky3d-ages {
+  flex: 1 1 0;
+  min-width: max-content;
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--sky-dim);
+}
+.sky3d-lenses {
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
+  cursor: default;
+  pointer-events: auto;
+}
+.sky3d-legend {
+  position: relative;
+  flex: 1 1 0;
+  min-width: max-content;
+  display: flex;
+  justify-content: flex-end;
+}
+.sky3d .sky3d-legend-toggle {
+  display: none;
+  pointer-events: auto;
+}
+.sky3d-hint {
+  margin: 0;
+  padding: 6px 10px;
+  font-size: 11.5px;
+  color: var(--sky-dim);
+  text-align: right;
+  background: var(--glass);
+  border: 1px solid var(--glass-line);
+  border-radius: var(--radius);
+  box-shadow: var(--glass-hl);
+  pointer-events: none;
+}
+@media (max-width: 1100px) {
+  .sky3d-legend {
+    flex: 0 0 auto;
+    min-width: 0;
+  }
+  .sky3d .sky3d-legend-toggle {
+    display: inline-flex;
+  }
+  .sky3d-hint {
+    display: none;
+    position: absolute;
+    right: 0;
+    bottom: calc(100% + 8px);
+    width: max-content;
+    max-width: min(560px, calc(100vw - 48px));
+    text-align: left;
+  }
+  .sky3d-hint.is-open {
+    display: block;
+  }
+}
+.sky3d-hint p {
+  margin: 2px 0 0;
+}
+.sky3d-hint .sky3d-dim {
+  color: var(--sky-faint);
+}
+.sky3d-hint .k {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin: 0 3px 0 8px;
+  border-radius: 50%;
+  vertical-align: -0.5px;
+}
+.sky3d-hint .k.closed {
+  background: #fff1d0;
+  box-shadow: 0 0 6px #fde68a;
+}
+.sky3d-hint .k.open {
+  background: rgba(158, 189, 242, 0.45);
+}
+.sky3d-hint .k.flight {
+  background: #5eead4;
+  box-shadow: 0 0 0 2px rgba(94, 234, 212, 0.35);
+}
+.sky3d-hint .k.dark {
+  border: 1px dashed #8d9ab5;
+}
+.sky3d-hint .k.chain {
+  width: 14px;
+  height: 2px;
+  border-radius: 1px;
+  background: #d9a038;
+  vertical-align: 2px;
+}
+.sky3d-hint .k.pass,
+.sky3d-hint .k.fail {
+  border: 1.5px solid #5ef08c;
+}
+.sky3d-hint .k.fail {
+  border-color: #ff5c5c;
+}
+.sky3d-hint .k.hole {
+  background: #000;
+  box-shadow: 0 0 0 2px var(--glass-ink), 0 0 6px var(--accent-glow);
+}
+.sky3d-hint .k.nebula {
+  width: 12px;
+  background: radial-gradient(circle, rgba(196, 140, 255, 0.7), rgba(120, 90, 220, 0) 70%);
+}
+.sky3d-hint .k.cluster {
+  background: radial-gradient(circle, #fff 0 30%, rgba(255, 220, 160, 0.5) 60%, transparent 70%);
+}
+.sky3d-hint .k.debris {
+  border: 1.5px dotted var(--sky-amber);
+}
+.sky3d-hint .k.bridge {
+  width: 14px;
+  height: 7px;
+  border-radius: 7px 7px 0 0;
+  border: 1.5px solid #93c5fd;
+  border-bottom: 0;
+}
+.sky3d-drawer,
+.sky3d-panel,
+.sky3d-search,
+.sky3d-toolbar {
+  touch-action: auto;
+  cursor: default;
+}
+@media (max-width: 900px) {
+  .sky3d-crumbs {
+    max-width: calc(100% - 32px);
+    top: 56px;
+  }
+  .sky3d-head {
+    top: 92px;
+    max-width: calc(100% - 32px);
+  }
+  .sky3d-ages {
+    flex-basis: 100%;
+    order: 3;
+  }
+}
+
+/* DEV only: the frame-time readout (VITE_SKY_FPS=1). */
+.sky3d-devfps {
+  position: absolute;
+  top: 120px;
+  right: 16px;
+  margin: 0;
+  padding: 3px 8px;
+  font: 12px ui-monospace, monospace;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.8);
+}

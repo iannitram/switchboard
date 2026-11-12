@@ -138,6 +138,7 @@ fn autopilot_after_poll(
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let dir = app.path().app_config_dir()?;
             app.manage(commands::AppState::new(dir.join("settings.json")));

@@ -1,0 +1,30 @@
+{
+  "id": "run-scoring",
+  "what": "`switchboard score sample` grades the spec's sample rate of finished runs against each scorer and writes rating rows; failed ratings are batched into one proposed change to the spec, opened as a pull request for the owner.",
+  "expectations": [
+    "With sample rate 0.25, about one run in four is scored and each gets one rating row per scorer.",
+    "A proposed change is a pull request and raises one Waiting on you item; nothing edits a spec on main directly."
+  ],
+  "files_allowed": [
+    "crates/core/src/runner/score.rs",
+    "crates/core/tests/run_scoring.rs"
+  ],
+  "test_files": [
+    "crates/core/tests/run_scoring.rs"
+  ],
+  "verify": [
+    {
+      "name": "tests",
+      "cmd": "cargo test -p switchboard-core --test run_scoring",
+      "expect": "fail-before"
+    },
+    {
+      "name": "lint",
+      "cmd": "cargo clippy --all-targets -- -D warnings",
+      "expect": "pass"
+    }
+  ],
+  "code_map_entries": [
+    "crates/core/src/runner/score.rs"
+  ]
+}
