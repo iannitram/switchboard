@@ -24,7 +24,7 @@ export function ReportList({ reports }: { reports: Report[] }) {
 }
 
 /** #331: a chat thread the core could not read; it is left out of the reports. */
-export type ThreadWarning = { thread_id: string; reason: string };
+export type ThreadWarning = { thread_id: string | null; reason: string };
 /** #331: core's `reports::ReportsAnswer`. */
 export type ReportsAnswer = { reports: Report[]; warnings: ThreadWarning[] };
 
@@ -132,9 +132,11 @@ export function Reports() {
             </>
           ) : null}
           {/* #331: a chat thread that could not be read is left out, and says so. */}
-          {warnings.map((w) => (
-            <p key={w.thread_id}>
-              Chat thread {w.thread_id} was left out: {w.reason}
+          {warnings.map((w, i) => (
+            <p key={i}>
+              {w.thread_id === null
+                ? `The chat thread store could not be listed: ${w.reason}`
+                : `Chat thread ${w.thread_id} was left out: ${w.reason}`}
             </p>
           ))}
         </div>

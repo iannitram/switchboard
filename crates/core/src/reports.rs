@@ -466,10 +466,11 @@ pub fn read_done_cards(state_dir: &Path) -> Result<Vec<Value>, CoreError> {
 }
 
 /// REP follow-up (#331): a chat thread the thread store could not read, and why. The report is
-/// left out; the warning goes in the reports answer so the Reports view can name it.
+/// left out; the warning goes in the reports answer so the Reports view can name it. `thread_id`
+/// is `None` when the store folder itself could not be listed (#465); the reason then names it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ThreadWarning {
-    pub thread_id: String,
+    pub thread_id: Option<String>,
     pub reason: String,
 }
 
@@ -489,16 +490,28 @@ pub fn thread_rows(data: &Path) -> Vec<(String, Vec<JobRow>)> {
 }
 
 /// REP follow-up (#331): `thread_rows`, and a warning for each thread that cannot be read, in
-/// the same sorted id order. The unreadable thread is still skipped.
+/// the same sorted id order. The unreadable thread is still skipped. #465: a thread store that
+/// cannot be listed (anything but NotFound) gives one warning with no thread id, naming the
+/// store path and the error.
 pub fn thread_rows_checked(data: &Path) -> (Vec<(String, Vec<JobRow>)>, Vec<ThreadWarning>) {
     let store = crate::frontdoor::thread::ThreadStore::new(data);
     let mut threads = Vec::new();
     let mut warnings = Vec::new();
-    for id in store.list().unwrap_or_default() {
+    let ids = match store.list() {
+        Ok(ids) => ids,
+        Err(e) => {
+            warnings.push(ThreadWarning {
+                thread_id: None,
+                reason: e.to_string(),
+            });
+            Vec::new()
+        }
+    };
+    for id in ids {
         match store.read(&id) {
             Ok(rows) => threads.push((id, rows)),
             Err(e) => warnings.push(ThreadWarning {
-                thread_id: id,
+                thread_id: Some(id),
                 reason: e.to_string(),
             }),
         }
