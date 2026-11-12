@@ -450,7 +450,7 @@ fn kill_group(pid: u32) {
     #[cfg(unix)]
     {
         let _ = Command::new("kill")
-            .args(["-s", "KILL", "--", &format!("-{pid}")])
+            .args(["-KILL", "--", &format!("-{pid}")])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
