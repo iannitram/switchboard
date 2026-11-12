@@ -8,9 +8,11 @@
 use std::path::Path;
 
 use serde_json::{json, Value};
+use switchboard_core::clock::{Clock, SystemClock};
 use switchboard_core::fleet::FleetBridge;
 use switchboard_core::frontdoor::ask;
 use switchboard_core::frontdoor::rating_log;
+use switchboard_core::it;
 
 /// The front door's tools, in the order `tools/list` gives them.
 pub const TOOLS: [&str; 3] = ["ask", "ask_as_job", "rate"];
@@ -26,7 +28,9 @@ pub enum Call {
     AskAsJob {
         kind: String,
         request: String,
-        unmet: Vec<String>,
+        /// #433: None when not given: the kind's needs this machine does not meet, read at
+        /// the call (`ask::infer_unmet`).
+        unmet: Option<Vec<String>>,
         /// FD-6: the chat this job is sent from; the job then carries its packet.
         thread: Option<String>,
     },
@@ -77,10 +81,10 @@ pub fn schemas() -> [(&'static str, Value); 3] {
                     "properties": {
                         "kind": { "type": "string", "description": "The request kind" },
                         "request": { "type": "string" },
-                        "unmet": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "The needs this machine does not meet" },
+                        "unmet": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "The needs this machine does not meet; left out, they are read from this machine's loadout" },
                         "thread": { "type": "string", "description": "The chat's thread id, to send the chat with its packet" }
                     },
-                    "required": ["kind", "request", "unmet"]
+                    "required": ["kind", "request"]
                 }
             }),
         ),
@@ -121,17 +125,23 @@ pub fn call_from(name: &str, args: &Value) -> Result<Call, String> {
             })
         }
         "ask_as_job" => {
-            let unmet = args["unmet"].as_array().and_then(|needs| {
-                needs
-                    .iter()
-                    .map(|need| need.as_str().map(str::to_string))
-                    .collect::<Option<Vec<String>>>()
-            });
-            let Some(unmet) = unmet.filter(|needs| !needs.is_empty()) else {
-                return Err(format!(
-                    "ask_as_job: unmet must be an array of at least one string, got {}",
-                    args["unmet"]
-                ));
+            // #433: `unmet` left out is inferred; one given must be at least one string.
+            let unmet = match &args["unmet"] {
+                Value::Null => None,
+                given => {
+                    let unmet = given.as_array().and_then(|needs| {
+                        needs
+                            .iter()
+                            .map(|need| need.as_str().map(str::to_string))
+                            .collect::<Option<Vec<String>>>()
+                    });
+                    let Some(unmet) = unmet.filter(|needs| !needs.is_empty()) else {
+                        return Err(format!(
+                            "ask_as_job: unmet must be an array of at least one string, got {given}"
+                        ));
+                    };
+                    Some(unmet)
+                }
             };
             Ok(Call::AskAsJob {
                 kind: text("kind"),
@@ -196,7 +206,15 @@ pub fn run(call: &Call, fleet: Option<&FleetBridge>, data: Option<&Path>) -> Res
                 Some(id) => Some((data()?, id.as_str())),
                 None => None,
             };
-            ask::send_as_job(fleet()?, kind, request, unmet, chat).map_err(core)
+            let fleet = fleet()?;
+            let unmet = match unmet {
+                Some(unmet) => unmet.clone(),
+                None => {
+                    let loadout = it::read_this_machine(&it::SystemProbeRunner, SystemClock.now());
+                    ask::infer_unmet(fleet, kind, &loadout).map_err(core)?
+                }
+            };
+            ask::send_as_job(fleet, kind, request, &unmet, chat).map_err(core)
         }
         Call::Rate {
             thread,

@@ -24,12 +24,16 @@ pub struct ThreadStore {
     dir: PathBuf,
 }
 
-/// A handoff id names one file under `threads/`, so it may not hold a path separator or `..`.
+/// A handoff id names one file under `threads/`, so it may not hold a path separator or `..`,
+/// nor a character Windows refuses in a file name (`: * ? " < > |` or a control character: `C:x`
+/// is a drive-relative path there). The rule is the same on every platform, so a thread made on
+/// one machine can be named on another.
 fn check_id(handoff_id: &str) -> Result<(), CoreError> {
     if handoff_id.is_empty()
-        || handoff_id.contains('/')
-        || handoff_id.contains('\\')
         || handoff_id.contains("..")
+        || handoff_id.chars().any(|c| {
+            c.is_control() || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
+        })
     {
         return Err(CoreError::Refused(format!(
             "handoff id is not a file name: {handoff_id:?}"

@@ -10,7 +10,7 @@ mod mcp;
 use std::cell::RefCell;
 
 use mcp::frontdoor::Call;
-use mcp::{serve, ReadCore, WriteCore};
+use mcp::{serve_outside_job_worktree as serve, ReadCore, WriteCore};
 use serde_json::{json, Value};
 use switchboard_core::budget::PoolEdit;
 use switchboard_core::rules::Role;
@@ -134,10 +134,8 @@ fn each_tool_says_what_it_needs() {
     };
     assert_eq!(schema("ask")["required"], json!(["message"]));
     assert_eq!(schema("ask")["properties"]["dry_run"]["type"], "boolean");
-    assert_eq!(
-        schema("ask_as_job")["required"],
-        json!(["kind", "request", "unmet"])
-    );
+    // #433 (was ["kind", "request", "unmet"]): `unmet` left out is read from the loadout.
+    assert_eq!(schema("ask_as_job")["required"], json!(["kind", "request"]));
     assert_eq!(
         schema("rate")["required"],
         json!(["thread", "turn", "rating"])
@@ -171,9 +169,18 @@ fn the_arguments_reach_the_core_as_given() {
                 "rate",
                 json!({ "thread": "chat-1", "turn": 3, "rating": "down" }),
             ),
+            // #433: no `unmet`: the core infers it.
+            call(
+                5,
+                "ask_as_job",
+                json!({ "kind": "web-research", "request": "find it" }),
+            ),
         ],
     );
-    for (reply, tool) in replies.iter().zip(["ask", "ask", "ask_as_job", "rate"]) {
+    for (reply, tool) in replies
+        .iter()
+        .zip(["ask", "ask", "ask_as_job", "rate", "ask_as_job"])
+    {
         assert_eq!(reply["result"]["isError"], false, "{reply}");
         let text = reply["result"]["content"][0]["text"].as_str().unwrap();
         assert_eq!(
@@ -186,8 +193,9 @@ fn the_arguments_reach_the_core_as_given() {
         [
             "ask \"what is a worktree\" thread=None dry_run=false",
             "ask \"and then\" thread=Some(\"chat-1\") dry_run=true",
-            "ask_as_job code-change \"fix it\" unmet=[\"tools\", \"web\"]",
+            "ask_as_job code-change \"fix it\" unmet=Some([\"tools\", \"web\"])",
             "rate chat-1 3 down",
+            "ask_as_job web-research \"find it\" unmet=None",
         ]
     );
 }
@@ -222,10 +230,6 @@ fn bad_arguments_are_invalid_params_and_never_reach_the_core() {
         ("ask", json!({ "message": 7 })),
         ("ask", json!({ "message": "hi", "dry_run": "yes" })),
         ("ask", json!({ "message": "hi", "thread": 4 })),
-        (
-            "ask_as_job",
-            json!({ "kind": "code-change", "request": "fix it" }),
-        ),
         (
             "ask_as_job",
             json!({ "kind": "code-change", "request": "fix it", "unmet": "web" }),

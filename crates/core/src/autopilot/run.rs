@@ -11,9 +11,9 @@
 use super::driver::{self, ChildRunner, LaneRunner, SatelliteConfig, SATELLITE_FILE};
 use super::loops;
 use super::passes::{
-    after_poll_with, clear_settled_merges, job_exit_file, job_timed_out, merge_pass, merge_would,
-    record_refused_merges, AfterPoll, AutopilotState, JobStarter, Merged, PollPasses, RefusedMerge,
-    STATE_FILE,
+    after_poll_with, clear_settled_merges, clear_vanished_merges, job_exit_file, job_timed_out,
+    merge_pass, merge_would, record_refused_merges, AfterPoll, AutopilotState, JobStarter, Merged,
+    PollPasses, RefusedMerge, STATE_FILE,
 };
 use super::weekly::weekly_due;
 use crate::backup::{BackupOutcome, RepoBackup};
@@ -408,6 +408,10 @@ fn merge_report(env: &RunEnv<'_>) -> PassReport {
     }
     // #432 (ruling 6): a refused PR that has merged or closed since leaves Waiting on you.
     if let Err(e) = clear_settled_merges(env.data_dir, &snaps, &pass.merged) {
+        report.fail("waiting", e);
+    }
+    // #433: a refused PR that dropped off the poll's 50 is looked up on its own.
+    if let Err(e) = clear_vanished_merges(env.data_dir, &snaps, env.transport, env.clock.now()) {
         report.fail("waiting", e);
     }
     report.merged = merged_rows(pass.merged);

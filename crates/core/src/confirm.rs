@@ -465,12 +465,16 @@ fn drop_items(
 /// `<data>/waiting/held-restores.json`, beside the Waiting item it belongs to.
 pub struct HeldRecords {
     path: PathBuf,
+    /// How long a change waits for another's lock: `waiting::LOCAL_LOCK_WAIT`, as for
+    /// `local.json`. Only a test that runs many changes at once on a loaded machine sets more.
+    wait: std::time::Duration,
 }
 
 impl HeldRecords {
     pub fn new(data_dir: &Path) -> Self {
         Self {
             path: data_dir.join("waiting").join("held-restores.json"),
+            wait: crate::waiting::LOCAL_LOCK_WAIT,
         }
     }
 
@@ -502,7 +506,7 @@ impl HeldRecords {
         }
         let _held = crate::lock::FileLock::take_for(
             &self.path,
-            crate::waiting::LOCAL_LOCK_WAIT,
+            self.wait,
             "a change to the held restores",
         )?;
         let mut all = self.load()?;
@@ -516,12 +520,7 @@ impl HeldRecords {
         let mut body = serde_json::to_string_pretty(&all)
             .map_err(|e| CoreError::Parse(format!("{}: {e}", self.path.display())))?;
         body.push('\n');
-        let tmp = crate::lock::temp_path(&self.path, ".tmp");
-        std::fs::write(&tmp, body).map_err(io)?;
-        std::fs::rename(&tmp, &self.path).map_err(|e| {
-            let _ = std::fs::remove_file(&tmp);
-            io(e)
-        })
+        crate::lock::write_whole(&self.path, body.as_bytes())
     }
 }
 
@@ -643,6 +642,12 @@ mod tests {
     /// #431: held restores recorded at once, each by a store of its own as two processes
     /// would, all keep their record. Before, every save went through one fixed
     /// `held-restores.json.tmp` with no lock: records were lost or a save failed.
+    ///
+    /// The 90 changes run one at a time under the lock. A change takes about 1.5 ms, but on a
+    /// machine loaded far past its cores it took 130 ms on average and up to 2 s, so the last
+    /// writers waited past the 10 s `LOCAL_LOCK_WAIT` and `set` said the lock was busy (a live
+    /// holder, this process). That bound is for a person's confirms, a few at once; this test
+    /// is about lost records and temp files, so each store here waits as long as it needs.
     #[test]
     fn held_restores_recorded_at_once_all_keep_their_record() {
         let data = std::env::temp_dir().join(format!("sb-431-held-{}", crate::lock::run_tag()));
@@ -653,7 +658,10 @@ mod tests {
             .map(|w| {
                 let (data, go) = (data.clone(), start.clone());
                 std::thread::spawn(move || {
-                    let records = HeldRecords::new(&data);
+                    let records = HeldRecords {
+                        wait: std::time::Duration::from_secs(5 * 60),
+                        ..HeldRecords::new(&data)
+                    };
                     go.wait();
                     for n in 0..EACH {
                         let made = Made {
@@ -662,7 +670,7 @@ mod tests {
                         };
                         records
                             .set(&format!("Restore {w}-{n}"), Some(&made))
-                            .unwrap();
+                            .unwrap_or_else(|e| panic!("record {w}-{n}: {e}"));
                     }
                 })
             })

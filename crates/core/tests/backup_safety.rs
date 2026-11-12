@@ -866,3 +866,73 @@ fn a_failed_backup_is_a_row_with_the_error_as_its_reason() {
         }
     );
 }
+
+/// #433: `HttpFiles::fetch_to` streams a file to the path asked for and returns its size; a
+/// download cut short or a 404 is an error and leaves no file behind.
+#[test]
+fn http_files_streams_to_disk_and_leaves_nothing_on_failure() {
+    let (base, server) = http_server(3);
+    let files = HttpFiles::new(&Token).unwrap();
+    let dir = scratch("stream");
+    let ok = dir.join("app.zip");
+
+    assert_eq!(files.fetch_to(&format!("{base}/app.zip"), &ok).unwrap(), 9);
+    assert_eq!(std::fs::read(&ok).unwrap(), b"zip bytes");
+    let short = dir.join("short.zip");
+    assert!(files
+        .fetch_to(&format!("{base}/short.zip"), &short)
+        .is_err());
+    assert!(!short.exists());
+    let gone = dir.join("gone.zip");
+    assert!(files.fetch_to(&format!("{base}/gone.zip"), &gone).is_err());
+    assert!(!gone.exists());
+    server.join().unwrap();
+    assert_eq!(names(&dir), ["app.zip"]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A file source that writes part of a file to the path it is given, then fails or panics.
+struct HalfThenStop {
+    panic: bool,
+    wrote: Mutex<Vec<PathBuf>>,
+}
+
+impl FileSource for HalfThenStop {
+    fn fetch(&self, _url: &str) -> Result<Vec<u8>, CoreError> {
+        unreachable!("fetch_into streams through fetch_to")
+    }
+
+    fn fetch_to(&self, _url: &str, dest: &Path) -> Result<u64, CoreError> {
+        std::fs::write(dest, b"half").unwrap();
+        self.wrote.lock().unwrap().push(dest.to_path_buf());
+        if self.panic {
+            panic!("the download thread died");
+        }
+        Err(CoreError::GitHub("connection reset".to_string()))
+    }
+}
+
+/// #433: the temporary file a release file streams into is removed when the fetch fails and
+/// when it panics, so nothing half-written is left beside the backup.
+#[test]
+fn a_release_file_that_fails_or_panics_leaves_no_temp_file() {
+    use switchboard_core::backup::fetch_release_files;
+    let releases = [json!({"tag_name": "v1", "assets": [
+        {"name": "app.zip", "size": 9, "browser_download_url": "https://example.invalid/app.zip"}
+    ]})];
+    for panic in [false, true] {
+        let dir = scratch(if panic { "temp-panic" } else { "temp-error" });
+        let files = HalfThenStop {
+            panic,
+            wrote: Mutex::new(Vec::new()),
+        };
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            fetch_release_files(&releases, &files, &dir)
+        }));
+        assert_eq!(outcome.is_err(), panic);
+        let wrote = files.wrote.lock().unwrap().clone();
+        assert_eq!(wrote.len(), 1);
+        assert!(!wrote[0].exists(), "{} was left", wrote[0].display());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

@@ -334,7 +334,7 @@ const INVALID_PARAMS: i64 = -32602;
 /// is dropped, so the list and the calls hold the read tools only.
 pub fn serve<R: BufRead, W: Write>(
     reader: R,
-    mut writer: W,
+    writer: W,
     core: &dyn ReadCore,
     role: Option<Role>,
     write: &dyn WriteCore,
@@ -344,6 +344,20 @@ pub fn serve<R: BufRead, W: Write>(
         // Cannot tell where we are: fail closed, no write tools.
         Err(_) => true,
     };
+    serve_with(reader, writer, core, role, write, in_job_worktree)
+}
+
+/// `serve` told whether it runs inside a job worktree instead of looking at the current
+/// directory. Tests use it so a checkout whose folder name looks like a job worktree (it
+/// contains `-fleet-`) cannot change their result (#433).
+pub fn serve_with<R: BufRead, W: Write>(
+    reader: R,
+    mut writer: W,
+    core: &dyn ReadCore,
+    role: Option<Role>,
+    write: &dyn WriteCore,
+    in_job_worktree: bool,
+) -> std::io::Result<()> {
     let role = if in_job_worktree {
         if role.is_some() {
             eprintln!("switchboard mcp: inside a job worktree; no write tools");
@@ -978,4 +992,15 @@ fn ok(id: &Value, result: Value) -> Value {
 
 fn error(id: &Value, code: i64, message: &str) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
+}
+
+/// `serve` outside a job worktree whatever the current directory is: for tests.
+pub fn serve_outside_job_worktree<R: BufRead, W: Write>(
+    reader: R,
+    writer: W,
+    core: &dyn ReadCore,
+    role: Option<Role>,
+    write: &dyn WriteCore,
+) -> std::io::Result<()> {
+    serve_with(reader, writer, core, role, write, false)
 }

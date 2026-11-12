@@ -13,7 +13,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
-use mcp::{serve, CoreWrites, ReadCore, WriteCore};
+use mcp::{serve_outside_job_worktree as serve, CoreWrites, ReadCore, WriteCore};
 use serde_json::{json, Value};
 use switchboard_core::clock::FixedClock;
 use switchboard_core::fleet::FleetBridge;
@@ -620,4 +620,32 @@ fn inside_a_job_worktree_neither_write_tool_answers() {
     );
     assert!(lines(&root.join("tools/merge-pr/calls.log")).is_empty());
     assert!(!data.join("pool-edits.jsonl").exists());
+}
+
+/// #433: a checkout in a folder whose name holds `-fleet-` is not a job worktree: the binary
+/// started there still serves the write tools. (The in-process tests above pass the check in as
+/// a flag, so no checkout name changes them.)
+#[test]
+fn a_plain_checkout_named_with_fleet_in_it_still_has_the_write_tools() {
+    let dir = fresh("bin-fleet-name");
+    let root = pipeline(&dir);
+    let data = dir.join("data");
+    snapshot(&data, true);
+    let cwd = dir.join("my-fleet-checkout").join("switchboard");
+    std::fs::create_dir_all(cwd.join(".git")).unwrap();
+    let list = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }).to_string();
+    let out = switchboard(
+        &["mcp", "--role", "budget-manager"],
+        &cwd,
+        &root,
+        &data,
+        &[list],
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("set_pool_cap"), "{text}");
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("job worktree"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }

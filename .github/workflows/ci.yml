@@ -32,6 +32,14 @@ jobs:
   app:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      # The apt fallback tries these Ubuntu mirrors in order (#424); edit the list here only.
+      APT_FALLBACK_MIRRORS: >-
+        https://mirrors.edge.kernel.org/ubuntu
+        https://ftp.osuosl.org/pub/ubuntu
+        https://mirrors.mit.edu/ubuntu
+        https://mirror.us.leaseweb.net/ubuntu
+        https://mirrors.xtom.com/ubuntu
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -45,7 +53,7 @@ jobs:
           if ! timeout 120 sudo apt-get $APT_OPTS update; then
             echo "apt-get update failed; the Ubuntu archive hosts look unreachable, probing other mirrors"
             echo "--- before: apt-mirrors.txt"; cat /etc/apt/apt-mirrors.txt || true
-            for m in https://mirrors.edge.kernel.org/ubuntu https://ftp.osuosl.org/pub/ubuntu https://mirrors.mit.edu/ubuntu https://mirror.us.leaseweb.net/ubuntu https://mirrors.xtom.com/ubuntu; do
+            for m in $APT_FALLBACK_MIRRORS; do
               if curl -4 -fsS -o /dev/null -m 10 "$m/dists/noble/InRelease" && curl -4 -fsS -o /dev/null -m 10 "$m/dists/noble-security/InRelease"; then
                 echo "using mirror $m"
                 printf '%s/\tpriority:1\n' "$m" | sudo tee /etc/apt/apt-mirrors.txt

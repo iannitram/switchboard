@@ -285,6 +285,10 @@ pub fn from_thread(thread_id: &str, rows: &[JobRow]) -> Report {
 
 /// The `role` of a front door thread's move row (`frontdoor::answer::MOVE_ROLE`).
 const MOVE_ROLE: &str = "move";
+/// The lane of a move row to a Claude handoff (`frontdoor::answer::CLAUDE_LANE`).
+const CLAUDE_LANE: &str = "claude";
+/// #433: the model a work-tree line shows for a Claude handoff Switchboard chose no model for.
+pub const CLAUDE_MODEL_UNCHOSEN: &str = "model not chosen by Switchboard";
 
 /// REP-2: the moves of a thread, oldest first.
 ///
@@ -306,7 +310,11 @@ pub fn moves(rows: &[JobRow]) -> Vec<Move> {
                     from_service: or_not(from.map(|(service, _)| service)),
                     from_model: or_not(from.map(|(_, model)| model)),
                     to_service: or_not(r.lane.as_deref()),
-                    to_model: or_not(r.model.as_deref()),
+                    // #433: a Claude handoff Switchboard chose no model for says so.
+                    to_model: match (r.lane.as_deref(), r.model.as_deref()) {
+                        (Some(CLAUDE_LANE), None) => CLAUDE_MODEL_UNCHOSEN.to_string(),
+                        (_, model) => or_not(model),
+                    },
                     why: or_not(r.moved_why.as_deref()),
                 }
             })

@@ -58,6 +58,13 @@ pub struct World {
     pub cwd: PathBuf,
 }
 
+/// The test's folder goes when the test ends, pass or fail (#433).
+impl Drop for World {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.base);
+    }
+}
+
 /// A world whose data folder holds `iannitram/demo` (issue 12; PR 7 from this machine with no
 /// review; PR 8 with a PASS on its head and green CI; a ROADMAP.md) and a state that saw an
 /// older ROADMAP and last ran the weekly run long ago. The satellite is off.

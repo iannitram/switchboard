@@ -638,8 +638,11 @@ fn new_messages_are_summarised_on_top_of_the_cached_summary() {
     assert_eq!(summary.covers_turns, Some(4));
 }
 
+/// #433 (changes the #436 test, which asserted the `sonnet` default): a Claude handoff that
+/// nothing names a model for stores none, and shows as not chosen; a later ask that names a
+/// model is taken up by the thread, and an ask after it that names none stays on it.
 #[test]
-fn a_claude_handoff_move_stores_its_model_and_the_thread_keeps_it() {
+fn a_claude_handoff_move_stores_a_model_only_when_one_was_chosen() {
     let root = root("claude-model");
     let data = root.join("data");
     let chat = Chat::new(&data);
@@ -650,9 +653,13 @@ fn a_claude_handoff_move_stores_its_model_and_the_thread_keeps_it() {
         reply.route.pick,
         ChatPick::ClaudeHandoff {
             reason: "ask claude".to_string(),
-            model: Some("sonnet".to_string()),
+            model: None,
         },
-        "no model chosen: the default tier"
+        "no model chosen: none is stored"
+    );
+    assert_eq!(
+        reply.claude_label.as_deref(),
+        Some("Claude (model not chosen by Switchboard)")
     );
     let opus = ChatRoute {
         pick: ChatPick::ClaudeHandoff {
@@ -666,9 +673,19 @@ fn a_claude_handoff_move_stores_its_model_and_the_thread_keeps_it() {
         reply.route.pick,
         ChatPick::ClaudeHandoff {
             reason: "ask claude".to_string(),
-            model: Some("sonnet".to_string()),
+            model: Some("opus".to_string()),
         },
-        "the thread stays on one model"
+        "a later ask that names a model is taken up"
+    );
+    assert_eq!(reply.claude_label.as_deref(), Some("Claude opus"));
+    let reply = chat.send(ask_claude(), "ask Claude once more", Some("t"));
+    assert_eq!(
+        reply.route.pick,
+        ChatPick::ClaudeHandoff {
+            reason: "ask claude".to_string(),
+            model: Some("opus".to_string()),
+        },
+        "the thread keeps the model it took up"
     );
     let moves: Vec<_> = ThreadStore::new(&data)
         .read("t")
@@ -680,8 +697,158 @@ fn a_claude_handoff_move_stores_its_model_and_the_thread_keeps_it() {
     assert_eq!(
         moves,
         [
-            ("claude".to_string(), Some("sonnet".to_string())),
-            ("claude".to_string(), Some("sonnet".to_string()))
+            ("claude".to_string(), None),
+            ("claude".to_string(), Some("opus".to_string())),
+            ("claude".to_string(), Some("opus".to_string()))
         ]
     );
+}
+
+/// #433: an ask that names a Claude tier as a word routes the handoff to it, over the thread's
+/// earlier model; one that names none keeps the thread's.
+#[test]
+fn naming_a_claude_tier_in_the_ask_routes_the_handoff_to_it() {
+    let root = root("claude-named");
+    let data = root.join("data");
+    let chat = Chat::new(&data);
+    opened(&data, &chat);
+    let (route, _, _) = route_in(
+        &root,
+        "",
+        &data,
+        Some("t"),
+        "ask Claude Opus about it",
+        handoff(),
+    );
+    assert_eq!(
+        route.pick,
+        ChatPick::ClaudeHandoff {
+            reason: "big with tools: the Claude subscription".to_string(),
+            model: Some("opus".to_string()),
+        }
+    );
+    let (route, _, _) = route_in(
+        &root,
+        "",
+        &data,
+        Some("t"),
+        "please ask Claude about it",
+        handoff(),
+    );
+    assert_eq!(
+        route.pick,
+        ChatPick::ClaudeHandoff {
+            reason: "big with tools: the Claude subscription".to_string(),
+            model: None,
+        },
+        "nothing names a model and the thread has none"
+    );
+}
+
+/// The thread's rows as JSON, changed by `edit`, written back (a turn edited or removed on disk).
+fn edit_thread(data: &Path, edit: impl Fn(&mut Vec<Value>)) {
+    let path = data.join("threads").join("t.jsonl");
+    let mut rows: Vec<Value> = std::fs::read_to_string(&path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    edit(&mut rows);
+    let text: String = rows.iter().map(|row| format!("{row}\n")).collect();
+    std::fs::write(&path, text).unwrap();
+}
+
+/// #433: the cached summary is keyed on the content of the turns it covers too: after a turn
+/// is edited on disk (the count unchanged), the next handoff asks for a new summary, written
+/// from every turn.
+#[test]
+fn an_edited_turn_is_a_summary_cache_miss() {
+    let root = root("summary-edited");
+    let data = root.join("data");
+    let chat = Chat::new(&data);
+    opened(&data, &chat);
+    chat.replies(&["We talked about monads."]);
+    chat.send(ask_claude(), "ask Claude to refactor it", Some("t"));
+    assert_eq!(chat.calls().len(), 2);
+    edit_thread(&data, |rows| {
+        let first = rows.iter_mut().find(|row| row["role"] == "user").unwrap();
+        first["text"] = json!("what is a functor");
+    });
+    chat.replies(&["We talked about functors."]);
+    let reply = chat.send(ask_claude(), "ask Claude again", Some("t"));
+    let calls = chat.calls();
+    assert_eq!(
+        calls.len(),
+        3,
+        "the turns changed: the summary is written again"
+    );
+    let (_, contents) = sent(&calls[2].1);
+    assert_eq!(
+        contents,
+        [
+            "what is a functor",
+            "A monad is a monoid.",
+            "The summary so far:\n\n\nWrite the new summary."
+        ],
+        "from every turn, not on top of the stale summary"
+    );
+    assert!(reply
+        .packet
+        .unwrap()
+        .starts_with("Summary\nWe talked about functors."));
+}
+
+/// #433: a summary row stored before the hash (it counts turns but has none) still loads, and
+/// is a cache miss.
+#[test]
+fn a_summary_row_with_no_hash_loads_and_is_a_miss() {
+    let root = root("summary-old-row");
+    let data = root.join("data");
+    let chat = Chat::new(&data);
+    opened(&data, &chat);
+    chat.replies(&["We talked about monads."]);
+    chat.send(ask_claude(), "ask Claude to refactor it", Some("t"));
+    let summary = |data: &Path| {
+        ThreadStore::new(data)
+            .read("t")
+            .unwrap()
+            .into_iter()
+            .find(|r| r.role.as_deref() == Some("summary"))
+            .unwrap()
+    };
+    assert!(
+        summary(&data).covers_hash.is_some(),
+        "a new summary stores its hash"
+    );
+    edit_thread(&data, |rows| {
+        for row in rows.iter_mut().filter(|row| row["role"] == "summary") {
+            row.as_object_mut().unwrap().remove("covers_hash");
+        }
+    });
+    assert_eq!(summary(&data).covers_hash, None, "the old row loads");
+    chat.replies(&["Monads, again."]);
+    chat.send(ask_claude(), "ask Claude again", Some("t"));
+    assert_eq!(
+        chat.calls().len(),
+        3,
+        "no hash: the summary is written again"
+    );
+    assert_eq!(summary(&data).text.as_deref(), Some("Monads, again."));
+    assert!(summary(&data).covers_hash.is_some());
+}
+
+/// #433: a tier is named only right after the word `claude`.
+#[test]
+fn a_claude_tier_is_named_only_after_the_word_claude() {
+    use switchboard_core::frontdoor::chat::named_claude_tier;
+    assert_eq!(
+        named_claude_tier("ask Claude Opus about it").as_deref(),
+        Some("opus")
+    );
+    assert_eq!(
+        named_claude_tier("use claude-sonnet for this").as_deref(),
+        Some("sonnet")
+    );
+    assert_eq!(named_claude_tier("ask Claude to write a sonnet"), None);
+    assert_eq!(named_claude_tier("opus or haiku, ask claude"), None);
 }
