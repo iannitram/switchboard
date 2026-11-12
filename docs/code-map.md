@@ -4,7 +4,7 @@ Updated: 2026-11-12
 
 What each module owns, the Musts it carries (`SPEC.md`), what it talks to, and its status. An issue that fills a module moves its status from **planned** to **present** in the same PR (RUBRIC). Words are the glossary's (`GLOSSARY.md`).
 
-Status today: the core and faces have the present modules listed below; remaining skeleton bodies are `todo!("<Must id>")`. The runner's spec loader, step engine and owner steps' waiting items, the roadmap graph's lint, its drift, the roadmap units' plan and wiring, and unit-proof's red check and code map check are present; the other roadmap nodes remain planned.
+Status today: the core and faces have the present modules listed below; remaining skeleton bodies are `todo!("<Must id>")`. The runner's spec loader, step engine and owner steps' waiting items, the roadmap graph's lint, its drift, the roadmap units' plan and wiring, unit-proof's red check and code map check, and the unit frontier are present; the other roadmap nodes remain planned.
 
 reuses:
 - brocrew: the chat parts, the Waiting on you item, the work report entry and the fixed-report shape (Apache-2.0; our fork is archived, read and copied from only)
@@ -24,11 +24,12 @@ crates/core/                  switchboard-core: every rule, read and write
   src/github/                 snapshot, transport, poll, queue, merge
   src/sky/                    features, layout, drift, chain, codemap, priority, labels, jobs
   src/{waiting,reports,budget,backup,it}.rs
+  src/bug/                    the bug row and owner table; bug intake (scan, capture, validate, owner, dedupe, record, archive)
   src/frontdoor/              router, labeller, adapters, packet, sticky, thread
   src/autopilot/              review, driver, instructions, classify, weekly
   src/runner/                 workflow spec types, loading and validation; the step engine, its run state and the owner steps' waiting items
   src/roadmap/                the roadmap graph (ROADMAP's nodes and unspecified blocks, node spec files), its lint, its drift against the issues, and the units plan (issues and blocked-by links)
-  src/unit/                   proof: the red check of a unit's test command
+  src/unit/                   proof: the red check of a unit's test command; frontier: the unit frontier (open, unclaimed, unblocked units) and the next one to take
   src/workloop/               planned (after 1.0, `local-only`): backlog, run, packet, judge, progress, handoff
   tests/                      one test file per issue; fixtures/ (fleet stub, recorded answers)
 crates/cli/                   the `switchboard` binary: cli.rs (CLI-1..3), mcp.rs (MCP-1..3)
@@ -148,6 +149,11 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 
 ### sky-layers
 `app/src/sky/layers.ts` · SKY-3 · present. Pure functions over issue numbers and `Constellation.edges`: dependency layers (cycles share one), the order inside each column (a barycenter pass, called by `sky/roadmap.ts` for #392), and how many open issues wait on each. Dependency-layer columns remain for #413. Ported from obsidian-wayfinder (MIT, #455), its notice in the file.
+
+### bug
+`crates/core/src/bug/mod.rs` · bug-intake (#408) · present. The `Bug` row (`bugs.jsonl`; open and reproduced count as open) and the `OwnerRow` owner table (`parse_owners`: an array, or an object under `owners`).
+
+`crates/core/src/bug/intake.rs` · bug-intake (#408) · present. The seven intake steps as plain functions over files and rows: `scan` (`.zip` files at the inbox top and one folder down, never `_archive`, whose sha256 no bug row holds), `capture` (copy to `<date>-<id>/` with `SHA256SUMS`, read back), `validate` (the private-word scan of the whole text first, then the report form), `owner` (no row is refused naming the app), `dedupe` and `link_duplicate` (an open bug in the same repo with the same normalised signature gets the report's id instead of a new issue), `issue_text` (scans again, so a refused report yields no text), `record` (one `open` row, idempotent per report, under the ledger's `FileLock`) and `archive` (the original moves out of the inbox only when the raw copy's sha256 matches). Reports from GitHub issues, the CLI faces and the private-word list's source are not part of this file.
 
 ### waiting
 `crates/core/src/waiting.rs`, `app/src/views/Waiting.tsx` · WAIT-1, WAIT-2, WAIT-3 · planned. Items from the snapshot, CalDAV (U7), handoffs, guarded actions, IT tickets, refused backups, the stale priority copy and pool edits (U5); merged newest first; carried between reads. `LocalItems` (`<data>/waiting/local.json`): every change (`add`, `add_new`, `remove`, `change`) is one read, change and write under the file's `FileLock` (#431). The item view is ported from BroCrew.
@@ -283,6 +289,10 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 `crates/core/src/roadmap/drift.rs` · roadmap-drift (#400) · present. `find(roadmap_md, issues, today)` returns one `DriftItem` per gap, each `kind`, `ref` and `message` (JSON keys the same): `node-without-unit` (a node with no issue labelled `node:<id>`; `ref` the node id), `unit-without-node` (an issue whose `node:` labels name no node; `ref` `#<n>`), `stale-date` (ROADMAP's `Updated:` missing or more than 14 days old, the SKY-5 rule read from `sky::drift`; `ref` `ROADMAP.md`) and `fog-ready` (an unspecified item whose `waits on` nodes are all done, a node being done when its issue is closed; `ref` the item id). Pure; refused only when ROADMAP.md does not parse. The `switchboard roadmap drift <repo> --json` face is not wired yet. Tests: `crates/core/tests/roadmap_drift.rs`.
 
 ### unit
+`crates/core/src/unit/mod.rs` · unit-frontier (#402) · present. Declares `proof` and `frontier`.
+
+`crates/core/src/unit/frontier.rs` · unit-frontier (#402) · present. `frontier(inputs)` gives the units (issues labelled `node:<id>` with a node in the graph) that are open, not claimed and whose every blocker is closed and in the resolution records; a blocker missing from the issues still blocks. `next(inputs)` gives the first of them by open units unblocked, transitively (`unblocks`), then smaller size, then earlier roadmap line, then lower issue number. `Inputs` takes the graph, the issues, the (blocked, blocker) links, the resolved issue numbers and the claimed ones. `EMPTY_EXIT` (75) is the exit for an empty frontier; the `switchboard unit frontier` and `unit next` faces are not wired yet. Pure. Tests: `crates/core/tests/unit_frontier.rs`.
+
 `crates/core/src/unit/proof.rs` · unit-proof (#405) · present. `red_check(exit_code, output)` judges one run of a unit's test command: red only when the command exited non-zero and a test that ran failed, counted from cargo test's `test result:` lines (summed over every test binary; ignored tests count as neither). A run where every test passed, where no test ran (none matched, all ignored, a build that failed before any ran), or where the command did not exit is not red; `Verdict` says which. The caller runs the command; the module runs nothing. The `switchboard unit red-check` and `codemap-check` faces are not in `cli.rs` yet. Tests: `crates/core/tests/unit_proof.rs`.
 
 ### workloop
