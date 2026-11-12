@@ -23,6 +23,17 @@ export function ReportList({ reports }: { reports: Report[] }) {
   );
 }
 
+/** #331: a chat thread the core could not read; it is left out of the reports. */
+export type ThreadWarning = { thread_id: string; reason: string };
+/** #331: core's `reports::ReportsAnswer`. */
+export type ReportsAnswer = { reports: Report[]; warnings: ThreadWarning[] };
+
+/** #331: the answer as the core sends it. A bare list (the answer before #331) has no warnings. */
+export function answerOf(raw: Report[] | Partial<ReportsAnswer>): ReportsAnswer {
+  if (Array.isArray(raw)) return { reports: raw, warnings: [] };
+  return { reports: raw.reports ?? [], warnings: raw.warnings ?? [] };
+}
+
 /** REP-3: the JSON of core's `reports::Filter`; null means All. */
 export type Filter = { project: string | null; outcome: string | null; pool: string | null };
 export const NO_FILTER: Filter = { project: null, outcome: null, pool: null };
@@ -66,16 +77,19 @@ export function Reports() {
   const [shown, setShown] = useState<Report[] | null>(null); // null: show all
   const [filter, setFilter] = useState<Filter>(NO_FILTER);
   const [error, setError] = useState<CoreError | null>(null);
+  const [warnings, setWarnings] = useState<ThreadWarning[]>([]); // #331: threads left out
   const latest = useRef(0);
 
   useEffect(() => {
     let live = true;
-    call<Report[]>("reports").then((res) => {
+    call<ReportsAnswer | Report[]>("reports").then((res) => {
       if (!live) return;
       if ("error" in res) {
         setError(res.error);
       } else {
-        setAll(res.ok);
+        const answer = answerOf(res.ok);
+        setAll(answer.reports);
+        setWarnings(answer.warnings);
         setError(null);
       }
     });
@@ -92,12 +106,14 @@ export function Reports() {
       setError(null);
       return;
     }
-    call<Report[]>("reports", { filter: next }).then((res) => {
+    call<ReportsAnswer | Report[]>("reports", { filter: next }).then((res) => {
       if (request !== latest.current) return; // an answer for an older filter
       if ("error" in res) {
         setError(res.error);
       } else {
-        setShown(res.ok);
+        const answer = answerOf(res.ok);
+        setShown(answer.reports);
+        setWarnings(answer.warnings);
         setError(null);
       }
     });
@@ -105,11 +121,21 @@ export function Reports() {
 
   return (
     <>
-      {error ? (
+      {error || warnings.length > 0 ? (
         <div role="alert">
-          <p>{error.command} failed</p>
-          {error.lines.map((line, i) => (
-            <p key={i}>{line}</p>
+          {error ? (
+            <>
+              <p>{error.command} failed</p>
+              {error.lines.map((line, i) => (
+                <p key={i}>{line}</p>
+              ))}
+            </>
+          ) : null}
+          {/* #331: a chat thread that could not be read is left out, and says so. */}
+          {warnings.map((w) => (
+            <p key={w.thread_id}>
+              Chat thread {w.thread_id} was left out: {w.reason}
+            </p>
           ))}
         </div>
       ) : null}

@@ -465,17 +465,45 @@ pub fn read_done_cards(state_dir: &Path) -> Result<Vec<Value>, CoreError> {
     Ok(cards)
 }
 
+/// REP follow-up (#331): a chat thread the thread store could not read, and why. The report is
+/// left out; the warning goes in the reports answer so the Reports view can name it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ThreadWarning {
+    pub thread_id: String,
+    pub reason: String,
+}
+
+/// REP follow-up (#331): the reports answer, the reports plus the warnings for the threads that
+/// could not be read.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ReportsAnswer {
+    pub reports: Vec<Report>,
+    pub warnings: Vec<ThreadWarning>,
+}
+
 /// REP-1 (#348): each chat thread in the thread store under `data` (the folder
 /// `ThreadStore::new` takes), in the store's sorted id order. A missing store folder gives none.
 /// A thread that cannot be read is skipped, so the other threads still show.
 pub fn thread_rows(data: &Path) -> Vec<(String, Vec<JobRow>)> {
+    thread_rows_checked(data).0
+}
+
+/// REP follow-up (#331): `thread_rows`, and a warning for each thread that cannot be read, in
+/// the same sorted id order. The unreadable thread is still skipped.
+pub fn thread_rows_checked(data: &Path) -> (Vec<(String, Vec<JobRow>)>, Vec<ThreadWarning>) {
     let store = crate::frontdoor::thread::ThreadStore::new(data);
-    store
-        .list()
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|id| store.read(&id).ok().map(|rows| (id, rows)))
-        .collect()
+    let mut threads = Vec::new();
+    let mut warnings = Vec::new();
+    for id in store.list().unwrap_or_default() {
+        match store.read(&id) {
+            Ok(rows) => threads.push((id, rows)),
+            Err(e) => warnings.push(ThreadWarning {
+                thread_id: id,
+                reason: e.to_string(),
+            }),
+        }
+    }
+    (threads, warnings)
 }
 
 /// The reports for the done cards, then the threads, newest first (the ones without a time

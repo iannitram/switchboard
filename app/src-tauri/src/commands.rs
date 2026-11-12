@@ -11,7 +11,9 @@ use switchboard_core::fleet::{FleetBridge, FleetError, FleetErrorLog};
 use switchboard_core::frontdoor::implicit_log::log_implicit;
 use switchboard_core::it::{self, Loadout, ProbeRunner};
 use switchboard_core::platform::{current_os, loadout_probes, Probe};
-use switchboard_core::reports::{self, thread_rows, Filter, Report, FLEET_STATE_DIR_ENV};
+use switchboard_core::reports::{
+    self, thread_rows_checked, Filter, ReportsAnswer, FLEET_STATE_DIR_ENV,
+};
 use switchboard_core::settings::{self, Settings};
 // The test modules (`confirm_guarded_tests.rs`, `pool_edit_tests.rs`) take it in through `super::*`.
 #[cfg(test)]
@@ -471,14 +473,15 @@ pub fn save_pool_edit_rows(
 #[path = "pool_edit_tests.rs"]
 mod pool_edit_tests;
 
-/// REP-1, REP-3: the reports, newest first, narrowed by `filter` when the face sends one.
+/// REP-1, REP-3: the reports, newest first, narrowed by `filter` when the face sends one, and the
+/// warnings for chat threads that could not be read (#331).
 /// The chat threads join from the thread store in the app data folder (REP follow-up, #286).
 #[tauri::command]
 pub fn reports(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     filter: Option<Filter>,
-) -> Result<Vec<Report>, FaceError> {
+) -> Result<ReportsAnswer, FaceError> {
     bridge(&state.settings_path)
         .and_then(|fleet| {
             let env = std::env::var_os(FLEET_STATE_DIR_ENV);
@@ -486,8 +489,10 @@ pub fn reports(
                 .path()
                 .app_data_dir()
                 .map_err(|e| CoreError::Io(format!("app data dir: {e}")))?;
-            let threads = thread_rows(&data);
-            reports::load(&fleet, env.as_deref(), &threads, filter.as_ref())
+            // #331: a thread that cannot be read is skipped and named in the answer's warnings.
+            let (threads, warnings) = thread_rows_checked(&data);
+            let reports = reports::load(&fleet, env.as_deref(), &threads, filter.as_ref())?;
+            Ok(ReportsAnswer { reports, warnings })
         })
         .map_err(|e| {
             record_fleet_error(&state, &e);
