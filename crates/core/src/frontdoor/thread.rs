@@ -7,7 +7,6 @@ use crate::lock::FileLock;
 use crate::CoreError;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 /// How long a write waits for another writer of the same thread file (#419). A write under the
@@ -84,8 +83,8 @@ impl ThreadStore {
         file.write_all(text.as_bytes()).map_err(io_err)
     }
 
-    /// Write `rows` as the whole thread file, through a temp file of its own beside it and a
-    /// rename, so a reader never sees half a file. The caller holds the lock.
+    /// Write `rows` as the whole thread file (`lock::write_whole`), so a reader never sees half
+    /// a file. The caller holds the lock.
     fn rewrite_unlocked(&self, handoff_id: &str, rows: &[JobRow]) -> Result<(), CoreError> {
         let path = self.file(handoff_id);
         let mut text = String::new();
@@ -96,18 +95,7 @@ impl ThreadStore {
             );
             text.push('\n');
         }
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let tmp = path.with_extension(format!(
-            "{}-{}.tmp",
-            std::process::id(),
-            SEQ.fetch_add(1, Ordering::Relaxed)
-        ));
-        let io_err = |e: std::io::Error| CoreError::Io(format!("{}: {e}", path.display()));
-        std::fs::write(&tmp, text).map_err(io_err)?;
-        std::fs::rename(&tmp, &path).map_err(|e| {
-            let _ = std::fs::remove_file(&tmp);
-            io_err(e)
-        })
+        crate::lock::write_whole(&path, text.as_bytes())
     }
 
     /// Append one row to the thread's file (created on first write), under the thread's lock.

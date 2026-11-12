@@ -473,16 +473,10 @@ fn append_line<'a>(log: &'a std::path::Path, row: &Value) -> Result<LedgerUndo<'
     Ok(LedgerUndo { log, len })
 }
 
-/// Write `text` to `path` whole: a sibling temp file, then a rename, so a failed write never
-/// leaves a half-written `config.json`. The temp file's name is this run's own (#416).
+/// Write `text` to `path` whole through `lock::write_whole`, so a failed write never leaves a
+/// half-written `config.json`.
 fn replace_file(path: &std::path::Path, text: &str) -> Result<(), CoreError> {
-    let io = |e: std::io::Error| CoreError::Io(format!("{}: {e}", path.display()));
-    let tmp = crate::lock::temp_path(path, ".switchboard-tmp");
-    std::fs::write(&tmp, text).map_err(io)?;
-    std::fs::rename(&tmp, path).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp);
-        io(e)
-    })
+    crate::lock::write_whole(path, text.as_bytes())
 }
 
 /// BUD-3: refresh every pool that has a reader (`fleet budget --refresh --json`).

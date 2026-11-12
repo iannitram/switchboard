@@ -3,6 +3,7 @@
 Newest first. One line per change of stage, release or decision that the next session needs.
 
 
+- 2026-11-11 Whole-file writes (#447): settings, budget config, front-door threads, fleet error trim and autopilot loops replace their file through `lock::write_whole`, so a brief Windows sharing violation is retried instead of failing; backup.rs moves are left for a follow-up.
 - 2026-11-11 Lock busy wording (#443): a lock file whose holder has created it but not yet written its text is re-read for a few polls, and a taker that still finds it empty says the holder is still starting, not "another run"; locking itself is unchanged.
 - 2026-11-11 Runner roadmap (#394): the step runner's roadmap graph lands in ROADMAP.md (the `runner` feature line, a `nodes:` block of 19 nodes and an `unspecified:` block) with one file per node under `roadmap/nodes/`, the `runner` row in SPEC.md, and the two draft workflow specs under `specs/` (roadmap-run, bug-loop); documents only, no code.
 - 2026-11-11 Fleet timeout group kill (#445, #452): `kill_group` sends `kill -KILL -- -<pid>` (procps rejected `-s KILL --`, so a timed-out fleet call's grandchild survived on Linux); the grandchild-pipes test checks one wait of limit + 2 s with a 30 s hang bound, not a 4.8 s wall-clock limit.
