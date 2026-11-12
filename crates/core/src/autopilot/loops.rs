@@ -126,7 +126,7 @@ pub fn read(dir: &Path) -> LoopsFile {
 }
 
 /// Change `<dir>/loops.json` under its lock: read it, let `change` change it, and write it back
-/// (temp file and rename) when it changed. The answer is `change`'s.
+/// (`lock::write_whole`) when it changed. The answer is `change`'s.
 pub fn update<T>(dir: &Path, change: impl FnOnce(&mut LoopsFile) -> T) -> Result<T, CoreError> {
     let io = |e: std::io::Error| CoreError::Io(format!("{}: {e}", path(dir).display()));
     std::fs::create_dir_all(dir).map_err(io)?;
@@ -139,12 +139,7 @@ pub fn update<T>(dir: &Path, change: impl FnOnce(&mut LoopsFile) -> T) -> Result
         file.at = now_ms() / 1000;
         let text = serde_json::to_string_pretty(&file)
             .map_err(|e| CoreError::Parse(format!("{}: {e}", target.display())))?;
-        let temp = lock::temp_path(&target, ".tmp");
-        std::fs::write(&temp, text).map_err(io)?;
-        if let Err(e) = std::fs::rename(&temp, &target) {
-            let _ = std::fs::remove_file(&temp);
-            return Err(io(e));
-        }
+        lock::write_whole(&target, text.as_bytes())?;
     }
     Ok(answer)
 }

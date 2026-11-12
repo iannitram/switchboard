@@ -60,6 +60,8 @@ static SAVE_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// The temp file one save writes before its rename: `<name>.<pid>-<n>.tmp` beside the settings
 /// file, where `n` counts this process's saves. No two saves, in one process or two, share it.
+/// `save` no longer uses it (`lock::write_whole` names its own temp file); it is kept because
+/// `tests/settings_probe.rs` pins it.
 pub fn temp_path(path: &Path) -> PathBuf {
     let n = SAVE_SEQ.fetch_add(1, Ordering::Relaxed);
     let mut file_name = path
@@ -70,9 +72,9 @@ pub fn temp_path(path: &Path) -> PathBuf {
     path.with_file_name(file_name)
 }
 
-/// Write the settings file as pretty JSON, creating its folder. The write goes to a temp file of
-/// its own (`temp_path`) first and is renamed over the settings file, so a failure leaves the old
-/// file in place and two saves at once both succeed (the last rename wins).
+/// Write the settings file as pretty JSON, creating its folder. Written whole through
+/// `lock::write_whole`: a failure leaves the old file in place, and two saves at once both
+/// succeed (the last rename wins).
 pub fn save(path: &Path, settings: &Settings) -> Result<(), CoreError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -80,15 +82,28 @@ pub fn save(path: &Path, settings: &Settings) -> Result<(), CoreError> {
     }
     let text =
         serde_json::to_string_pretty(settings).map_err(|e| CoreError::Parse(format!("{e}")))?;
-    let tmp = temp_path(path);
-    std::fs::write(&tmp, text).map_err(|e| {
-        // A write that failed part way may have left the temp file.
-        let _ = std::fs::remove_file(&tmp);
-        CoreError::Io(format!("{}: {e}", tmp.display()))
-    })?;
-    std::fs::rename(&tmp, path).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp);
-        CoreError::Io(format!("{}: {e}", path.display()))
-    })?;
-    Ok(())
+    crate::lock::write_whole(path, text.as_bytes())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn save_round_trips_and_leaves_no_temp_file() {
+        let dir = std::env::temp_dir().join(format!("sb-447-settings-{}", crate::lock::run_tag()));
+        let path = dir.join("settings.json");
+        let settings = Settings {
+            pipeline_repo: Some(PathBuf::from("/some/pipeline")),
+            ..Default::default()
+        };
+        save(&path, &settings).unwrap();
+        assert_eq!(load(&path).unwrap(), settings);
+        let names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["settings.json".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
