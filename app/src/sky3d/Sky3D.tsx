@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode }
 import type { Constellation, SkyModel, Star } from "../sky/model";
 import { DriftList } from "../sky/DriftList";
 import { StarPanel } from "../sky/StarPanel";
+import { RoadmapView } from "../sky/RoadmapView";
 import { SkyScene, type ZoneEvent } from "./SkyScene";
 import { anchorPanel } from "./anchor";
 import { outsideX, placeLabels, shortName, truncate, type LabelCandidate, type Rect } from "./labels";
@@ -66,7 +67,7 @@ const ageLine = (sky: SkyModel) =>
     : `snapshot ${sky.ageMinutes} min old · priority copy ${sky.priorityAgeDays} days old`;
 
 /** Controls that keep their own pointer and wheel: no orbit or zoom starts on them. */
-const OWN_INPUT = ".sky3d-panel, .sky3d-drawer, .sky3d-drawer-toggle, .sky3d-toolbar, .sky3d-search, .sky3d-bottom, .sky3d-crumbs, .sky3d-head";
+const OWN_INPUT = ".sky3d-panel, .sky3d-drawer, .sky3d-drawer-toggle, .sky3d-toolbar, .sky3d-search, .sky3d-bottom, .sky3d-crumbs, .sky3d-head, .roadmap-lens";
 
 const isLens = (v: string | null): v is Lens => LENSES.some((l) => l.id === v);
 
@@ -104,6 +105,7 @@ export default function Sky3D({ sky, open, onOpen, onBack, picked, onPick, toolb
   const [hitIndex, setHitIndex] = useState(0);
 
   const zoomed: Constellation | undefined = open === null ? undefined : sky.constellations.find((c) => c.repo === open);
+  const roadmap = lens === "roadmap" && !!zoomed;
   const stars = useMemo(() => new Map((zoomed?.features ?? []).flatMap((f) => f.stars.map((s) => [s.number, s] as const))), [zoomed]);
   const hits = useMemo(() => (search ? searchSky(sky, search) : []), [sky, search]);
   // Live, as it is typed: what does not match winks out of the map (see wink.ts).
@@ -207,6 +209,7 @@ export default function Sky3D({ sky, open, onOpen, onBack, picked, onPick, toolb
   useEffect(() => {
     const scene = sceneRef.current;
     scene?.setOpen(open);
+    if (!open) setLens((current) => current === "roadmap" ? "natural" : current);
     setHoverStar(null);
     setHoverFeature(null);
     setHovered(null);
@@ -225,9 +228,9 @@ export default function Sky3D({ sky, open, onOpen, onBack, picked, onPick, toolb
     const scene = sceneRef.current;
     if (!scene) return;
     scene.setPicked(picked?.number ?? null);
-    if (picked && scene.interiorRepo() === open) scene.flyToStar(picked.number);
-  }, [picked]);
-  useEffect(() => sceneRef.current?.setLens(lens), [lens]);
+    if (picked && !roadmap && scene.interiorRepo() === open) scene.flyToStar(picked.number);
+  }, [picked, roadmap]);
+  useEffect(() => sceneRef.current?.setLens(lens === "roadmap" ? "natural" : lens), [lens]);
   useEffect(() => sceneRef.current?.invalidate());
 
   // Zooming in far enough enters a project, the same as a click; backing out leaves it.
@@ -290,7 +293,7 @@ export default function Sky3D({ sky, open, onOpen, onBack, picked, onPick, toolb
     } else if (c.level === "issue" && picked) scene.flyToStar(picked.number);
   };
 
-  // Keys: Escape steps back one level; / searches; n p d f b pick a lens.
+  // Keys: Escape steps back one level; / searches; n p d f b r pick a lens.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const typing = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement;
@@ -312,7 +315,7 @@ export default function Sky3D({ sky, open, onOpen, onBack, picked, onPick, toolb
         return;
       }
       const l = LENSES.find((x) => x.key === e.key.toLowerCase());
-      if (l) setLens((cur) => (cur === l.id && l.id !== "natural" ? "natural" : l.id));
+      if (l && (l.id !== "roadmap" || open)) setLens((cur) => (cur === l.id && l.id !== "natural" ? "natural" : l.id));
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -571,6 +574,7 @@ export default function Sky3D({ sky, open, onOpen, onBack, picked, onPick, toolb
       <section
         ref={rootRef}
         className={`sky3d${reduced ? " sky3d-still" : ""}`}
+        style={{ touchAction: roadmap ? "auto" : undefined }}
         aria-label={zoomed ? `Constellation ${zoomed.repo}` : "Sky"}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
@@ -583,9 +587,9 @@ export default function Sky3D({ sky, open, onOpen, onBack, picked, onPick, toolb
           }
         }}
       >
-        <div ref={stageRef} className="sky3d-stage" />
+        <div ref={stageRef} className="sky3d-stage" style={{ display: roadmap ? "none" : undefined }} />
 
-        <div ref={overviewLayer} className="sky3d-layer">
+        <div ref={overviewLayer} className="sky3d-layer" style={{ display: roadmap ? "none" : undefined }}>
           {sky.constellations.map((c) => (
             <button
               key={c.repo}
@@ -622,7 +626,7 @@ export default function Sky3D({ sky, open, onOpen, onBack, picked, onPick, toolb
           </div>
         </div>
 
-        {zoomed && (
+        {zoomed && !roadmap && (
           <div ref={galaxyLayer} className="sky3d-layer" style={{ opacity: 0 }}>
             {zoomed.features.map((f) =>
               f.stars.map((s) => (
@@ -675,6 +679,8 @@ export default function Sky3D({ sky, open, onOpen, onBack, picked, onPick, toolb
             )}
           </div>
         )}
+
+        {roadmap && <RoadmapView c={zoomed!} picked={picked} onPick={onPick} />}
 
         <nav ref={blocker} className="sky3d-crumbs" aria-label="Where you are">
           <ol>
@@ -755,7 +761,7 @@ export default function Sky3D({ sky, open, onOpen, onBack, picked, onPick, toolb
             {zoomed.chain.length > 0 && <p data-testid="chain-count">Longest chain: {zoomed.chain.length} stars</p>}
           </header>
         )}
-        {zoomed && zoomed.features.length === 0 && (
+        {zoomed && !roadmap && zoomed.features.length === 0 && (
           <div ref={unchartedRef} className="sky3d-panel sky3d-uncharted">
             <h3>Uncharted</h3>
             <p>A nebula: no roadmap features yet, so nothing has condensed into stars.</p>
@@ -815,7 +821,7 @@ export default function Sky3D({ sky, open, onOpen, onBack, picked, onPick, toolb
             {ageLine(sky)}
           </p>
           <div className="seg-group sky3d-lenses" role="group" aria-label="Lens">
-            {LENSES.map((l) => (
+            {LENSES.filter((l) => l.id !== "roadmap" || zoomed).map((l) => (
               <button key={l.id} className="seg" aria-pressed={lens === l.id} aria-keyshortcuts={l.key} title={`${l.asks} (${l.key})`} onClick={() => setLens(l.id)}>
                 {l.name}
               </button>
@@ -826,7 +832,9 @@ export default function Sky3D({ sky, open, onOpen, onBack, picked, onPick, toolb
               Legend
             </button>
             <div id="sky3d-legend" className={`sky3d-hint${legend ? " is-open" : ""}`}>
-              {lens !== "natural" ? (
+              {roadmap ? (
+                <p><b>Roadmap</b> · {lensInfo.asks} · r or n for natural</p>
+              ) : lens !== "natural" && lens !== "roadmap" ? (
                 <p>
                   <b>{lensInfo.name}</b> · {lensInfo.asks} · {lensCount === 0 ? "none right now" : `${lensCount} of ${sky.constellations.length} projects`} · n for natural
                 </p>
@@ -841,7 +849,7 @@ export default function Sky3D({ sky, open, onOpen, onBack, picked, onPick, toolb
                   <i className="k debris" /> drift <i className="k bridge" /> reuse
                 </p>
               )}
-              <p className="sky3d-dim">Scroll or pinch to zoom · drag to orbit · / to search · Esc to step back</p>
+              <p className="sky3d-dim">{roadmap ? "Scroll across stages · select a star for details · r or n for natural" : "Scroll or pinch to zoom · drag to orbit · / to search · Esc to step back"}</p>
             </div>
           </div>
         </footer>
