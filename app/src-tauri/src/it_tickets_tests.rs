@@ -37,7 +37,8 @@ fn stub_pipeline(name: &str) -> (PathBuf, PathBuf) {
          \x20   f.write(json.dumps({\"argv\": sys.argv[1:], \"stdin\": data}) + \"\\n\")\n\
          err = os.path.join(root, \"stderr.txt\")\n\
          if os.path.exists(err):\n\
-         \x20   sys.stderr.write(open(err).read())\n\
+         \x20   sys.stderr.buffer.write(open(err, \"rb\").read())\n\
+         \x20   sys.stderr.flush()\n\
          code = os.path.join(root, \"exit.txt\")\n\
          sys.exit(int(open(code).read()) if os.path.exists(code) else 0)\n",
     )
