@@ -9,6 +9,7 @@
 //! `rules::guard_pool_edit` and `budget::save_pool_edit`, as MCP's tools do (#357, #374).
 //! `budget --refresh` re-reads the pools first (#374); `settings` prints the settings file (#373).
 //! The front door (#384): `ask`, `ask_as_job` and `rate`, in `cli_frontdoor.rs`.
+//! Workflow documents: `spec validate <file>` checks the core's typed spec without running it.
 //!
 //! The raw `fleet` CLI stays the documented escape hatch: Switchboard keeps no state that only
 //! it can read.
@@ -80,7 +81,7 @@ pub const USAGE: &str = "usage: switchboard [--help | --version] [--json] [--rol
                      drop <archive | restore> <repo> | merge <repo>#<pr> | set_pool_cap <pool> <cap> | \
                      pool_edit <pool> [--plan <p>] [--cap <n>] [--reset <day time>] [--cost <n>] | \
                      autopilot <roadmap | review | merge | weekly | satellite> [--dry-run] | \
-                     autopilot status | mcp>";
+                     autopilot status | spec validate <file> | mcp>";
 
 /// The writes a CLI command can reach (CLI-3). The real ones are `CliWrites`; the tests pass
 /// fakes.
@@ -653,6 +654,7 @@ pub fn run_with(
         Some("waiting") => waiting(args.json),
         Some("reports") => reports(args.json, &filter),
         Some("errors") => errors_command(args.json),
+        Some("spec") => spec_command(&args),
         Some("loadout") => loadout_command(
             &it::read_this_machine(&it::SystemProbeRunner, SystemClock.now()),
             args.json,
@@ -1642,6 +1644,40 @@ fn errors_command(json: bool) -> ExitCode {
         return print_json("errors", serde_json::to_string_pretty(&answer.to_json()));
     }
     emit(&errors_text(&answer))
+}
+
+/// Validate a workflow document through the core; JSON failures retain an errors array.
+fn spec_command(args: &super::Args) -> ExitCode {
+    let path = match args.command.get(1..) {
+        Some([verb, path]) if verb == "validate" => path,
+        _ => {
+            eprintln!("switchboard: spec needs validate <file>");
+            eprintln!("{USAGE}");
+            return ExitCode::from(2);
+        }
+    };
+    let errors = match switchboard_core::runner::spec::load(Path::new(path)) {
+        Ok(_) => Vec::new(),
+        Err(error) => vec![error.to_string()],
+    };
+    let code = if args.json {
+        print_json(
+            "spec validate",
+            serde_json::to_string_pretty(&json!({ "errors": errors })),
+        )
+    } else if errors.is_empty() {
+        emit(&format!("{}: valid\n", terminal_safe(path)))
+    } else {
+        for error in &errors {
+            eprintln!("switchboard spec validate: {}", terminal_safe(error));
+        }
+        ExitCode::from(1)
+    };
+    if code == ExitCode::SUCCESS && !errors.is_empty() {
+        ExitCode::from(1)
+    } else {
+        code
+    }
 }
 
 /// One line per fleet error as the app's banner words it, then one per open IT ticket.

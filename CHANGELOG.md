@@ -2,7 +2,7 @@
 
 Newest first. One line per change of stage, release or decision that the next session needs.
 
-
+- 2026-11-11 Runner specs (#395): typed workflow records, states, steps, scorers and invariants load with step-and-key validation errors; `switchboard spec validate <file> --json` reports `.errors` and exits non-zero for an invalid spec. Both repo workflow specs validate.
 - 2026-11-11 Lock owner test bound (#448): `a_lock_left_by_a_process_that_died_is_taken_over_at_once` keeps the 5 s take timeout and asserts a dead holder's lock is taken over in under 4 s (a live holder runs the whole timeout out), printing the measured time and round on failure; test only, no product change.
 - 2026-11-11 Whole-file writes (#447): settings, budget config, front-door threads, fleet error trim and autopilot loops replace their file through `lock::write_whole`, so a brief Windows sharing violation is retried instead of failing; backup.rs moves are left for a follow-up.
 - 2026-11-11 Lock busy wording (#443): a lock file whose holder has created it but not yet written its text is re-read for a few polls, and a taker that still finds it empty says the holder is still starting, not "another run"; locking itself is unchanged.
