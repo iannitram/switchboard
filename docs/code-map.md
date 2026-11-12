@@ -4,7 +4,7 @@ Updated: 2026-11-12
 
 What each module owns, the Musts it carries (`SPEC.md`), what it talks to, and its status. An issue that fills a module moves its status from **planned** to **present** in the same PR (RUBRIC). Words are the glossary's (`GLOSSARY.md`).
 
-Status today: the core and faces have the present modules listed below; remaining skeleton bodies are `todo!("<Must id>")`. The runner's spec loader, the roadmap graph's lint, its drift, and the roadmap units' plan and wiring are present; the runner's engine and the other roadmap nodes remain planned.
+Status today: the core and faces have the present modules listed below; remaining skeleton bodies are `todo!("<Must id>")`. The runner's spec loader and step engine, the roadmap graph's lint, its drift, and the roadmap units' plan and wiring are present; the other roadmap nodes remain planned.
 
 reuses:
 - brocrew: the chat parts, the Waiting on you item, the work report entry and the fixed-report shape (Apache-2.0; our fork is archived, read and copied from only)
@@ -22,7 +22,7 @@ crates/core/                  switchboard-core: every rule, read and write
   src/{waiting,reports,budget,backup,it}.rs
   src/frontdoor/              router, labeller, adapters, packet, sticky, thread
   src/autopilot/              review, driver, instructions, classify, weekly
-  src/runner/                 workflow spec types, loading and validation
+  src/runner/                 workflow spec types, loading and validation; the step engine and its run state
   src/roadmap/                the roadmap graph (ROADMAP's nodes and unspecified blocks, node spec files), its lint, its drift against the issues, and the units plan (issues and blocked-by links)
   src/workloop/               planned (after 1.0, `local-only`): backlog, run, packet, judge, progress, handoff
   tests/                      one test file per issue; fixtures/ (fleet stub, recorded answers)
@@ -258,9 +258,13 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - AUTO-2 roadmap pass (`roadmap_pass`, `pm_job` in `passes.rs`; run by `after_poll`): present.
 
 ### runner
-`crates/core/src/runner/mod.rs` · runner-spec (#395) · present. Exposes the runner's shared spec module to the CLI and future engine.
+`crates/core/src/runner/mod.rs` · runner-spec (#395) · present. Exposes the runner's spec, engine and state modules.
 
-`crates/core/src/runner/spec.rs` · runner-spec (#395) · present. `Spec`, typed records, states, steps, actors, run descriptions, scorers and invariants; `load` reads UTF-8 JSON and `parse` decodes it through serde, then checks state references with `Spec::validate`. A missing or malformed step key and an unknown actor or state name the step and key in `CoreError`. Both draft specs under `specs/` validate. Commands, type expressions and external invariant checks are descriptions, never executed by validation. The runner engine and remaining runner roadmap nodes are planned.
+`crates/core/src/runner/spec.rs` · runner-spec (#395) · present. `Spec`, typed records, states, steps, actors, run descriptions, scorers and invariants; `load` reads UTF-8 JSON and `parse` decodes it through serde, then checks state references with `Spec::validate`. A missing or malformed step key and an unknown actor or state name the step and key in `CoreError`. Both draft specs under `specs/` validate. Commands, type expressions and external invariant checks are descriptions, never executed by validation.
+
+`crates/core/src/runner/engine.rs` · runner-engine (#396) · present. `Engine::step(spec, unit)` runs the one step whose `from_state` is the unit's saved state (or the step a retry is pending for) and answers a `StepReport`. A step with home `pipeline` and a command, of any kind, runs through `FleetBridge::run_json` (no new shell-out); every other step goes to the caller's `StepRunner`, so the engine starts no process of its own. Exit 75 is `NotNow`: the state is unchanged and the note says "not now". Exit 0 with every done_when check holding (`Checker`; `BasicChecks` reads `exit 0`, `with JSON` and `JSON .field == value`, and takes any check text it does not consume entirely, such as prose or a `:`/`;` tail after `exit 0`, as unmet) moves to `to_state_ok`. Any other result moves to `to_state_fail` and counts a failure: while the count is within `on_fail.retry` the next call runs the same step again, then `on_fail.then` halts the run as escalate, park, ask-owner or fail. A pending retry pins the failed step, so a step that leaves `to_state_fail` waits until the retries are used up. Placeholders such as `<repo>` in a pipeline command reach `fleet.py` unchanged; filling in unit values belongs to a later node.
+
+`crates/core/src/runner/state.rs` · runner-engine (#396) · present. `RunState` (state, failures per step, pending retry, halt, last result and note) and `StateStore`, one JSON file per spec and unit written whole (`lock::write_whole`), so a restart resumes at the same step. A state file that does not parse is an error, never a fresh start.
 
 ### roadmap
 `crates/core/src/roadmap/mod.rs` · roadmap-graph (#398) · present. `lint(clone)` reads the clone's ROADMAP.md and `roadmap/nodes/<id>.json` and returns a `LintReport`: `errors` (fail the lint) and `warnings`, each a `Finding` with its `check`, the `id` it is about and a message. Refused outright only when ROADMAP.md is unreadable or a line of its blocks does not parse.
