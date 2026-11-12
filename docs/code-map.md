@@ -4,12 +4,16 @@ Updated: 2026-11-12
 
 What each module owns, the Musts it carries (`SPEC.md`), what it talks to, and its status. An issue that fills a module moves its status from **planned** to **present** in the same PR (RUBRIC). Words are the glossary's (`GLOSSARY.md`).
 
-Status today: the core and faces have the present modules listed below; remaining skeleton bodies are `todo!("<Must id>")`. The runner's spec loader and step engine, the roadmap graph's lint, its drift, and the roadmap units' plan and wiring are present; the other roadmap nodes remain planned.
+Status today: the core and faces have the present modules listed below; remaining skeleton bodies are `todo!("<Must id>")`. The runner's spec loader and step engine, the roadmap graph's lint, its drift, the roadmap units' plan and wiring, and unit-proof's red check and code map check are present; the other roadmap nodes remain planned.
 
 reuses:
 - brocrew: the chat parts, the Waiting on you item, the work report entry and the fixed-report shape (Apache-2.0; our fork is archived, read and copied from only)
 
-(The sky reads this block, SKY-6. Ideas taken from projects that are not ours, such as wayfinder-maps' look, are credited in the README, not here.)
+modules:
+- unit-proof: crates/core/src/unit/proof.rs (present)
+- unit-proof: crates/core/src/sky/codemap.rs (present)
+
+(The sky reads the `reuses:` block, SKY-6. The code map check reads `modules:`, unit-proof (#405). Ideas taken from projects that are not ours, such as wayfinder-maps' look, are credited in the README, not here.)
 
 ## Layout
 
@@ -24,6 +28,7 @@ crates/core/                  switchboard-core: every rule, read and write
   src/autopilot/              review, driver, instructions, classify, weekly
   src/runner/                 workflow spec types, loading and validation; the step engine and its run state
   src/roadmap/                the roadmap graph (ROADMAP's nodes and unspecified blocks, node spec files), its lint, its drift against the issues, and the units plan (issues and blocked-by links)
+  src/unit/                   proof: the red check of a unit's test command
   src/workloop/               planned (after 1.0, `local-only`): backlog, run, packet, judge, progress, handoff
   tests/                      one test file per issue; fixtures/ (fleet stub, recorded answers)
 crates/cli/                   the `switchboard` binary: cli.rs (CLI-1..3), mcp.rs (MCP-1..3)
@@ -124,7 +129,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 `crates/core/src/sky/chain.rs` · SKY-3, SKY-7 · present. `Blocked by #N` edges and the longest open chain.
 
 ### sky-codemap
-`crates/core/src/sky/codemap.rs` · SKY-6 · present. This file's `reuses:` block; a reuse of a Parked or archived repo is a warning.
+`crates/core/src/sky/codemap.rs` · SKY-6, unit-proof (#405) · present. This file's `reuses:` block; a reuse of a Parked or archived repo is a warning. `modules` reads the `modules:` block; `check_modules(node, touched, base, head)` is the code map check: a file the change adds needs a `modules:` line of its node that covers it (a path ending in `/` covers its directory); a covered file's line must read `present`; and the change must touch docs/code-map.md with its `Updated:` date not older than the base's. Tests: `crates/core/tests/unit_proof.rs`.
 
 ### sky-priority
 `crates/core/src/sky/priority.rs` · SKY-9 · present. The priority copy in fleet-state (U4's default), its age, stale after 7 days.
@@ -274,6 +279,9 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 `crates/core/src/roadmap/units.rs` · roadmap-units (#399) · present. `plan(graph, issues, repo)` gives the create-queue issues (`Create::Issue`) for the nodes with no issue yet: a node is skipped when an open or closed issue carries its `node:<id>` label; each new issue carries that label, its `type:<type>` label and its `feature:<feature>` label. `wire(graph, numbers, linked)` gives the native blocked-by `Link`s for every `after` id, in graph order, minus the (blocked, blocker) pairs already linked, so a second run gives none; refused when a node or an `after` id has no issue number. Both are pure: the caller sends the creates through the queue and the links to GitHub. Tests: `crates/core/tests/roadmap_units.rs`.
 
 `crates/core/src/roadmap/drift.rs` · roadmap-drift (#400) · present. `find(roadmap_md, issues, today)` returns one `DriftItem` per gap, each `kind`, `ref` and `message` (JSON keys the same): `node-without-unit` (a node with no issue labelled `node:<id>`; `ref` the node id), `unit-without-node` (an issue whose `node:` labels name no node; `ref` `#<n>`), `stale-date` (ROADMAP's `Updated:` missing or more than 14 days old, the SKY-5 rule read from `sky::drift`; `ref` `ROADMAP.md`) and `fog-ready` (an unspecified item whose `waits on` nodes are all done, a node being done when its issue is closed; `ref` the item id). Pure; refused only when ROADMAP.md does not parse. The `switchboard roadmap drift <repo> --json` face is not wired yet. Tests: `crates/core/tests/roadmap_drift.rs`.
+
+### unit
+`crates/core/src/unit/proof.rs` · unit-proof (#405) · present. `red_check(exit_code, output)` judges one run of a unit's test command: red only when the command exited non-zero and a test that ran failed, counted from cargo test's `test result:` lines (summed over every test binary; ignored tests count as neither). A run where every test passed, where no test ran (none matched, all ignored, a build that failed before any ran), or where the command did not exit is not red; `Verdict` says which. The caller runs the command; the module runs nothing. The `switchboard unit red-check` and `codemap-check` faces are not in `cli.rs` yet. Tests: `crates/core/tests/unit_proof.rs`.
 
 ### workloop
 `crates/core/src/workloop/` · no Musts yet (`local-only`, after 1.0) · planned, not in the skeleton. The work loop: stars built unattended in dependency order, each turn a fleet job with a fresh context, judged by the harness. Design and the analysis of Craft Anything's Make loop it comes from: `docs/work-loop.md`. Nothing here gets an issue until the `local-only` feature has its own Spec; the module names are a proposal. Nothing is lifted from Craft Anything (ours, MIT or Apache-2.0) yet, so it has no line in the `reuses:` block above, which the sky draws as a reuse line (SKY-6); the PR that first lifts code (the check result shape, the stall guard or the context trim, `docs/work-loop.md` §7 question 8) adds that line.
