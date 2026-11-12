@@ -117,9 +117,7 @@ fn modified(path: &str) -> Touched {
 }
 
 fn has(findings: &[Finding], check: &str, path: &str) -> bool {
-    findings
-        .iter()
-        .any(|f| f.check == check && f.path == path)
+    findings.iter().any(|f| f.check == check && f.path == path)
 }
 
 #[test]
@@ -137,7 +135,11 @@ fn a_new_file_with_no_modules_line_fails() {
     let touched = [added("crates/core/src/unit/claim.rs")];
     let findings = check_modules("unit-proof", &touched, BASE, DONE);
     assert!(
-        has(&findings, "no_modules_line", "crates/core/src/unit/claim.rs"),
+        has(
+            &findings,
+            "no_modules_line",
+            "crates/core/src/unit/claim.rs"
+        ),
         "{findings:?}"
     );
 }
@@ -148,7 +150,10 @@ fn a_new_file_under_a_directory_line_passes() {
         "- unit-proof: crates/core/src/unit/proof.rs (present)",
         "- unit-proof: crates/core/src/unit/ (present)",
     );
-    let touched = [added("crates/core/src/unit/claim.rs"), modified("docs/code-map.md")];
+    let touched = [
+        added("crates/core/src/unit/claim.rs"),
+        modified("docs/code-map.md"),
+    ];
     let findings = check_modules("unit-proof", &touched, BASE, &head);
     assert!(findings.is_empty(), "{findings:?}");
 }
@@ -166,8 +171,16 @@ fn a_planned_to_present_change_with_a_moved_date_passes() {
 
 #[test]
 fn a_file_under_a_line_still_planned_fails_the_status() {
-    let touched = [added("crates/core/src/unit/proof.rs"), modified("docs/code-map.md")];
-    let findings = check_modules("unit-proof", &touched, BASE, &BASE.replace("2026-11-08", "2026-11-12"));
+    let touched = [
+        added("crates/core/src/unit/proof.rs"),
+        modified("docs/code-map.md"),
+    ];
+    let findings = check_modules(
+        "unit-proof",
+        &touched,
+        BASE,
+        &BASE.replace("2026-11-08", "2026-11-12"),
+    );
     assert!(
         has(&findings, "status_planned", "crates/core/src/unit/proof.rs"),
         "{findings:?}"
@@ -179,7 +192,11 @@ fn a_covered_change_without_the_code_map_fails_the_date() {
     let touched = [added("crates/core/src/unit/proof.rs")];
     let findings = check_modules("unit-proof", &touched, BASE, DONE);
     assert!(
-        has(&findings, "code_map_not_updated", "crates/core/src/unit/proof.rs"),
+        has(
+            &findings,
+            "code_map_not_updated",
+            "crates/core/src/unit/proof.rs"
+        ),
         "{findings:?}"
     );
 }
@@ -187,10 +204,17 @@ fn a_covered_change_without_the_code_map_fails_the_date() {
 #[test]
 fn a_code_map_date_older_than_the_base_fails() {
     let head = DONE.replace("2026-11-12", "2026-11-01");
-    let touched = [added("crates/core/src/unit/proof.rs"), modified("docs/code-map.md")];
+    let touched = [
+        added("crates/core/src/unit/proof.rs"),
+        modified("docs/code-map.md"),
+    ];
     let findings = check_modules("unit-proof", &touched, BASE, &head);
     assert!(
-        has(&findings, "code_map_not_updated", "crates/core/src/unit/proof.rs"),
+        has(
+            &findings,
+            "code_map_not_updated",
+            "crates/core/src/unit/proof.rs"
+        ),
         "{findings:?}"
     );
 }
@@ -205,7 +229,10 @@ fn a_change_outside_the_node_needs_nothing() {
 #[test]
 fn the_repo_code_map_has_both_unit_proof_files_present() {
     let text = include_str!("../../../docs/code-map.md");
-    for path in ["crates/core/src/unit/proof.rs", "crates/core/src/sky/codemap.rs"] {
+    for path in [
+        "crates/core/src/unit/proof.rs",
+        "crates/core/src/sky/codemap.rs",
+    ] {
         assert!(
             modules(text)
                 .iter()

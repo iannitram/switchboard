@@ -31,6 +31,7 @@ pub mod rules;
 pub mod runner;
 pub mod settings;
 pub mod sky;
+pub mod unit;
 pub mod waiting;
 
 pub use error::CoreError;
