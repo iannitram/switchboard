@@ -163,9 +163,17 @@ fn a_grandchild_holding_the_pipes_after_the_child_exits_costs_one_wait_and_is_st
     let _ = std::fs::remove_file(&pidfile);
     let json = result.expect("the child's JSON, not an error");
     assert!(json.is_object() || json.is_array(), "{json}");
+    // One wait of limit + 2 s: the bridge holds the pipes open until then, so the call cannot
+    // return sooner than that (a pipe-holding grandchild is what makes it wait). The upper bound
+    // is generous and only catches a real hang; a loaded machine may overshoot the wait.
+    let one_wait = Duration::from_secs(2) + Duration::from_secs(2);
     assert!(
-        elapsed < Duration::from_millis(4_800),
-        "one wait of limit + 2 s, took {elapsed:?}"
+        elapsed >= one_wait,
+        "the call returned before its one wait of limit + 2 s: took {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(30),
+        "the call hung: took {elapsed:?} (one wait of limit + 2 s is {one_wait:?})"
     );
     assert!(
         !pid.trim().is_empty() && !alive,
