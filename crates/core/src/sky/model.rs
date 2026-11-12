@@ -47,6 +47,9 @@ pub struct Constellation {
     pub angle: f64,
     pub brightness: f64,
     pub features: Vec<SkyFeature>,
+    /// Absent for older roadmaps without a development stages table.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stages: Option<Vec<SkyStage>>,
     /// [blocker, blocked]
     pub edges: Vec<[u64; 2]>,
     pub chain: Vec<u64>,
@@ -60,6 +63,16 @@ pub struct SkyFeature {
     pub title: String,
     pub release: String,
     pub stars: Vec<Star>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SkyStage {
+    pub number: u32,
+    pub name: String,
+    pub features: Vec<String>,
+    pub done: usize,
+    pub total: usize,
+    pub complete: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -202,6 +215,43 @@ fn constellation(
         size: placement.size,
         angle: placement.angle,
         brightness: layout::brightness(&snap.issues, &block),
+        stages: snap
+            .roadmap_md
+            .as_deref()
+            .and_then(features::parse_stages)
+            .map(|stages| {
+                // An issue under features in two stages counts once, in the first.
+                let mut counted = std::collections::HashSet::new();
+                stages
+                    .into_iter()
+                    .map(|stage| {
+                        let issues: Vec<_> = snap
+                            .issues
+                            .iter()
+                            .filter(|issue| {
+                                stage
+                                    .features
+                                    .iter()
+                                    .any(|id| issue.labels.contains(&format!("feature:{id}")))
+                                    && counted.insert(issue.number)
+                            })
+                            .collect();
+                        let total = issues.len();
+                        let done = issues
+                            .iter()
+                            .filter(|issue| issue.state == "closed")
+                            .count();
+                        SkyStage {
+                            number: stage.number,
+                            name: stage.name,
+                            features: stage.features,
+                            done,
+                            total,
+                            complete: total > 0 && done == total,
+                        }
+                    })
+                    .collect()
+            }),
         features: block
             .features
             .iter()

@@ -1,6 +1,6 @@
 # Code map
 
-Updated: 2026-11-11
+Updated: 2026-11-12
 
 What each module owns, the Musts it carries (`SPEC.md`), what it talks to, and its status. An issue that fills a module moves its status from **planned** to **present** in the same PR (RUBRIC). Words are the glossary's (`GLOSSARY.md`).
 
@@ -111,7 +111,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - GH-5 carry-over by patch-id (`carried_over_by_patch_id`: the PR's own diff from main has the same `git patch-id --verbatim` at the PASS sha and the head; used by the merge pass and `switchboard merge`): present.
 
 ### sky-features
-`crates/core/src/sky/features.rs` · SKY-2, SKY-3, SKY-5 · present. Parses ROADMAP.md's `Updated:` and `features:` block (format in `ROADMAP.md`; `release: 1.0`, `after-1.0` or `after-2.0`).
+`crates/core/src/sky/features.rs` · SKY-2, SKY-3, SKY-5 · present. Reads ROADMAP.md's `Updated:` and `features:` block (`parse`; `release: 1.0`, `after-1.0` or `after-2.0`) and the `Development stages` table (`parse_stages`, #392). Stages are in numeric order; the leading bold phrase supplies a stage name, and backtick-delimited ids in the Features cell supply membership. A feature repeated in later stages belongs to the first stage; prose such as "all with a view" assigns no features. Missing tables return `None`. Reader and model checks: `crates/core/tests/sky_stages.rs`.
 
 ### sky-layout
 `crates/core/src/sky/layout.rs` · SKY-1, SKY-2 · present. Rank to radius, size and angle; brightness from the `1.0` milestone and `release: 1.0` dark stars (`after-1.0` and `after-2.0` are not counted).
@@ -135,13 +135,13 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 `crates/core/src/sky/jobs.rs` · SKY-4, SKY-8 · present. The fleet jobs in flight from the fleet ledger's events (a `start` with no later `end` from the same machine), the job `star` names.
 
 ### sky-model
-`crates/core/src/sky/model.rs` · SKY-1 to SKY-9 · present. The SkyModel the `sky` command answers: the snapshot store and the priority copy in the app data folder, with the jobs in flight from the fleet ledger (`load_with_ledger`), assembled from the sky modules; no snapshot is `GitHub: no snapshot yet`.
+`crates/core/src/sky/model.rs` · SKY-1 to SKY-9 · present. The SkyModel the `sky` command answers: the snapshot store and the priority copy in the app data folder, with the jobs in flight from the fleet ledger (`load_with_ledger`), assembled from the sky modules; no snapshot is `GitHub: no snapshot yet`. Development stages carry done / total unique issues and completion (a nonempty stage with every issue closed); the optional `stages` field is omitted when there is no stages table, preserving older sky answers.
 
 ### sky-face
-`app/src/views/Sky.tsx` (+ `app/src/sky/`) · SKY-1, SKY-3, SKY-4, SKY-5, SKY-6, SKY-7, SKY-8 · present. SVG: the sky, the zoomed constellation (clusters, stars, blocked-by lines, milestone rings), star states, the drift list, reuse lines, the chain highlight, the star panel. Paints what the core worked out.
+`app/src/views/Sky.tsx`, `app/src/sky3d/Sky3D.tsx` (+ `app/src/sky/`) · SKY-1, SKY-3, SKY-4, SKY-5, SKY-6, SKY-7, SKY-8 · present. The 3D sky and its SVG fallback paint clusters, stars, blocked-by lines, milestone rings, drift, reuse, the chain and star details. The project switcher includes Roadmap (`r`, #392): `RoadmapView.tsx`, `roadmap.ts` and `roadmap.css` draw scrollable stage columns with core-supplied counts and completion, selectable stars and cross-stage blocked-by lines. Unlisted features, including dark stars, go in a final Unstaged column; a missing table says so. Other lenses restore their sky. `RoadmapView.test.tsx` checks layout, links, selection, missing data and the live switcher.
 
 ### sky-layers
-`app/src/sky/layers.ts` · SKY-3 · present, no caller yet (#392's stage columns and #413's layer columns call it). Pure functions over issue numbers and `Constellation.edges`: dependency layers (cycles share one), the order inside each column (a barycenter pass), and how many open issues wait on each. Ported from obsidian-wayfinder (MIT, #455), its notice in the file.
+`app/src/sky/layers.ts` · SKY-3 · present. Pure functions over issue numbers and `Constellation.edges`: dependency layers (cycles share one), the order inside each column (a barycenter pass, called by `sky/roadmap.ts` for #392), and how many open issues wait on each. Dependency-layer columns remain for #413. Ported from obsidian-wayfinder (MIT, #455), its notice in the file.
 
 ### waiting
 `crates/core/src/waiting.rs`, `app/src/views/Waiting.tsx` · WAIT-1, WAIT-2, WAIT-3 · planned. Items from the snapshot, CalDAV (U7), handoffs, guarded actions, IT tickets, refused backups, the stale priority copy and pool edits (U5); merged newest first; carried between reads. `LocalItems` (`<data>/waiting/local.json`): every change (`add`, `add_new`, `remove`, `change`) is one read, change and write under the file's `FileLock` (#431). The item view is ported from BroCrew.

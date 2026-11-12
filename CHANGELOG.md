@@ -2,6 +2,7 @@
 
 Newest first. One line per change of stage, release or decision that the next session needs.
 
+- 2026-11-12 Roadmap lens (#392): project stars follow development-stage columns with issue counts, completion and blocked-by links; unlisted features stay Unstaged and a missing stages table says so.
 - 2026-11-12 Backup renames (#447): restore marks use `lock::write_whole`; `releases.json`, the bundle, staged publications, folder moves and the aside swap share `lock::rename_retrying` and its bounded Windows retry, with the swap order and failure cleanup unchanged.
 - 2026-11-11 Fleet-state write research (#401): recommend checking the base tree and publishing with an explicit expected-SHA lease; compare Git push, Contents API and Git Data API races in research/fleet-state-write.md; no code change.
 - 2026-11-11 Runner specs (#395): typed workflow records, states, steps, scorers and invariants load with step-and-key validation errors; `switchboard spec validate <file> --json` reports `.errors` and exits non-zero for an invalid spec. Both repo workflow specs validate.
