@@ -25,6 +25,9 @@ export type Star = {
 /** One roadmap feature: a cluster of stars. No stars is a dark star. */
 export type Feature = { id: string; title: string; release: Release; stars: Star[] };
 
+/** A development stage, with unique issues counted by the core. Empty stages stay incomplete. */
+export type RoadmapStage = { number: number; name: string; features: string[]; done: number; total: number; complete: boolean };
+
 /** SKY-5: one drift item; `link` goes to the issue or to ROADMAP.md. */
 export type DriftItem = { kind: "orphan" | "dark" | "stale"; text: string; link: string };
 
@@ -44,6 +47,8 @@ export type Constellation = {
   /** SKY-2: progress to 1.0, 0 to 1. */
   brightness: number;
   features: Feature[];
+  /** Missing on roadmaps without a Development stages table (and older snapshots). */
+  stages?: RoadmapStage[];
   /** SKY-3: [blocker, blocked] issue numbers, one per `Blocked by #N`. */
   edges: [number, number][];
   /** SKY-7: the longest chain, first blocker to last blocked; empty when none. */

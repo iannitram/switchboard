@@ -48,13 +48,14 @@ export function debrisCount(n: number): number {
 
 // ---- lenses: one question each, the same galaxy re-lit ----------------------------------------
 
-export type Lens = "natural" | "progress" | "drift" | "flight" | "blocked";
+export type Lens = "natural" | "progress" | "drift" | "flight" | "blocked" | "roadmap";
 export const LENSES: { id: Lens; key: string; name: string; asks: string }[] = [
   { id: "natural", key: "n", name: "Natural", asks: "The sky as it is" },
   { id: "progress", key: "p", name: "Progress", asks: "How close is each project to 1.0?" },
   { id: "drift", key: "d", name: "Drift", asks: "Where is the roadmap out of step?" },
   { id: "flight", key: "f", name: "In flight", asks: "What is being worked on now?" },
   { id: "blocked", key: "b", name: "Blocked", asks: "What waits on what?" },
+  { id: "roadmap", key: "r", name: "Roadmap", asks: "What comes next in this project's development stages?" },
 ];
 
 export type SystemFacts = { condensed: number; drift: number; flying: number; blocked: number; charted: boolean };
