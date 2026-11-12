@@ -474,12 +474,54 @@ fn holder_gone(path: &Path) -> bool {
     read_holder(path).is_some_and(|holder| holder.gone())
 }
 
+/// How many times the error path re-reads a lock file whose holder text is still empty or
+/// partial (#443), `POLL` apart.
+const SETTLE_READS: u32 = 5;
+
+/// True when a lock file's text is not yet a whole holder: empty, or a new-format file cut
+/// short before its process id (the holder writes it in one go, so a read can land mid-write).
+/// A file from before #431 is one token line and is whole.
+fn holder_is_partial(text: &str) -> bool {
+    let holder = Holder::parse(text);
+    holder.token.is_empty() || (text.contains("token=") && holder.pid.is_none())
+}
+
+/// The text of a lock file once its holder has written it: re-read up to `SETTLE_READS` times,
+/// `POLL` apart, while it is partial (#443). `None` when the file is gone.
+fn settled_text(path: &Path) -> Option<String> {
+    settle(|| std::fs::read_to_string(path).ok())
+}
+
+/// `settled_text` over any reader, so the re-reads can be tested without timing.
+fn settle(mut read: impl FnMut() -> Option<String>) -> Option<String> {
+    let mut text = read()?;
+    for _ in 0..SETTLE_READS {
+        if !holder_is_partial(&text) {
+            break;
+        }
+        std::thread::sleep(POLL);
+        text = read()?;
+    }
+    Some(text)
+}
+
 /// The error a taker gets when `wait` ran out (#431): what holds the lock, when the file says,
 /// and to wait for it or check on it. Removing the lock file is offered only when its holder
 /// is provably gone; a live holder's never is.
 fn busy(target: &Path, path: &Path, wait: Duration) -> CoreError {
     let waited = wait.as_secs_f64().ceil();
-    let holder = read_holder(path).unwrap_or_default();
+    let settled = settled_text(path);
+    // A holder that has created the lock file and not yet written its text (#443): it is
+    // starting, and naming it as "another run" would be wrong.
+    if settled.as_deref().is_some_and(holder_is_partial) {
+        return CoreError::Io(format!(
+            "{} is locked by a run that is still starting (waited {waited} s for {}); wait a \
+             moment and try again",
+            target.display(),
+            path.display()
+        ));
+    }
+    let holder = settled.as_deref().map(Holder::parse).unwrap_or_default();
     let what = holder.what.as_deref().unwrap_or("another run");
     let text = match holder.pid {
         // Gone, and the file still names it: a holder that let the lock go and exited while
@@ -592,6 +634,51 @@ mod tests {
         swap.join().unwrap();
         assert!(taken.is_ok(), "{:?}", taken.err());
         drop(taken);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #443: a lock file whose holder has not written its text yet (empty, or cut short before
+    /// its process id) is re-read, not reported as "another run"; text that arrives during the
+    /// re-read is the one used.
+    #[test]
+    fn an_empty_holder_is_settled_not_called_another_run() {
+        assert!(holder_is_partial(""));
+        assert!(holder_is_partial("token=abc\n"));
+        assert!(holder_is_partial("token=abc\npid="));
+        assert!(!holder_is_partial("token=abc\npid=1234\n"));
+        assert!(!holder_is_partial("abc"), "a pre-#431 holder is whole");
+
+        let mut reads = vec!["", "", "token=abc\npid=1234\nholder=a run\n"].into_iter();
+        let settled = settle(|| reads.next().map(str::to_string));
+        assert_eq!(
+            settled.as_deref(),
+            Some("token=abc\npid=1234\nholder=a run\n")
+        );
+
+        let mut calls = 0;
+        let never = settle(|| {
+            calls += 1;
+            Some(String::new())
+        });
+        assert_eq!(never.as_deref(), Some(""));
+        assert_eq!(calls, 1 + SETTLE_READS);
+
+        assert_eq!(settle(|| None), None);
+    }
+
+    /// #443: a taker that times out on a lock file whose holder has not written its text says
+    /// the holder is still starting, not that another run holds the lock for ten minutes.
+    #[test]
+    fn a_busy_lock_with_an_empty_holder_says_it_is_starting() {
+        let dir = std::env::temp_dir().join(format!("sb-443-empty-{}", run_tag()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("state.json");
+        std::fs::write(lock_path(&target), "").unwrap();
+        let err = FileLock::take(&target, Duration::from_millis(20))
+            .expect_err("a held lock is not taken");
+        let text = err.to_string();
+        assert!(text.contains("still starting"), "{text}");
+        assert!(!text.contains("another run"), "{text}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

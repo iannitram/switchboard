@@ -1,0 +1,31 @@
+{
+  "id": "roadmap-units",
+  "what": "`switchboard roadmap units` writes a create-queue batch with one issue per node that has none; `switchboard roadmap wire` sets native blocked-by links from each node's after list.",
+  "expectations": [
+    "A node that already has an open or closed issue carrying its node:<id> label gets no second issue.",
+    "Each generated issue carries exactly one node:<id> label, one type label and its feature label.",
+    "After wire, every after id is a native blocked-by link; running wire twice changes nothing."
+  ],
+  "files_allowed": [
+    "crates/core/src/roadmap/units.rs",
+    "crates/core/tests/roadmap_units.rs"
+  ],
+  "test_files": [
+    "crates/core/tests/roadmap_units.rs"
+  ],
+  "verify": [
+    {
+      "name": "tests",
+      "cmd": "cargo test -p switchboard-core --test roadmap_units",
+      "expect": "fail-before"
+    },
+    {
+      "name": "lint",
+      "cmd": "cargo clippy --all-targets -- -D warnings",
+      "expect": "pass"
+    }
+  ],
+  "code_map_entries": [
+    "crates/core/src/roadmap/units.rs"
+  ]
+}

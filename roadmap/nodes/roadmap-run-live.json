@@ -1,0 +1,31 @@
+{
+  "id": "roadmap-run-live",
+  "what": "Wire specs/roadmap-run.json through the engine so one project runs from an approved roadmap to merged units, with every owner step in Waiting on you.",
+  "expectations": [
+    "On the fixture project, three units with a dependency chain are built in dependency order with no manual step between them.",
+    "A unit whose build fails three times is parked and raises one Waiting on you item.",
+    "No step asks the owner anywhere but Waiting on you."
+  ],
+  "files_allowed": [
+    "crates/core/src/runner/roadmap_run.rs",
+    "crates/core/tests/roadmap_run_live.rs"
+  ],
+  "test_files": [
+    "crates/core/tests/roadmap_run_live.rs"
+  ],
+  "verify": [
+    {
+      "name": "tests",
+      "cmd": "cargo test -p switchboard-core --test roadmap_run_live",
+      "expect": "fail-before"
+    },
+    {
+      "name": "lint",
+      "cmd": "cargo clippy --all-targets -- -D warnings",
+      "expect": "pass"
+    }
+  ],
+  "code_map_entries": [
+    "crates/core/src/runner/roadmap_run.rs"
+  ]
+}

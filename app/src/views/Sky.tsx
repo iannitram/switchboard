@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { call, type CoreResult } from "../core";
 import { Empty } from "./Empty";
@@ -7,6 +7,10 @@ import { SkyMap } from "../sky/SkyMap";
 import { DriftList } from "../sky/DriftList";
 import { StarPanel } from "../sky/StarPanel";
 import type { SkyModel, Star } from "../sky/model";
+import { devSkyStart, hasWebGL } from "../sky3d/support";
+
+// The 3D sky (#297) loads only where WebGL works; elsewhere the flat SVG map below is the sky.
+const Sky3D = lazy(() => import("../sky3d/Sky3D"));
 
 // BAK-1 as the `backup_repo` and `backup_all` commands answer it (#206).
 export type Manifest = {
@@ -86,7 +90,7 @@ function BackUp({ repo }: { repo?: string }) {
   const label = repo === undefined ? "Back up all" : "Back up this repo";
   return (
     <div data-testid="backup">
-      <button onClick={run} disabled={busy} aria-label={label}>
+      <button className="btn" onClick={run} disabled={busy} aria-label={label}>
         {label}
       </button>
       {busy && <p role="status">Backing up…</p>}
@@ -116,7 +120,7 @@ function Refresh({ onDone }: { onDone: () => void }) {
 
   return (
     <div data-testid="refresh">
-      <button onClick={run} disabled={busy}>
+      <button className="btn" onClick={run} disabled={busy}>
         Refresh
       </button>
       {busy && <p role="status">Refreshing…</p>}
@@ -129,8 +133,10 @@ function Refresh({ onDone }: { onDone: () => void }) {
 // It asks again on each `snapshot` event from the poll thread and after a Refresh (GH-1).
 export function Sky() {
   const [answer, setAnswer] = useState<CoreResult<SkyModel> | null>(null);
-  const [open, setOpen] = useState<string | null>(null);
+  const [open, setOpen] = useState<string | null>(() => devSkyStart().open);
   const [picked, setPicked] = useState<Star | null>(null);
+  const [webgl, setWebgl] = useState(hasWebGL);
+  const devStar = useRef(devSkyStart().star);
   const alive = useRef(true);
   const load = useCallback(() => {
     call<SkyModel>("sky").then((r) => {
@@ -179,6 +185,48 @@ export function Sky() {
   }
 
   const zoomed = open === null ? undefined : sky.constellations.find((c) => c.repo === open);
+
+  // DEV only (see devSkyStart): pick the star named in VITE_SKY_STAR once the sky is in.
+  if (devStar.current !== null && zoomed) {
+    const n = devStar.current;
+    devStar.current = null;
+    const star = zoomed.features.flatMap((f) => f.stars).find((s) => s.number === n);
+    if (star) queueMicrotask(() => setPicked(star));
+  }
+
+  if (webgl) {
+    const back = () => {
+      setOpen(null);
+      setPicked(null);
+    };
+    return (
+      <Suspense fallback={<p role="status">Drawing the sky…</p>}>
+        <Sky3D
+          sky={sky}
+          open={zoomed ? zoomed.repo : null}
+          onOpen={(repo) => {
+            setPicked(null);
+            setOpen(repo);
+          }}
+          onBack={back}
+          picked={picked}
+          onPick={setPicked}
+          onFail={() => setWebgl(false)}
+          toolbar={
+            zoomed ? (
+              <BackUp key={zoomed.repo} repo={zoomed.repo} />
+            ) : (
+              <>
+                <Refresh onDone={load} />
+                <BackUp />
+              </>
+            )
+          }
+        />
+      </Suspense>
+    );
+  }
+
   if (zoomed) {
     return (
       <div style={{ display: "flex", flexWrap: "wrap", gap: "1em", alignItems: "flex-start" }}>

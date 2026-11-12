@@ -219,10 +219,11 @@ These features go in the ROADMAP `features:` block marked `release: after-1.0` (
 | `loadouts` | Every machine publishes its loadout every minute; one silent for 3 minutes drops out of routing; a kind's `needs` must match the loadout. | grill, Machines |
 | `webhooks` | One GitHub App, webhooks through Tailscale Funnel on the RTX 3090 Ti desktop on one secret-checked path, a backfill poll at start and nightly, and a GitHub snapshot shared through fleet-state. | grill, GitHub data |
 | `chat-sync` | Chats synced through fleet-state, in the format 1.0 already writes (FD-13). | proposal §7 |
-| `local-only` | Local only: Readiness, the prep loop and the work loop, plus the six review ideas ruled inside its own Spec (see [dispositions](#review-dispositions)). | Local only rulings |
+| `local-only` | Local only: Readiness, the prep loop and the work loop, plus the six review ideas ruled inside its own Spec (see [dispositions](#review-dispositions)). An input to that Spec, not a ruling: [docs/work-loop.md](docs/work-loop.md), the work loop as Craft Anything's Make loop runs it and what Switchboard would change. | Local only rulings |
 | `platforms` | Windows and Mac builds. | proposal §7 |
 | `fleet-rust` | Porting `fleet` to Rust. | proposal §7 |
 | `plugins` | Plugins that add views, commands and MCP tools without changing the core. | my ruling, 2026-11-09 |
+| `runner` | The step runner: Switchboard runs two workflow specs directly (`specs/roadmap-run.json`, `specs/bug-loop.json`). The roadmap is a graph of nodes with dependencies; issues are made from nodes; choosing, claiming and proving a unit is code; every step that needs me is one item in Waiting on you. New commands are Rust in the core. | my rulings, 2026-11-10 |
 | `dashboard` | Retiring the fleet dashboard, on the Z13 after parity, then everywhere. It needs my yes again before anyone starts (the 2026-11-08 run rule is never to retire it). | grill, Retire / defer |
 
 Moving CC into a repo is its own project, not a Switchboard feature.

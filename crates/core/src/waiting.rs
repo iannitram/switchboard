@@ -265,12 +265,16 @@ fn unreadable_priority_item(path: &Path, why: &str, now: UnixSeconds) -> Item {
 /// WAIT-1: the items no snapshot holds, kept in `<data>/waiting/local.json`.
 pub struct LocalItems {
     path: PathBuf,
+    /// How long a change waits for another's lock: `LOCAL_LOCK_WAIT`. Only a test that runs many
+    /// changes at once on a loaded machine sets more (#442).
+    wait: std::time::Duration,
 }
 
 impl LocalItems {
     pub fn new(data_dir: &Path) -> Self {
         Self {
             path: data_dir.join("waiting").join("local.json"),
+            wait: LOCAL_LOCK_WAIT,
         }
     }
 
@@ -347,7 +351,7 @@ impl LocalItems {
         if let Some(dir) = self.path.parent() {
             std::fs::create_dir_all(dir).map_err(io)?;
         }
-        let _held = crate::lock::FileLock::take_for(&self.path, LOCAL_LOCK_WAIT, LOCAL_HOLDER)?;
+        let _held = crate::lock::FileLock::take_for(&self.path, self.wait, LOCAL_HOLDER)?;
         let mut items = self.load()?;
         if !change(&mut items) {
             return Ok(false);
@@ -467,4 +471,136 @@ pub fn load_at(data_dir: &Path, now: UnixSeconds) -> Result<Vec<Item>, CoreError
         assemble(&snaps, &local),
         priority_items(data_dir, now),
     ]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Barrier};
+
+    fn data_dir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("sb-431-{tag}-{}", crate::lock::run_tag()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn item(text: &str, why: &str) -> Item {
+        Item {
+            what: text.to_string(),
+            why: why.to_string(),
+            source: Source::GuardedAction {
+                text: text.to_string(),
+            },
+            link: String::new(),
+            action: "Confirm in the app".to_string(),
+            since: 1,
+        }
+    }
+
+    /// Files in `dir` other than `keep`: temp or lock files left behind.
+    fn left_over(dir: &Path, keep: &[&str]) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| !keep.contains(&n.as_str()))
+            .collect()
+    }
+
+    const WRITERS: usize = 4;
+    const ROUNDS: usize = 40;
+
+    /// The issue's case: one writer keeps changing one item (a confirm turning a restore request
+    /// into a held one, step by step) while others add and drop their own. Every add is kept,
+    /// every drop stays dropped, and the changed item ends as its last change left it.
+    ///
+    /// #442: about 240 changes run one behind another under the lock. On a machine loaded far
+    /// past its cores the queue outlasted the 10 s `LOCAL_LOCK_WAIT`, so the last writers got the
+    /// lock-busy error for a live holder, this process. This test is about lost and returned
+    /// items, so each store here waits as long as it needs (as the held-restores test does, #441).
+    #[test]
+    fn waiting_items_written_at_once_lose_nothing_and_bring_nothing_back() {
+        let wait = std::time::Duration::from_secs(5 * 60);
+        let data = data_dir("local");
+        LocalItems::new(&data)
+            .add(item("Restore owner/demo", "step 0"))
+            .unwrap();
+        let start = Arc::new(Barrier::new(WRITERS + 1));
+        let mut running = Vec::new();
+        for writer in 0..WRITERS {
+            let (data, go) = (data.clone(), start.clone());
+            running.push(std::thread::spawn(move || {
+                let local = LocalItems {
+                    wait,
+                    ..LocalItems::new(&data)
+                };
+                go.wait();
+                for n in 0..ROUNDS {
+                    let mine = format!("w{writer}-{n}");
+                    assert!(local
+                        .add_new(item(&mine, "kept"))
+                        .unwrap_or_else(|e| panic!("add {mine}: {e}")));
+                    if n % 2 == 1 {
+                        let gone = Source::GuardedAction { text: mine.clone() };
+                        assert!(local
+                            .remove(&gone)
+                            .unwrap_or_else(|e| panic!("remove {mine}: {e}")));
+                    }
+                }
+            }));
+        }
+        {
+            let (data, go) = (data.clone(), start.clone());
+            running.push(std::thread::spawn(move || {
+                let local = LocalItems {
+                    wait,
+                    ..LocalItems::new(&data)
+                };
+                go.wait();
+                for n in 1..=ROUNDS {
+                    local
+                        .add(item("Restore owner/demo", &format!("step {n}")))
+                        .unwrap_or_else(|e| panic!("step {n}: {e}"));
+                }
+            }));
+        }
+        for thread in running {
+            thread.join().unwrap();
+        }
+        let items = LocalItems::new(&data).load().unwrap();
+        let mut lost = Vec::new();
+        let mut back = Vec::new();
+        for writer in 0..WRITERS {
+            for n in 0..ROUNDS {
+                let mine = format!("w{writer}-{n}");
+                let there = items.iter().any(|i| i.what == mine);
+                if n % 2 == 0 && !there {
+                    lost.push(mine);
+                } else if n % 2 == 1 && there {
+                    back.push(mine);
+                }
+            }
+        }
+        assert!(lost.is_empty(), "{} added items lost: {lost:?}", lost.len());
+        assert!(
+            back.is_empty(),
+            "{} dropped items came back: {back:?}",
+            back.len()
+        );
+        let restore: Vec<&Item> = items
+            .iter()
+            .filter(|i| i.what == "Restore owner/demo")
+            .collect();
+        assert_eq!(restore.len(), 1);
+        assert_eq!(
+            restore[0].why,
+            format!("step {ROUNDS}"),
+            "an older copy of the item was put back"
+        );
+        assert_eq!(items.len(), 1 + WRITERS * ROUNDS / 2);
+        assert_eq!(
+            left_over(&data.join("waiting"), &["local.json"]),
+            Vec::<String>::new()
+        );
+    }
 }
