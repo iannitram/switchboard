@@ -3,6 +3,7 @@
 Newest first. One line per change of stage, release or decision that the next session needs.
 
 
+- 2026-11-12 Roadmap lens (#392): project stars follow development-stage columns with issue counts, completion and blocked-by links; unlisted features stay Unstaged and a missing stages table says so.
 - 2026-11-12 Backup renames (#447): restore marks use `lock::write_whole`; `releases.json`, the bundle, staged publications, folder moves and the aside swap share `lock::rename_retrying` and its bounded Windows retry, with the swap order and failure cleanup unchanged.
 - 2026-11-12 Labeller paid fallback (#330): a failed local labeller tries the first paid service in the router's cheapest-first order with a key and budget (its model is the first row in id order, as the router's Small rule picks, not a verified smallest), using the front door's budget gate and answer adapters; no key or budget keeps rules only, and dry runs stay local only.
 - 2026-11-11 Fleet-state write research (#401): recommend checking the base tree and publishing with an explicit expected-SHA lease; compare Git push, Contents API and Git Data API races in research/fleet-state-write.md; no code change.

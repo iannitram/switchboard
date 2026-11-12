@@ -1,4 +1,4 @@
-//! The ROADMAP `features:` block and its `Updated:` date (SKY-2, SKY-3, SKY-5 read them).
+//! ROADMAP features, its `Updated:` date, and development stages for the Roadmap lens.
 //!
 //! The format (ROADMAP.md, "The features block"):
 //!
@@ -106,4 +106,85 @@ fn valid_id(id: &str) -> bool {
 
 fn bad(line_no: usize, line: &str) -> CoreError {
     CoreError::Parse(format!("ROADMAP.md line {line_no}: {line}"))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DevelopmentStage {
+    pub number: u32,
+    pub name: String,
+    pub features: Vec<String>,
+}
+
+/// Read the `# | Stage | Features` table under "Development stages", in numeric order.
+/// The leading bold phrase is the stage's name when the cell also contains a description.
+/// Feature ids are backtick-delimited; prose such as "all with a view" is not an id.
+/// A feature listed more than once belongs to the first stage. No table gives `None`.
+pub fn parse_stages(roadmap_md: &str) -> Option<Vec<DevelopmentStage>> {
+    let mut in_section = false;
+    let mut in_table = false;
+    let mut fence: Option<char> = None;
+    let mut stages = Vec::new();
+    for line in roadmap_md.lines().map(str::trim) {
+        if line.starts_with("```") || line.starts_with("~~~") {
+            let marker = line.chars().next().unwrap();
+            if fence == Some(marker) {
+                fence = None;
+            } else if fence.is_none() {
+                fence = Some(marker);
+            }
+            continue;
+        }
+        if fence.is_some() {
+            continue;
+        }
+        if line.starts_with('#') {
+            if in_section {
+                break;
+            }
+            in_section = line.trim_start_matches('#').trim() == "Development stages";
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        let cells: Vec<_> = line.trim_matches('|').split('|').map(str::trim).collect();
+        if !in_table {
+            in_table = cells.starts_with(&["#", "Stage", "Features"]);
+            continue;
+        }
+        if !line.contains('|') {
+            break;
+        }
+        let Some(number) = cells.first().and_then(|s| s.parse::<u32>().ok()) else {
+            continue;
+        };
+        if cells.len() < 3 || cells[1].is_empty() {
+            continue;
+        }
+        let name = cells[1]
+            .strip_prefix("**")
+            .and_then(|s| s.split_once("**").map(|(name, _)| name))
+            .unwrap_or(cells[1])
+            .to_string();
+        let features = cells[2]
+            .split('`')
+            .enumerate()
+            .filter(|(i, id)| i % 2 == 1 && valid_id(id))
+            .map(|(_, id)| id.to_string())
+            .collect();
+        stages.push(DevelopmentStage {
+            number,
+            name,
+            features,
+        });
+    }
+    if !in_table {
+        return None;
+    }
+    stages.sort_by_key(|stage| stage.number);
+    let mut assigned = std::collections::HashSet::new();
+    for stage in &mut stages {
+        stage.features.retain(|id| assigned.insert(id.clone()));
+    }
+    Some(stages)
 }
