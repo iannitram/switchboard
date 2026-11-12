@@ -1,6 +1,6 @@
 # Code map
 
-Updated: 2026-11-08
+Updated: 2026-11-11
 
 What each module owns, the Musts it carries (`SPEC.md`), what it talks to, and its status. An issue that fills a module moves its status from **planned** to **present** in the same PR (RUBRIC). Words are the glossary's (`GLOSSARY.md`).
 
@@ -22,6 +22,7 @@ crates/core/                  switchboard-core: every rule, read and write
   src/{waiting,reports,budget,backup,it}.rs
   src/frontdoor/              router, labeller, adapters, packet, sticky, thread
   src/autopilot/              review, driver, instructions, classify, weekly
+  src/workloop/               planned (after 1.0, `local-only`): backlog, run, packet, judge, progress, handoff
   tests/                      one test file per issue; fixtures/ (fleet stub, recorded answers)
 crates/cli/                   the `switchboard` binary: cli.rs (CLI-1..3), mcp.rs (MCP-1..3)
 app/                          the React face (Vite): src/App.tsx, src/views/, src/core.ts, src/brocrew/
@@ -250,6 +251,18 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - AUTO-8 drifted copies (`drifted`): present.
 - AUTO-2 roadmap_changed: present.
 - AUTO-2 roadmap pass (`roadmap_pass`, `pm_job` in `passes.rs`; run by `after_poll`): present.
+
+### workloop
+`crates/core/src/workloop/` · no Musts yet (`local-only`, after 1.0) · planned, not in the skeleton. The work loop: stars built unattended in dependency order, each turn a fleet job with a fresh context, judged by the harness. Design and the analysis of Craft Anything's Make loop it comes from: `docs/work-loop.md`. Nothing here gets an issue until the `local-only` feature has its own Spec; the module names are a proposal. Nothing is lifted from Craft Anything (ours, MIT or Apache-2.0) yet, so it has no line in the `reuses:` block above, which the sky draws as a reuse line (SKY-6); the PR that first lifts code (the check result shape, the stall guard or the context trim, `docs/work-loop.md` §7 question 8) adds that line.
+
+- `backlog`: the ready stars in dependency order (`sky::chain`), each with its locked checks; one star at a time per repo. Planned.
+- `run`: the state machine of one star: may_spend (`autopilot::may_spend`), pick, packet, turn, checks, handoff, then good, next model, split or park. Round, try and unchanged-turn counts are saved after every step, so a restart carries on. Planned.
+- `packet`: the catch-up packet a fresh-context builder gets every turn (brief, code-map snippet, where it stands, handoff, failing output, unknowns and notes), built to a share of the model's probed window. Shares code with `frontdoor::packet`. Planned.
+- `judge`: runs every locked check after a turn; a result is passed, not good or unverified, and unverified never counts as good. Checks `files_allowed`. Planned.
+- `progress`: the stall guard, a hash of the worktree before and after each turn. Planned.
+- `handoff`: written by code after every turn from the diff stat, the check results and the failing output's tail; the builder's closing lines are added, never trusted alone. Planned.
+
+Talks to: the router (`frontdoor::router`, a pool and model per turn), `fleet::FleetBridge` (a turn is `fleet run`; no face runs a shell command), `joblog` (one row per turn), `autopilot::review` (the ladder, and R25's review once a star is good), `waiting` (a parked star), `reports` (what was not checked).
 
 ### it
 `crates/core/src/it.rs` · IT-1 to IT-4, FD-12 · planned. The loadout from the platform's probe list, unmet `needs`, IT tickets through `fleet errors file`, `it-triage` jobs with `never_on` (waits for U9), ladder-out bugs with the star's `feature:` label. `open_tickets(snaps)` lists the open `it`-labelled issues in the stored snapshots, for `errors` (#375).
