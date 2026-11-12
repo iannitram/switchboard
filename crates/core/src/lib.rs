@@ -13,6 +13,7 @@ pub mod autopilot;
 pub mod backup;
 pub mod backup_run;
 pub mod budget;
+pub mod bug;
 pub mod clock;
 pub mod confirm;
 pub mod error;
