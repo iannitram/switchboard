@@ -1,0 +1,31 @@
+{
+  "id": "unit-land",
+  "what": "`switchboard unit open-pr` pushes the branch and opens the pull request with the verify output from the done card; `switchboard unit resolve` writes the resolution record on the issue, closes it and releases the claim.",
+  "expectations": [
+    "No pull request is opened when the code map check fails on the branch head.",
+    "The pull request body carries each verify command and its result.",
+    "Resolve leaves one resolution record and no claim file."
+  ],
+  "files_allowed": [
+    "crates/core/src/unit/land.rs",
+    "crates/core/tests/unit_land.rs"
+  ],
+  "test_files": [
+    "crates/core/tests/unit_land.rs"
+  ],
+  "verify": [
+    {
+      "name": "tests",
+      "cmd": "cargo test -p switchboard-core --test unit_land",
+      "expect": "fail-before"
+    },
+    {
+      "name": "lint",
+      "cmd": "cargo clippy --all-targets -- -D warnings",
+      "expect": "pass"
+    }
+  ],
+  "code_map_entries": [
+    "crates/core/src/unit/land.rs"
+  ]
+}

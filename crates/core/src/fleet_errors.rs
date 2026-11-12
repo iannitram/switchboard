@@ -136,8 +136,8 @@ fn ends_mid_line(file: &mut std::fs::File) -> std::io::Result<bool> {
     Ok(last[0] != b'\n')
 }
 
-/// Keep the last `FLEET_ERROR_LOG_CAP` lines of the file, written to a temp file of this run's
-/// own and renamed over it. Called with the lock held.
+/// Keep the last `FLEET_ERROR_LOG_CAP` lines of the file, written whole (`lock::write_whole`).
+/// Called with the lock held.
 fn trim(file_path: &Path) -> Result<(), CoreError> {
     let io = |what: &Path, e: std::io::Error| CoreError::Io(format!("{}: {e}", what.display()));
     let bytes = std::fs::read(file_path).map_err(|e| io(file_path, e))?;
@@ -150,14 +150,8 @@ fn trim(file_path: &Path) -> Result<(), CoreError> {
         kept.extend_from_slice(line);
         kept.push(b'\n');
     }
-    let tmp = crate::lock::temp_path(file_path, ".tmp");
-    let written = std::fs::write(&tmp, &kept)
-        .and_then(|()| std::fs::rename(&tmp, file_path))
-        .map_err(|e| io(file_path, e));
-    if written.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    written
+    // `write_whole` takes no lock of its own, so it is safe under the caller's held lock.
+    crate::lock::write_whole(file_path, &kept)
 }
 
 /// The file's non-blank lines, split on bytes so a line that is not UTF-8 is still one line.
