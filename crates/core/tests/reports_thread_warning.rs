@@ -46,7 +46,7 @@ fn an_unreadable_thread_is_skipped_with_one_warning_naming_it() {
     assert_eq!(reports[0].id, "chat-good");
     // One warning, naming the bad thread and carrying a reason.
     assert_eq!(warnings.len(), 1);
-    assert_eq!(warnings[0].thread_id, "chat-bad");
+    assert_eq!(warnings[0].thread_id.as_deref(), Some("chat-bad"));
     assert!(!warnings[0].reason.trim().is_empty());
 }
 
@@ -67,6 +67,23 @@ fn a_missing_store_folder_gives_no_threads_and_no_warnings() {
     let (threads, warnings) = thread_rows_checked(&dir);
     assert!(threads.is_empty());
     assert!(warnings.is_empty());
+}
+
+#[test]
+fn a_store_that_cannot_be_listed_gives_one_warning_naming_it() {
+    let dir = scratch("not-listable");
+    // The thread store folder is a file, so the path exists but cannot be listed (#465).
+    write(
+        &dir.join("threads"),
+        "not a folder
+",
+    );
+
+    let (threads, warnings) = thread_rows_checked(&dir);
+    assert!(threads.is_empty());
+    assert_eq!(warnings.len(), 1);
+    assert_eq!(warnings[0].thread_id, None);
+    assert!(warnings[0].reason.contains("threads"));
 }
 
 #[test]
