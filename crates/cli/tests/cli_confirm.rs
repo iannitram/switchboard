@@ -112,7 +112,7 @@ fn confirm_restore_into_asks_the_core_with_the_typed_name_and_no_role() {
 #[test]
 fn a_role_and_a_job_worktree_reach_the_core_to_be_refused_there() {
     let fake = Fake::default();
-    run(
+    let _ = run(
         &[
             "--role",
             "project-manager",
@@ -125,7 +125,7 @@ fn a_role_and_a_job_worktree_reach_the_core_to_be_refused_there() {
         &folder("role", false),
         &fake,
     );
-    run(
+    let _ = run(
         &["confirm", "restore", "o/a", "--into", "o/b"],
         &folder("wt", true),
         &fake,

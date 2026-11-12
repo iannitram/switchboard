@@ -312,8 +312,8 @@ fn delete_adds_one_item_to_the_local_items() {
     assert_eq!(items[0].link, "https://github.com/o/switchboard");
     assert_eq!(items[0].since, NOW);
     // Asked again, by either spelling (#346): the same source is replaced in place, one item.
-    run(&["delete", "switchboard"], &s, &w);
-    run(&["delete", "o/switchboard"], &s, &w);
+    let _ = run(&["delete", "switchboard"], &s, &w);
+    let _ = run(&["delete", "o/switchboard"], &s, &w);
     assert_eq!(LocalItems::new(&s.data).load().unwrap().len(), 1);
 }
 
@@ -384,7 +384,7 @@ fn the_binary_delete_writes_the_item_and_waiting_lists_it_first() {
 fn waiting_with_only_local_items_and_no_snapshot_lists_them() {
     let s = setup("bin-local-only");
     save_switchboard(&s);
-    run(&["delete", "switchboard"], &s, &writes(&s));
+    let _ = run(&["delete", "switchboard"], &s, &writes(&s));
     let out = switchboard(&["waiting"], &s);
     assert_eq!(out.status.code(), Some(0), "stderr: {}", text(&out.stderr));
     assert_eq!(text(&out.stdout), ITEM_LINE);
