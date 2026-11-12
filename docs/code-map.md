@@ -197,7 +197,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - FD-7 summary check (`missing_from_summary`, `checked_summary`): present.
 - FD-9 thumbs rating log (`thumbs_from_name`, `rating_entry`, `log_rating`, `chat_rate`): present.
 - FD-2 rules labeller (`by_rules`, `label`): present.
-- FD-2 small labeller (`LlamaLabeller`): present.
+- FD-2 small labeller (`LlamaLabeller`, `PaidLabeller`, `FallbackLabeller`): present. `chat::live_labeller` tries local first, then the router's smallest paid pool/model with a key and budget (`FleetGate`, the answer adapters and key lookup); failure or no eligible pool leaves rules only. A dry run uses `chat::local_labeller` alone.
 - FD-13 thread store: present.
 - FD-11 adapter interface (`split_handoff`, `log_row`): present.
 - FD-11 Qwen adapter (`QwenAdapter`): present.
