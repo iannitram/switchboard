@@ -3,6 +3,7 @@
 use super::*;
 use switchboard_core::frontdoor::thread::ThreadStore;
 use switchboard_core::joblog::{JobRow, RowSource};
+use switchboard_core::reports::thread_rows;
 
 /// A fresh folder for one test, under the system temp folder.
 fn scratch(name: &str) -> PathBuf {
