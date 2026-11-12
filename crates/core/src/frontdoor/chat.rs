@@ -433,7 +433,7 @@ pub fn local_labeller(fleet: &FleetBridge, machine: Option<&str>) -> Option<Llam
     ))
 }
 
-/// #330: try the smallest paid model with budget and a key only if the local request fails.
+/// #330: try the first cheapest-first paid service with budget and a key (its first model row, as the router's Small rule picks) only if the local request fails.
 /// Index or budget failures leave the rules-only result, just like missing keys or budget.
 pub fn live_labeller<'a>(
     fleet: &'a FleetBridge,
