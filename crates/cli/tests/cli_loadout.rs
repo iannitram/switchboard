@@ -209,7 +209,7 @@ fn a_timed_out_sign_in_probe_reads_as_could_not_check() {
     let mut loadout = full();
     loadout.timed_out = vec!["codex".to_string()];
     let mut out: Vec<u8> = Vec::new();
-    cli::loadout_command(&loadout, false, &mut out);
+    let _ = cli::loadout_command(&loadout, false, &mut out);
     let text = String::from_utf8(out).unwrap();
     assert!(
         text.contains("codex  could not check: timed out\n"),
@@ -217,7 +217,7 @@ fn a_timed_out_sign_in_probe_reads_as_could_not_check() {
     );
     assert!(!text.contains("not signed in"), "{text}");
     let mut out: Vec<u8> = Vec::new();
-    cli::loadout_command(&loadout, true, &mut out);
+    let _ = cli::loadout_command(&loadout, true, &mut out);
     let printed: Value = serde_json::from_slice(&out).unwrap();
     assert_eq!(printed["timed_out"], serde_json::json!(["codex"]));
 }
