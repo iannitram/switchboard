@@ -356,19 +356,13 @@ impl LocalItems {
         Ok(true)
     }
 
-    /// Pretty JSON to a temp file of this run's own (`local.json.tmp-<run>`, #416), then renamed
-    /// over `local.json`. Only under the lock (`change`).
+    /// Pretty JSON replaces `local.json` whole through `lock::write_whole` (the temp file of this
+    /// run's own, #416; the Windows rename retry). Only under the lock (`change`).
     fn write(&self, items: &[Item]) -> Result<(), CoreError> {
-        let io = |e: std::io::Error| CoreError::Io(format!("{}: {e}", self.path.display()));
         let mut text = serde_json::to_string_pretty(items)
             .map_err(|e| CoreError::Parse(format!("{}: {e}", self.path.display())))?;
         text.push('\n');
-        let tmp = crate::lock::temp_path(&self.path, ".tmp");
-        std::fs::write(&tmp, text).map_err(io)?;
-        std::fs::rename(&tmp, &self.path).map_err(|e| {
-            let _ = std::fs::remove_file(&tmp);
-            io(e)
-        })
+        crate::lock::write_whole(&self.path, text.as_bytes())
     }
 }
 
