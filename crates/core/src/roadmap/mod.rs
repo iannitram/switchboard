@@ -1,8 +1,11 @@
 //! The roadmap graph: ROADMAP.md's `nodes:` and `unspecified:` blocks and each node's spec file
 //! (`roadmap/nodes/<id>.json`), read into a graph and linted. `lint` reports every problem by id;
 //! it reads files and never runs a command. `switchboard roadmap lint <clone> --json` is its face.
+//! `units` makes each node without an issue into a create-queue issue and each `after` into a
+//! native blocked-by link.
 
 pub mod graph;
+pub mod units;
 
 use std::collections::HashMap;
 use std::path::Path;
