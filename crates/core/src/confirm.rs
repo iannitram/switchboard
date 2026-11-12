@@ -520,12 +520,7 @@ impl HeldRecords {
         let mut body = serde_json::to_string_pretty(&all)
             .map_err(|e| CoreError::Parse(format!("{}: {e}", self.path.display())))?;
         body.push('\n');
-        let tmp = crate::lock::temp_path(&self.path, ".tmp");
-        std::fs::write(&tmp, body).map_err(io)?;
-        std::fs::rename(&tmp, &self.path).map_err(|e| {
-            let _ = std::fs::remove_file(&tmp);
-            io(e)
-        })
+        crate::lock::write_whole(&self.path, body.as_bytes())
     }
 }
 
