@@ -4,7 +4,7 @@ Updated: 2026-11-12
 
 What each module owns, the Musts it carries (`SPEC.md`), what it talks to, and its status. An issue that fills a module moves its status from **planned** to **present** in the same PR (RUBRIC). Words are the glossary's (`GLOSSARY.md`).
 
-Status today: the core and faces have the present modules listed below; remaining skeleton bodies are `todo!("<Must id>")`. The runner's spec loader and step engine, the roadmap graph's lint, its drift, the roadmap units' plan and wiring, unit-proof's red check and code map check, and the unit frontier are present; the other roadmap nodes remain planned.
+Status today: the core and faces have the present modules listed below; remaining skeleton bodies are `todo!("<Must id>")`. The runner's spec loader, step engine and owner steps' waiting items, the roadmap graph's lint, its drift, the roadmap units' plan and wiring, unit-proof's red check and code map check, and the unit frontier are present; the other roadmap nodes remain planned.
 
 reuses:
 - brocrew: the chat parts, the Waiting on you item, the work report entry and the fixed-report shape (Apache-2.0; our fork is archived, read and copied from only)
@@ -27,7 +27,7 @@ crates/core/                  switchboard-core: every rule, read and write
   src/bug/                    the bug row and owner table; bug intake (scan, capture, validate, owner, dedupe, record, archive)
   src/frontdoor/              router, labeller, adapters, packet, sticky, thread
   src/autopilot/              review, driver, instructions, classify, weekly
-  src/runner/                 workflow spec types, loading and validation; the step engine and its run state
+  src/runner/                 workflow spec types, loading and validation; the step engine, its run state and the owner steps' waiting items
   src/roadmap/                the roadmap graph (ROADMAP's nodes and unspecified blocks, node spec files), its lint, its drift against the issues, and the units plan (issues and blocked-by links)
   src/unit/                   proof: the red check of a unit's test command; frontier: the unit frontier (open, unclaimed, unblocked units) and the next one to take
   src/workloop/               planned (after 1.0, `local-only`): backlog, run, packet, judge, progress, handoff
@@ -276,6 +276,8 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 `crates/core/src/runner/engine.rs` · runner-engine (#396) · present. `Engine::step(spec, unit)` runs the one step whose `from_state` is the unit's saved state (or the step a retry is pending for) and answers a `StepReport`. A step with home `pipeline` and a command, of any kind, runs through `FleetBridge::run_json` (no new shell-out); every other step goes to the caller's `StepRunner`, so the engine starts no process of its own. Exit 75 is `NotNow`: the state is unchanged and the note says "not now". Exit 0 with every done_when check holding (`Checker`; `BasicChecks` reads `exit 0`, `with JSON` and `JSON .field == value`, and takes any check text it does not consume entirely, such as prose or a `:`/`;` tail after `exit 0`, as unmet) moves to `to_state_ok`. Any other result moves to `to_state_fail` and counts a failure: while the count is within `on_fail.retry` the next call runs the same step again, then `on_fail.then` halts the run as escalate, park, ask-owner or fail. A pending retry pins the failed step, so a step that leaves `to_state_fail` waits until the retries are used up. Placeholders such as `<repo>` in a pipeline command reach `fleet.py` unchanged; filling in unit values belongs to a later node.
 
 `crates/core/src/runner/state.rs` · runner-engine (#396) · present. `RunState` (state, failures per step, pending retry, halt, last result and note) and `StateStore`, one JSON file per spec and unit written whole (`lock::write_whole`), so a restart resumes at the same step. A state file that does not parse is an error, never a fresh start.
+
+`crates/core/src/runner/waiting.rs` · runner-waiting (#397) · present. `WaitingItem` (id, spec, step, unit, needs, why, choices with the recommended one first, opened, answer, answered) in `<data>/waiting/runner-items.json` (`RunnerItems`, changed under that file's `FileLock`). `OwnerSteps` is the `StepRunner` of a spec's run: a step with actor `human` raises its item, or finds the open one for that step and unit, and reports not now, so the engine leaves the unit where it is; every other step goes to the caller's runner. `answer` moves the unit to `to_state_ok` for the recommended choice and to `to_state_fail` for any other, and marks the item answered in the same change. `list` gives the open items oldest first. The engine's done_when checks are not used for owner steps. These items are not yet in the Waiting on you view (`waiting.rs` `Source` has no runner variant).
 
 ### roadmap
 `crates/core/src/roadmap/mod.rs` · roadmap-graph (#398) · present. `lint(clone)` reads the clone's ROADMAP.md and `roadmap/nodes/<id>.json` and returns a `LintReport`: `errors` (fail the lint) and `warnings`, each a `Finding` with its `check`, the `id` it is about and a message. Refused outright only when ROADMAP.md is unreadable or a line of its blocks does not parse.
