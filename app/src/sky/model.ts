@@ -20,6 +20,11 @@ export type Star = {
   pr: { number: number; url: string; state: string; verdict: "PASS" | "FAIL" | null } | null;
   /** SKY-8: the fleet job for it, as the job log names it; null when none. */
   job: string | null;
+  /**
+   * #413: the layer of the node its `node:<id>` label names (0 has no `after`). Absent unless the
+   * project has a usable nodes: block (`Constellation.nodeLayers`).
+   */
+  nodeLayer?: number;
 };
 
 /** One roadmap feature: a cluster of stars. No stars is a dark star. */
@@ -49,6 +54,12 @@ export type Constellation = {
   features: Feature[];
   /** Missing on roadmaps without a Development stages table (and older snapshots). */
   stages?: RoadmapStage[];
+  /**
+   * #413: the number of dependency layers in the ROADMAP's nodes: block, one Roadmap column per
+   * layer; a star's `nodeLayer` names its column. A count, not a list: every star says its layer.
+   * Absent when the block is missing, empty or unusable (a cycle, an unknown `after`, a bad line).
+   */
+  nodeLayers?: number;
   /** SKY-3: [blocker, blocked] issue numbers, one per `Blocked by #N`. */
   edges: [number, number][];
   /** SKY-7: the longest chain, first blocker to last blocked; empty when none. */
