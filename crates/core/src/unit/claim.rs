@@ -349,7 +349,8 @@ impl Store {
         }))
     }
 
-    /// Create the claim file unless one exists.
+    /// Create the claim file unless one exists. The flag says whether this call must mirror the
+    /// claim: `false` only for the holder's own re-claim, which writes nothing.
     fn create(
         &self,
         repo: &str,
@@ -357,7 +358,7 @@ impl Store {
         worker: &str,
         now: UnixSeconds,
         base_sha: &str,
-    ) -> Result<Outcome, CoreError> {
+    ) -> Result<(Outcome, bool), CoreError> {
         let claim = Claim {
             issue,
             unit: format!("{repo}#{issue}"),
@@ -370,15 +371,18 @@ impl Store {
             let (attempt, base) = self.begin()?;
             if let Some(held) = self.read(&attempt, &base, repo, issue)? {
                 // A lost reply: the file may be ours.
-                return Ok(if held.token == claim.token {
-                    Outcome::Claimed(claim)
-                } else {
-                    Outcome::Taken
-                });
+                if held.token == claim.token {
+                    return Ok((Outcome::Claimed(claim), true));
+                }
+                // The holder's own re-claim: no write, and the first claim's token and time stand.
+                if held.machine == worker {
+                    return Ok((Outcome::Claimed(held), false));
+                }
+                return Ok((Outcome::Taken, false));
             }
             let message = format!("claim {repo}#{issue}");
             if self.publish(&attempt, &base, repo, issue, Some(&claim), &message)? {
-                return Ok(Outcome::Claimed(claim));
+                return Ok((Outcome::Claimed(claim), true));
             }
             std::thread::sleep(Duration::from_millis(20 * u64::from(attempt_no + 1)));
         }
@@ -461,20 +465,22 @@ pub fn claim(
     if !open.is_empty() {
         return Ok(Outcome::Blocked(open));
     }
-    let outcome = store.create(repo, issue, worker, clock.now(), base_sha)?;
-    if let Outcome::Claimed(claim) = outcome {
-        if let Err(error) = mirror
-            .assign(repo, issue, worker)
-            .and_then(|()| mirror.label(repo, issue, IN_PROGRESS))
-        {
-            return Err(ClaimError::Mirror {
-                claim: Box::new(claim),
-                error,
-            });
+    let (outcome, write_mirror) = store.create(repo, issue, worker, clock.now(), base_sha)?;
+    match outcome {
+        Outcome::Claimed(claim) if write_mirror => {
+            if let Err(error) = mirror
+                .assign(repo, issue, worker)
+                .and_then(|()| mirror.label(repo, issue, IN_PROGRESS))
+            {
+                return Err(ClaimError::Mirror {
+                    claim: Box::new(claim),
+                    error,
+                });
+            }
+            Ok(Outcome::Claimed(claim))
         }
-        return Ok(Outcome::Claimed(claim));
+        other => Ok(other),
     }
-    Ok(outcome)
 }
 
 /// Drop this acquisition's claim: clear the mirror first, then token-check the file deletion.

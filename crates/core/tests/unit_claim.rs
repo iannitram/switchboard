@@ -748,3 +748,122 @@ fn the_reaper_rechecks_expiry_after_a_rejected_deletion_push() {
     fake.assert_mirrored(REPO, 5, "w");
     let _ = std::fs::remove_dir_all(root);
 }
+
+fn remote_head(store: &Store) -> String {
+    git(Path::new(&store.remote), &["rev-parse", "fleet-state"])
+}
+
+#[test]
+fn a_reclaim_by_the_holder_exits_zero_and_writes_nothing() {
+    let (store, root) = store("reclaim-holder");
+    let fake = Fake::default();
+    let first = held(
+        claim(
+            &store,
+            &fake,
+            &FixedClock::at(1_000),
+            REPO,
+            5,
+            "w",
+            BASE_SHA,
+        )
+        .unwrap(),
+    );
+    let head = remote_head(&store);
+    let calls = fake.calls();
+    let again = claim(
+        &store,
+        &fake,
+        &FixedClock::at(2_000),
+        REPO,
+        5,
+        "w",
+        BASE_SHA,
+    )
+    .unwrap();
+    assert_eq!(again.exit_code(), 0, "{again:?}");
+    assert_eq!(again, Outcome::Claimed(first.clone()));
+    assert_eq!(remote_head(&store), head);
+    let on_disk = read_claim(&store, REPO, 5);
+    assert_eq!(on_disk["token"], first.token);
+    assert_eq!(on_disk["claimed_at"], 1_000);
+    assert_eq!(fake.calls(), calls);
+    fake.assert_mirrored(REPO, 5, "w");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_refused_claim_changes_nothing_in_the_file_the_assignee_or_the_label() {
+    let (store, root) = store("refused-taken");
+    let fake = Fake::default();
+    let clock = FixedClock::at(1_000);
+    let first = held(claim(&store, &fake, &clock, REPO, 5, "w", BASE_SHA).unwrap());
+    let head = remote_head(&store);
+    let calls = fake.calls();
+    assert_eq!(
+        claim(&store, &fake, &clock, REPO, 5, "other", BASE_SHA).unwrap(),
+        Outcome::Taken
+    );
+    assert_eq!(remote_head(&store), head);
+    assert_eq!(read_claim(&store, REPO, 5)["token"], first.token);
+    assert_eq!(read_claim(&store, REPO, 5)["machine"], "w");
+    fake.assert_mirrored(REPO, 5, "w");
+    assert_eq!(fake.calls(), calls);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_blocked_claim_changes_nothing_in_the_file_the_assignee_or_the_label() {
+    let (store, root) = store("refused-blocked");
+    let fake = Fake {
+        blockers: vec![12],
+        ..Default::default()
+    };
+    let head = remote_head(&store);
+    let out = claim(&store, &fake, &FixedClock::at(1), REPO, 5, "w", BASE_SHA).unwrap();
+    assert_eq!(out, Outcome::Blocked(vec![12]));
+    assert_eq!(remote_head(&store), head);
+    assert!(!files(&store).contains("claims/"));
+    let key = (REPO.to_string(), 5);
+    assert!(!fake.assignees.lock().unwrap().contains_key(&key));
+    assert!(!fake.labels.lock().unwrap().contains(&key));
+    assert!(fake.calls().is_empty());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_back_dated_claim_is_reaped_without_waiting_and_other_repos_are_left_alone() {
+    let (store, root) = store("back-dated");
+    let fake = Fake::default();
+    let clock = FixedClock::at(1_000_000);
+    claim(&store, &fake, &clock, REPO, 5, "w", BASE_SHA).unwrap();
+    claim(&store, &fake, &clock, REPO, 6, "w", BASE_SHA).unwrap();
+    claim(&store, &fake, &clock, "owner/other", 5, "w", BASE_SHA).unwrap();
+    // Write the claimed times into the past instead of advancing the clock or sleeping.
+    for (repo, issue, claimed_at) in [
+        (REPO, 5, 1_000_000 - STALE_LIMIT - 1),
+        ("owner/other", 5, 1_000_000 - STALE_LIMIT - 1),
+    ] {
+        let mut value = read_claim(&store, repo, issue);
+        value["claimed_at"] = serde_json::json!(claimed_at);
+        rewrite_claim(&root, repo, issue, &value);
+    }
+    assert_eq!(
+        reap(&store, &fake, &fake, &clock, REPO, STALE_LIMIT).unwrap(),
+        vec![5]
+    );
+    let listed = files(&store);
+    assert!(
+        !listed.contains(&format!("claims/{REPO}/5.json")),
+        "{listed}"
+    );
+    assert!(
+        listed.contains(&format!("claims/{REPO}/6.json")),
+        "{listed}"
+    );
+    assert!(listed.contains("claims/owner/other/5.json"), "{listed}");
+    fake.assert_cleared(REPO, 5);
+    fake.assert_mirrored(REPO, 6, "w");
+    fake.assert_mirrored("owner/other", 5, "w");
+    let _ = std::fs::remove_dir_all(root);
+}
