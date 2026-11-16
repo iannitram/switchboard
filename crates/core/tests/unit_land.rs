@@ -10,12 +10,14 @@ use serde_json::{json, Value};
 use switchboard_core::clock::FixedClock;
 use switchboard_core::error::CoreError;
 use switchboard_core::sky::codemap::Touched;
-use switchboard_core::unit::claim::{self, Mirror, Store};
+use switchboard_core::unit::claim::{self, Claim, Mirror, Outcome, Store};
 use switchboard_core::unit::job::{self, NodeSpec};
 use switchboard_core::unit::land::{self, Forge, Git, Pr, RECORD_MARK};
 
 const BRANCH: &str = "sat/406-unit-land";
 const BASE: &str = "main";
+const REPO: &str = "example/switchboard";
+const CLAIM_FILE: &str = "claims/example/switchboard/406.json";
 
 const MAP_BASE: &str = "# Code map\n\nUpdated: 2026-11-01\n\nmodules:\n- unit-land: crates/core/src/unit/land.rs (planned)\n";
 const MAP_PRESENT: &str = "# Code map\n\nUpdated: 2026-11-16\n\nmodules:\n- unit-land: crates/core/src/unit/land.rs (present)\n";
@@ -123,20 +125,20 @@ struct FakeMirror {
 }
 
 impl Mirror for FakeMirror {
-    fn open_blockers(&self, _: u64) -> Result<Vec<u64>, CoreError> {
+    fn open_blockers(&self, _: &str, _: u64) -> Result<Vec<u64>, CoreError> {
         Ok(Vec::new())
     }
-    fn assign(&self, _: u64, _: &str) -> Result<(), CoreError> {
+    fn assign(&self, _: &str, _: u64, _: &str) -> Result<(), CoreError> {
         Ok(())
     }
-    fn unassign(&self, i: u64, w: &str) -> Result<(), CoreError> {
+    fn unassign(&self, _: &str, i: u64, w: &str) -> Result<(), CoreError> {
         self.calls.lock().unwrap().push(format!("unassign {i} {w}"));
         Ok(())
     }
-    fn label(&self, _: u64, _: &str) -> Result<(), CoreError> {
+    fn label(&self, _: &str, _: u64, _: &str) -> Result<(), CoreError> {
         Ok(())
     }
-    fn unlabel(&self, i: u64, l: &str) -> Result<(), CoreError> {
+    fn unlabel(&self, _: &str, i: u64, l: &str) -> Result<(), CoreError> {
         self.calls.lock().unwrap().push(format!("unlabel {i} {l}"));
         Ok(())
     }
@@ -144,7 +146,7 @@ impl Mirror for FakeMirror {
 
 fn pr<'a>(node: &'a NodeSpec, card: &'a Value) -> Pr<'a> {
     Pr {
-        repo: "example/switchboard",
+        repo: REPO,
         issue: 406,
         node,
         base: BASE,
@@ -202,6 +204,24 @@ fn files(store: &Store) -> String {
         Path::new(&store.remote),
         &["ls-tree", "-r", "--name-only", "fleet-state"],
     )
+}
+
+/// Acquire the claim on #406 for `worker`; the claim the caller holds.
+fn claim_406(store: &Store, mirror: &FakeMirror, worker: &str) -> Claim {
+    match claim::claim(
+        store,
+        mirror,
+        &FixedClock::at(1_000),
+        REPO,
+        406,
+        worker,
+        "base-sha",
+    )
+    .expect("claims")
+    {
+        Outcome::Claimed(claim) => claim,
+        other => panic!("expected a claim, got {other:?}"),
+    }
 }
 
 #[test]
@@ -294,12 +314,12 @@ fn no_pr_is_opened_when_the_code_map_is_not_updated_by_the_change() {
 fn resolve_writes_one_record_closes_the_issue_and_releases_the_claim_file() {
     let store = store("resolve");
     let mirror = FakeMirror::default();
-    claim::claim(&store, &mirror, &FixedClock::at(1_000), 406, "builder").expect("claims");
-    assert!(files(&store).contains("claims/406.json"));
+    let claim = claim_406(&store, &mirror, "builder");
+    assert!(files(&store).contains(CLAIM_FILE));
 
     let forge = FakeForge::default();
     let done =
-        land::resolve("example/switchboard", 406, 7, &store, &mirror, &forge).expect("resolves");
+        land::resolve(REPO, 406, 7, &claim.token, &store, &mirror, &forge).expect("resolves");
     assert_eq!(
         done,
         land::Resolved {
@@ -311,11 +331,7 @@ fn resolve_writes_one_record_closes_the_issue_and_releases_the_claim_file() {
     assert_eq!(comments.len(), 1);
     assert!(comments[0].starts_with(RECORD_MARK), "{}", comments[0]);
     assert_eq!(*forge.closed.lock().unwrap(), [406]);
-    assert!(
-        !files(&store).contains("claims/406.json"),
-        "{}",
-        files(&store)
-    );
+    assert!(!files(&store).contains(CLAIM_FILE), "{}", files(&store));
     assert_eq!(
         *mirror.calls.lock().unwrap(),
         ["unassign 406 builder", "unlabel 406 in-progress"]
@@ -326,11 +342,10 @@ fn resolve_writes_one_record_closes_the_issue_and_releases_the_claim_file() {
 fn resolving_twice_leaves_one_record_and_no_claim_to_release() {
     let store = store("twice");
     let mirror = FakeMirror::default();
-    claim::claim(&store, &mirror, &FixedClock::at(1_000), 406, "builder").expect("claims");
+    let claim = claim_406(&store, &mirror, "builder");
     let forge = FakeForge::default();
-    land::resolve("example/switchboard", 406, 7, &store, &mirror, &forge).expect("first");
-    let again =
-        land::resolve("example/switchboard", 406, 7, &store, &mirror, &forge).expect("second");
+    land::resolve(REPO, 406, 7, &claim.token, &store, &mirror, &forge).expect("first");
+    let again = land::resolve(REPO, 406, 7, &claim.token, &store, &mirror, &forge).expect("second");
     assert_eq!(
         again,
         land::Resolved {
@@ -346,4 +361,33 @@ fn resolving_twice_leaves_one_record_and_no_claim_to_release() {
         .filter(|body| body.starts_with(RECORD_MARK))
         .count();
     assert_eq!(records, 1);
+}
+
+#[test]
+fn resolve_with_a_stale_token_leaves_the_new_holders_claim_alone() {
+    let store = store("stale");
+    let mirror = FakeMirror::default();
+    // The first holder's claim is released, and another worker claims the unit.
+    let stale = claim_406(&store, &mirror, "builder");
+    assert!(claim::release(&store, &mirror, REPO, 406, &stale.token).expect("releases"));
+    let replacement = claim_406(&store, &mirror, "other");
+    assert_ne!(stale.token, replacement.token);
+
+    // A fresh mirror, so any call resolve makes on the replaced claim shows up alone.
+    let mirror = FakeMirror::default();
+    let forge = FakeForge::default();
+    let done =
+        land::resolve(REPO, 406, 7, &stale.token, &store, &mirror, &forge).expect("resolves");
+    assert_eq!(
+        done,
+        land::Resolved {
+            record_written: true,
+            claim_released: false
+        }
+    );
+    // The replacement's claim file is still there, and its mirror was not touched.
+    assert!(files(&store).contains(CLAIM_FILE), "{}", files(&store));
+    assert!(mirror.calls.lock().unwrap().is_empty());
+    // The record and the close still happen: the unit is resolved by its pull request.
+    assert_eq!(*forge.closed.lock().unwrap(), [406]);
 }

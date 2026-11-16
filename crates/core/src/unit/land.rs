@@ -83,12 +83,15 @@ pub fn open_pr(pr: &Pr, git: &dyn Git, forge: &dyn Forge) -> Result<u64, CoreErr
     forge.open_pr(pr.repo, pr.head, pr.base, &title, &body)
 }
 
-/// Write the resolution record on `issue` (unless one is there already), close it and release its
-/// claim. Running it again changes nothing once each step has been done.
+/// Write the resolution record on `issue` (unless one is there already), close it and release the
+/// claim that `claim_token` names (the token of the claim the caller acquired). A claim another
+/// worker holds now has another token, so it is left alone. Running it again changes nothing once
+/// each step has been done.
 pub fn resolve(
     repo: &str,
     issue: u64,
     pr_number: u64,
+    claim_token: &str,
     store: &Store,
     mirror: &dyn Mirror,
     forge: &dyn Forge,
@@ -101,7 +104,7 @@ pub fn resolve(
         forge.comment(repo, issue, &resolution_record(issue, pr_number))?;
     }
     forge.close(repo, issue)?;
-    let claim_released = release_claim(store, mirror, repo, issue)?;
+    let claim_released = release_claim(store, mirror, repo, issue, claim_token)?;
     Ok(Resolved {
         record_written: !recorded,
         claim_released,
@@ -183,13 +186,15 @@ fn check_code_map(pr: &Pr, git: &dyn Git) -> Result<(), CoreError> {
     )))
 }
 
-/// The one place this module releases a claim. `claim::release` takes no repo yet; the claim
-/// review (#480) adds it, and this is where the repo goes then.
+/// The one place this module releases a claim. It passes the repo and the caller's token to
+/// `claim::release`, which deletes the claim file only while that token still holds it; `false`
+/// means the claim was already gone or belongs to another worker, and its mirror is untouched.
 fn release_claim(
     store: &Store,
     mirror: &dyn Mirror,
-    _repo: &str,
+    repo: &str,
     issue: u64,
+    token: &str,
 ) -> Result<bool, CoreError> {
-    claim::release(store, mirror, issue)
+    claim::release(store, mirror, repo, issue, token)
 }
