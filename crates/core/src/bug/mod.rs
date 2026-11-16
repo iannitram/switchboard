@@ -1,9 +1,11 @@
-//! The bug-loop's core: the bug row and the owner table (`Bug`, `OwnerRow`), and the intake
-//! steps that turn a dropped report into one tracked bug (`intake`), and the steps that choose a
-//! bug, write its repro and fix jobs, stop it and check its record (`fix`).
+//! The bug-loop's core: the bug row and the owner table (`Bug`, `OwnerRow`), the intake steps
+//! that turn a dropped report into one tracked bug (`intake`), the steps that choose a bug, write
+//! its repro and fix jobs, stop it and check its record (`fix`), and the sweep that searches the
+//! sister apps for the fixed bug's class (`sweep`).
 
 pub mod fix;
 pub mod intake;
+pub mod sweep;
 
 use crate::CoreError;
 use serde::{Deserialize, Serialize};
