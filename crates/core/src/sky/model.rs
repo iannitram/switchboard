@@ -2,6 +2,7 @@
 //! copy in the app data folder. Every field is worked out by the sky modules; this file only
 //! joins them. The serialised names are the face's (app/src/sky/model.ts).
 
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use serde::Serialize;
@@ -9,6 +10,7 @@ use serde::Serialize;
 use crate::clock::UnixSeconds;
 use crate::github::snapshot::{self, SnapshotStore};
 use crate::github::{Issue, RepoSnapshot};
+use crate::roadmap::graph;
 use crate::sky::chain;
 use crate::sky::codemap;
 use crate::sky::drift::{self, Drift};
@@ -38,6 +40,7 @@ pub struct SkyModel {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Constellation {
     pub repo: String,
     pub url: String,
@@ -50,6 +53,13 @@ pub struct Constellation {
     /// Absent for older roadmaps without a development stages table.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stages: Option<Vec<SkyStage>>,
+    /// The number of dependency layers in the ROADMAP's `nodes:` block (#413); the face draws one
+    /// column per layer, and a star's `nodeLayer` names its column. A count rather than a list of
+    /// `{layer, nodeIds}`: every star already says its layer, so the face needs only the count.
+    /// Absent when the block is missing, empty or unusable (see `node_layers`), so the stages
+    /// layout applies and older sky answers stay valid.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_layers: Option<usize>,
     /// [blocker, blocked]
     pub edges: Vec<[u64; 2]>,
     pub chain: Vec<u64>,
@@ -88,6 +98,10 @@ pub struct Star {
     pub in_flight: bool,
     pub pr: Option<StarPr>,
     pub job: Option<String>,
+    /// The layer of the node its `node:<id>` label names (0 has no `after`). Absent unless the
+    /// project has a usable `nodes:` block (`Constellation::node_layers`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_layer: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -189,6 +203,65 @@ pub fn load_with_ledger(
     build(&snaps, copy.as_ref(), &jobs, now)
 }
 
+/// The dependency layers of a ROADMAP's `nodes:` block (#413): layer 0 is a node with no `after`,
+/// and a node's layer is one more than the deepest of its `after` nodes.
+struct NodeLayers {
+    count: usize,
+    layer_of: HashMap<String, usize>,
+}
+
+/// The layers of the `nodes:` block, or `None` when there is no usable block: no block, an empty
+/// one, a line that does not parse, a repeated id, an `after` naming no node, or a cycle. A bad
+/// block leaves the stages layout in place; it never fails the sky.
+fn node_layers(roadmap_md: Option<&str>) -> Option<NodeLayers> {
+    let graph = graph::parse(roadmap_md?).ok()?;
+    let ids: HashSet<&str> = graph.nodes.iter().map(|node| node.id.as_str()).collect();
+    if graph.nodes.is_empty()
+        || ids.len() != graph.nodes.len()
+        || graph
+            .nodes
+            .iter()
+            .any(|node| node.after.iter().any(|after| !ids.contains(after.as_str())))
+    {
+        return None;
+    }
+    let mut layer_of: HashMap<String, usize> = HashMap::new();
+    let mut pending: Vec<&graph::Node> = graph.nodes.iter().collect();
+    while !pending.is_empty() {
+        let before = pending.len();
+        pending.retain(|node| {
+            let ready = node.after.iter().all(|after| layer_of.contains_key(after));
+            if ready {
+                let layer = node
+                    .after
+                    .iter()
+                    .map(|after| layer_of[after] + 1)
+                    .max()
+                    .unwrap_or(0);
+                layer_of.insert(node.id.clone(), layer);
+            }
+            !ready
+        });
+        // Nothing placed this round: the rest wait on each other, which is a cycle.
+        if pending.len() == before {
+            return None;
+        }
+    }
+    let count = layer_of.values().max().map_or(0, |max| max + 1);
+    Some(NodeLayers { count, layer_of })
+}
+
+/// The layer of the node a star's `node:<id>` label names; `None` without such a label, or when
+/// the id is not in the block.
+fn star_layer(issue: &Issue, nodes: Option<&NodeLayers>) -> Option<usize> {
+    let nodes = nodes?;
+    issue.labels.iter().find_map(|label| {
+        label
+            .strip_prefix("node:")
+            .and_then(|id| nodes.layer_of.get(id).copied())
+    })
+}
+
 fn constellation(
     snaps: &[RepoSnapshot],
     snap: &RepoSnapshot,
@@ -206,6 +279,7 @@ fn constellation(
             other => other,
         })?,
     };
+    let nodes = node_layers(snap.roadmap_md.as_deref());
 
     Ok(Constellation {
         repo: snap.repo.clone(),
@@ -252,10 +326,11 @@ fn constellation(
                     })
                     .collect()
             }),
+        node_layers: nodes.as_ref().map(|nodes| nodes.count),
         features: block
             .features
             .iter()
-            .map(|feature| sky_feature(snap, feature, jobs))
+            .map(|feature| sky_feature(snap, feature, jobs, nodes.as_ref()))
             .collect(),
         edges: chain::edges(&snap.issues)
             .into_iter()
@@ -270,7 +345,12 @@ fn constellation(
     })
 }
 
-fn sky_feature(snap: &RepoSnapshot, feature: &Feature, jobs: &[StarJob]) -> SkyFeature {
+fn sky_feature(
+    snap: &RepoSnapshot,
+    feature: &Feature,
+    jobs: &[StarJob],
+    nodes: Option<&NodeLayers>,
+) -> SkyFeature {
     let label = format!("feature:{}", feature.id);
     let release = match feature.release {
         Release::V1 => "1.0",
@@ -285,12 +365,17 @@ fn sky_feature(snap: &RepoSnapshot, feature: &Feature, jobs: &[StarJob]) -> SkyF
             .issues
             .iter()
             .filter(|issue| issue.labels.contains(&label))
-            .map(|issue| sky_star(snap, issue, jobs))
+            .map(|issue| sky_star(snap, issue, jobs, nodes))
             .collect(),
     }
 }
 
-fn sky_star(snap: &RepoSnapshot, issue: &Issue, jobs: &[StarJob]) -> Star {
+fn sky_star(
+    snap: &RepoSnapshot,
+    issue: &Issue,
+    jobs: &[StarJob],
+    nodes: Option<&NodeLayers>,
+) -> Star {
     let job = jobs
         .iter()
         .find(|job| job.repo == snap.repo && job.number == issue.number);
@@ -323,6 +408,7 @@ fn sky_star(snap: &RepoSnapshot, issue: &Issue, jobs: &[StarJob]) -> Star {
         in_flight: job.is_some(),
         pr,
         job: job.map(|job| job.job.clone()),
+        node_layer: star_layer(issue, nodes),
     }
 }
 
