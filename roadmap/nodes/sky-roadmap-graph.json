@@ -1,25 +1,45 @@
 {
   "id": "sky-roadmap-graph",
-  "what": "When a project has a nodes: block, the sky's Roadmap lens lays stars out by dependency layer from the node graph instead of the stages table.",
+  "what": "When a project has a nodes: block, the sky's Roadmap lens lays stars out by dependency layer from the node graph instead of the stages table. The core works the layers out and sends them; the face only draws them.",
   "expectations": [
-    "A project with a nodes: block shows one column per dependency layer.",
-    "A project without one keeps the stages layout."
+    "A project with a nodes: block shows one column per dependency layer of its node graph, headed by its layer number; layer 0 is a node with no after.",
+    "A star joins the layer of the node named by its node:<id> label, and the order inside each column is the existing barycenter pass.",
+    "A star with no node (no node:<id> label, or a label naming an id not in the nodes: block) falls back to the stages layout and is still drawn: it goes in its stage's column after the layer columns, or in Unstaged when no stage holds it, so no star disappears.",
+    "A project without a nodes: block, or with an empty one, keeps the stages layout exactly as today, including the no-stages-table message.",
+    "The core sends Star.nodeLayer and Constellation.nodeLayers only when the project has a nodes: block; older sky answers stay valid."
   ],
   "files_allowed": [
-    "app/src/sky/roadmapLens.ts",
-    "app/src/sky/roadmapLens.test.ts"
+    "crates/core/src/sky/model.rs",
+    "crates/core/tests/sky_nodes.rs",
+    "app/src/sky/model.ts",
+    "app/src/sky/roadmap.ts",
+    "app/src/sky/RoadmapView.tsx",
+    "app/src/sky/RoadmapView.test.tsx",
+    "app/src/sky/roadmapNodes.test.tsx"
   ],
   "test_files": [
-    "app/src/sky/roadmapLens.test.ts"
+    "app/src/sky/roadmapNodes.test.tsx",
+    "crates/core/tests/sky_nodes.rs"
   ],
   "verify": [
     {
-      "name": "tests",
-      "cmd": "npm test -- roadmapLens",
+      "name": "face tests",
+      "cmd": "cd app && npm test -- roadmapNodes",
       "expect": "fail-before"
+    },
+    {
+      "name": "core tests",
+      "cmd": "cargo test -p switchboard-core --test sky_nodes",
+      "expect": "fail-before"
+    },
+    {
+      "name": "lint",
+      "cmd": "cargo clippy --all-targets -- -D warnings",
+      "expect": "pass"
     }
   ],
   "code_map_entries": [
-    "app/src/sky/roadmapLens.ts"
+    "crates/core/src/sky/model.rs",
+    "app/src/sky/RoadmapView.tsx"
   ]
 }
