@@ -1,5 +1,6 @@
-//! `unit`: the checks a roadmap unit's change passes before it lands. `proof` judges the red
-//! check of the unit's test command (unit-proof, #405).
+//! `unit`: the steps of one roadmap unit. `frontier` chooses it, `claim` locks it, `proof` judges
+//! the red check of its test command.
 
+pub mod claim;
 pub mod frontier;
 pub mod proof;
