@@ -27,9 +27,11 @@ fn code_map() -> String {
 fn claim(issue: u64) -> Claim {
     Claim {
         issue,
-        worker: "builder".into(),
+        unit: format!("owner/name#{issue}"),
+        machine: "builder".into(),
         token: "token-1".into(),
         claimed_at: 1_000,
+        base_sha: "0000000000000000000000000000000000000000".into(),
     }
 }
 
