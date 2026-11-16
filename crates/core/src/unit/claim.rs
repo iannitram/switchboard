@@ -80,6 +80,44 @@ impl Outcome {
     }
 }
 
+/// A failure to acquire or mirror a claim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClaimError {
+    /// Acquisition failed before the mirror writes.
+    Acquisition(CoreError),
+    /// The file was pushed, but a mirror write failed. Release using `claim.token`.
+    Mirror { claim: Box<Claim>, error: CoreError },
+}
+
+impl From<CoreError> for ClaimError {
+    fn from(error: CoreError) -> Self {
+        Self::Acquisition(error)
+    }
+}
+
+impl std::fmt::Display for ClaimError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Acquisition(error) => write!(f, "{error}"),
+            Self::Mirror { claim, error } => {
+                write!(
+                    f,
+                    "claim {} is held but mirroring failed: {error}",
+                    claim.unit
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for ClaimError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(match self {
+            Self::Acquisition(error) | Self::Mirror { error, .. } => error,
+        })
+    }
+}
+
 /// Where the claim files are kept: the pipeline remote (a URL or path) with its fleet-state
 /// branch, and a directory for the private repositories of one attempt each.
 pub struct Store {
@@ -405,8 +443,10 @@ impl Store {
 }
 
 /// Claim `issue` for `worker`: refuse while a blocker is open, create the claim file, then
-/// mirror it. The file is the lock; if the mirror fails the error is returned and the claim
-/// stands until `release` drops it. `base_sha` is the project revision being claimed for work.
+/// mirror it. A mirror failure returns `ClaimError::Mirror` with the pushed `Claim` and the
+/// original error. The file stays locked so cleanup can be retried even if GitHub remains
+/// unavailable: call `release(store, mirror, repo, issue, &claim.token)` with the returned
+/// claim, retrying release on cleanup errors. `base_sha` is the project revision to build.
 pub fn claim(
     store: &Store,
     mirror: &dyn Mirror,
@@ -415,16 +455,24 @@ pub fn claim(
     issue: u64,
     worker: &str,
     base_sha: &str,
-) -> Result<Outcome, CoreError> {
+) -> Result<Outcome, ClaimError> {
     validate_repo(repo)?;
     let open = mirror.open_blockers(repo, issue)?;
     if !open.is_empty() {
         return Ok(Outcome::Blocked(open));
     }
     let outcome = store.create(repo, issue, worker, clock.now(), base_sha)?;
-    if matches!(outcome, Outcome::Claimed(_)) {
-        mirror.assign(repo, issue, worker)?;
-        mirror.label(repo, issue, IN_PROGRESS)?;
+    if let Outcome::Claimed(claim) = outcome {
+        if let Err(error) = mirror
+            .assign(repo, issue, worker)
+            .and_then(|()| mirror.label(repo, issue, IN_PROGRESS))
+        {
+            return Err(ClaimError::Mirror {
+                claim: Box::new(claim),
+                error,
+            });
+        }
+        return Ok(Outcome::Claimed(claim));
     }
     Ok(outcome)
 }

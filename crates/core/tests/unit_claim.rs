@@ -10,8 +10,8 @@ use std::sync::Mutex;
 use switchboard_core::clock::FixedClock;
 use switchboard_core::error::CoreError;
 use switchboard_core::unit::claim::{
-    claim, reap, release, Activity, Claim, Mirror, Outcome, Store, IN_PROGRESS, NOT_NOW_EXIT,
-    STALE_LIMIT,
+    claim, reap, release, Activity, Claim, ClaimError, Mirror, Outcome, Store, IN_PROGRESS,
+    NOT_NOW_EXIT, STALE_LIMIT,
 };
 
 const REPO: &str = "owner/project";
@@ -341,6 +341,63 @@ fn a_claim_is_mirrored_and_release_removes_file_assignee_and_label() {
     );
     assert!(files(&store).contains("README"));
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_failed_acquisition_mirror_write_returns_a_claim_that_can_be_released() {
+    for operation in ["assign", "label"] {
+        let (store, root) = store(&format!("acquisition-{operation}"));
+        let fake = Fake::default();
+        let clock = FixedClock::at(1_000);
+        *fake.fail_once.lock().unwrap() = Some(operation);
+        let failure = claim(&store, &fake, &clock, REPO, 5, "w", BASE_SHA).unwrap_err();
+        let acquired = match failure {
+            ClaimError::Mirror { claim, error } => {
+                assert_eq!(
+                    error,
+                    CoreError::GitHub(format!("injected {operation} failure"))
+                );
+                claim
+            }
+            other => panic!("expected a claim with the mirror error, got {other:?}"),
+        };
+        assert_eq!(acquired.issue, 5);
+        assert_eq!(acquired.unit, format!("{REPO}#5"));
+        assert_eq!(acquired.machine, "w");
+        assert_eq!(acquired.claimed_at, 1_000);
+        assert_eq!(acquired.base_sha, BASE_SHA);
+        assert!(!acquired.token.is_empty());
+        assert_eq!(read_claim(&store, REPO, 5)["token"], acquired.token);
+        let key = (REPO.to_string(), 5);
+        assert_eq!(
+            fake.assignees.lock().unwrap().get(&key).map(String::as_str),
+            if operation == "label" {
+                Some("w")
+            } else {
+                None
+            }
+        );
+        assert!(!fake.labels.lock().unwrap().contains(&key));
+        let calls = fake.calls();
+        assert_eq!(
+            claim(&store, &fake, &clock, REPO, 5, "other", BASE_SHA).unwrap(),
+            Outcome::Taken
+        );
+        assert_eq!(fake.calls(), calls);
+
+        assert!(release(&store, &fake, REPO, 5, &acquired.token).unwrap());
+        assert!(!files(&store).contains("claims/"));
+        assert!(files(&store).contains("README"));
+        fake.assert_cleared(REPO, 5);
+
+        let fresh = held(claim(&store, &fake, &clock, REPO, 5, "other", BASE_SHA).unwrap());
+        assert_ne!(fresh.token, acquired.token);
+        fake.assert_mirrored(REPO, 5, "other");
+        assert!(release(&store, &fake, REPO, 5, &fresh.token).unwrap());
+        assert!(!files(&store).contains("claims/"));
+        fake.assert_cleared(REPO, 5);
+        let _ = std::fs::remove_dir_all(root);
+    }
 }
 
 #[test]
