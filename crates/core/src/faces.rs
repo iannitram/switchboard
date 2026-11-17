@@ -157,7 +157,7 @@ pub static REGISTRY: &[CommandSpec] = &[
     // The remaining Tauri commands and command-only CLI faces.
     row!("views", READ, Some("views"), None, None, Some("the window's tab order"), ALL_ROLES, None, None),
     row!("settings_missing", READ, Some("settings_missing"), Some("settings"), None, None, ALL_ROLES, None, None),
-    row!("settings_get", READ, Some("settings_get"), None, None, None, ALL_ROLES, None, None),
+    row!("settings_get", READ, Some("settings_get"), Some("settings"), None, None, ALL_ROLES, None, None),
     row!("settings_save", LOCAL, Some("settings_save"), None, None, Some("settings are changed in the app only (ruling on #373)"), ALL_ROLES, None, None),
     row!("chat_implicit", LOCAL, Some("chat_implicit"), None, None, Some("a signal from a press in the app (FD-8, FD-9)"), ALL_ROLES, None, None),
     row!("refresh_all", NETWORK_READ, Some("refresh_all"), Some("refresh"), None, None, ALL_ROLES, None, None),
@@ -165,7 +165,6 @@ pub static REGISTRY: &[CommandSpec] = &[
     row!("backup_all", &[Effect::Read, Effect::WriteLocal, Effect::Network], Some("backup_all"), Some("backup"), None, None, ALL_ROLES, None, None),
     row!("loadout", READ, Some("loadout"), Some("loadout"), None, None, ALL_ROLES, None, None),
     row!("confirm_guarded", GITHUB, Some("confirm_guarded"), None, None, Some("the typed confirm is in the app only (CORE-3)"), ALL_ROLES, None, None),
-    row!("constellation_cli", READ, None, Some("constellation"), None, None, ALL_ROLES, None, None),
     row!("confirm", GITHUB, None, Some("confirm"), None, None, ALL_ROLES, None, None),
     row!("autopilot", SPAWN, None, Some("autopilot"), None, None, ALL_ROLES, None, None),
     row!("spec", READ, None, Some("spec"), None, None, ALL_ROLES, None, None),
