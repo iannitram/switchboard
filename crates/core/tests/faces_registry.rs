@@ -34,7 +34,8 @@ fn usage_words() -> BTreeSet<String> {
         + 25;
     let raw = &cli[start..start + cli[start..].find("\";").expect("USAGE ends with \";")];
     let mut usage = String::new();
-    let mut lines = raw.split('\n');
+    // lines() also drops a trailing \r, so a CRLF checkout (Windows CI) parses the same.
+    let mut lines = raw.lines();
     usage.push_str(lines.next().unwrap_or_default().trim_end_matches('\\'));
     for line in lines {
         usage.push_str(line.trim_start().trim_end_matches('\\'));
