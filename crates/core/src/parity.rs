@@ -9,17 +9,18 @@ pub struct Row<'a> {
     pub ui_only: Option<&'a str>,
 }
 
-pub fn handler_names(main_rs: &str) -> Vec<String> {
-    let Some(start) = main_rs.find("generate_handler![") else {
-        return Vec::new();
-    };
-    let body_start = start + "generate_handler![".len();
-    let rest = &main_rs[body_start..];
-    let Some(end) = rest.find(']') else {
-        return Vec::new();
-    };
+/// The window's command names from `generate_handler![...]` in main.rs, paths dropped. An error
+/// names what is missing, so a moved or renamed list is not read as "no commands".
+pub fn read_handlers(main_rs: &str) -> Result<Vec<String>, String> {
+    let start = main_rs
+        .find("generate_handler![")
+        .ok_or("main.rs has no generate_handler![ list")?;
+    let rest = &main_rs[start + "generate_handler![".len()..];
+    let end = rest
+        .find(']')
+        .ok_or("main.rs's generate_handler![ list has no closing ]")?;
 
-    rest[..end]
+    Ok(rest[..end]
         .split(',')
         .map(str::trim)
         .filter(|name| !name.is_empty())
@@ -28,28 +29,44 @@ pub fn handler_names(main_rs: &str) -> Vec<String> {
                 .map_or(name, |(_, command)| command)
                 .to_string()
         })
-        .collect()
+        .collect())
 }
 
-pub fn face_calls(ts: &str) -> Vec<String> {
-    let mut names = Vec::new();
+/// `read_handlers`, empty when there is no list.
+pub fn handler_names(main_rs: &str) -> Vec<String> {
+    read_handlers(main_rs).unwrap_or_default()
+}
+
+enum Site {
+    Name(String),
+    Unread,
+}
+
+/// Each `call(` or `call<...>(` in a face file, by byte offset: its string command name, or
+/// `Unread` when the name is not a plain string literal. Method calls (`x.call(`) are read only
+/// for a literal name, and the `function call` definition is not a call.
+fn call_sites(ts: &str) -> Vec<(usize, Site)> {
+    let mut sites = Vec::new();
 
     for (start, _) in ts.match_indices("call") {
-        if ts[..start]
-            .chars()
-            .next_back()
-            .is_some_and(is_identifier_char)
-        {
+        let before = ts[..start].chars().next_back();
+        if before.is_some_and(is_identifier_char) {
             continue;
         }
+        let quiet = before == Some('.') || ts[..start].trim_end().ends_with("function");
 
         let mut pos = start + "call".len();
         if ts[pos..].starts_with('<') {
             let mut depth = 0usize;
             let mut generic_end = None;
+            let mut prev = None;
             for (offset, ch) in ts[pos..].char_indices() {
+                let arrow = prev == Some('=');
+                prev = Some(ch);
                 match ch {
                     '<' => depth += 1,
+                    // `=>` in a function type is not a closing bracket.
+                    '>' if arrow => {}
                     '>' => {
                         if depth == 0 {
                             break;
@@ -64,6 +81,9 @@ pub fn face_calls(ts: &str) -> Vec<String> {
                 }
             }
             let Some(end) = generic_end else {
+                if !quiet {
+                    sites.push((start, Site::Unread));
+                }
                 continue;
             };
             pos = end;
@@ -79,17 +99,37 @@ pub fn face_calls(ts: &str) -> Vec<String> {
             }
             pos += ch.len_utf8();
         }
-        if !ts[pos..].starts_with('"') {
-            continue;
+        let name = ts[pos..]
+            .strip_prefix('"')
+            .and_then(|rest| rest.find('"').map(|end| rest[..end].to_string()));
+        match name {
+            Some(name) => sites.push((start, Site::Name(name))),
+            None if !quiet => sites.push((start, Site::Unread)),
+            None => {}
         }
-        pos += 1;
-        let Some(end) = ts[pos..].find('"') else {
-            continue;
-        };
-        names.push(ts[pos..pos + end].to_string());
     }
 
-    names
+    sites
+}
+
+pub fn face_calls(ts: &str) -> Vec<String> {
+    call_sites(ts)
+        .into_iter()
+        .filter_map(|(_, site)| match site {
+            Site::Name(name) => Some(name),
+            Site::Unread => None,
+        })
+        .collect()
+}
+
+/// The 1-based lines of the `call(` sites whose command name is not a string literal
+/// (`call(cmd)`, a template string, an unclosed generic). `face_calls` cannot check them.
+pub fn face_call_gaps(ts: &str) -> Vec<usize> {
+    call_sites(ts)
+        .into_iter()
+        .filter(|(_, site)| matches!(site, Site::Unread))
+        .map(|(start, _)| ts[..start].matches('\n').count() + 1)
+        .collect()
 }
 
 pub fn usage_has(usage: &str, word: &str) -> bool {
@@ -108,6 +148,74 @@ pub fn usage_has(usage: &str, word: &str) -> bool {
     })
 }
 
+/// The subcommands a usage line offers: each top-level alternative of its `<a | b ...>` group
+/// (the first `<...>` outside `[...]` with a `|` in it), with whitespace and line-continuation
+/// backslashes squeezed. A word that is only an argument (`drop <archive | restore>`) is not one.
+pub fn usage_subcommands(usage: &str) -> Vec<String> {
+    let mut depth = 0usize;
+    let mut open = None;
+    for (i, ch) in usage.char_indices() {
+        match ch {
+            '[' | '<' => {
+                if depth == 0 && ch == '<' {
+                    open = Some(i + 1);
+                }
+                depth += 1;
+            }
+            ']' | '>' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    if let Some(from) = open.take() {
+                        let alternatives = split_alternatives(&usage[from..i]);
+                        if alternatives.len() > 1 {
+                            return alternatives;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Vec::new()
+}
+
+fn split_alternatives(group: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut depth = 0usize;
+    let mut from = 0;
+    for (i, ch) in group.char_indices() {
+        match ch {
+            '[' | '<' => depth += 1,
+            ']' | '>' => depth = depth.saturating_sub(1),
+            '|' if depth == 0 => {
+                parts.push(&group[from..i]);
+                from = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&group[from..]);
+    parts
+        .into_iter()
+        .map(|part| {
+            part.replace('\\', " ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect()
+}
+
+/// Whether `subcommand` (one or more words) starts one of the usage line's subcommands.
+fn offers(subcommands: &[String], subcommand: &str) -> bool {
+    subcommands.iter().any(|alternative| {
+        alternative == subcommand
+            || alternative
+                .strip_prefix(subcommand)
+                .is_some_and(|rest| rest.starts_with(' '))
+    })
+}
+
 pub fn problems(
     rows: &[Row<'_>],
     handlers: &[String],
@@ -116,6 +224,7 @@ pub fn problems(
     mcp_tools: &[&str],
 ) -> Vec<String> {
     let mut issues = Vec::new();
+    let subcommands = usage_subcommands(usage);
 
     for name in handlers {
         if !rows.iter().any(|row| row.tauri == Some(name.as_str())) {
@@ -128,6 +237,14 @@ pub fn problems(
         if seen_calls.insert(name.as_str()) && !handlers.iter().any(|handler| handler == name) {
             issues.push(format!("face calls {name}, which no tauri command handles"));
         }
+    }
+
+    if subcommands.is_empty()
+        && rows
+            .iter()
+            .any(|row| row.tauri.is_some() && row.cli.is_some())
+    {
+        issues.push("the CLI usage has no <a | b> subcommand list".to_string());
     }
 
     for row in rows {
@@ -144,7 +261,7 @@ pub fn problems(
             issues.push(format!("{tauri} is UI-only with an empty reason"));
         }
         if let Some(cli) = row.cli {
-            if !usage_has(usage, cli) {
+            if !offers(&subcommands, cli) {
                 issues.push(format!("{tauri}: CLI subcommand {cli} is missing"));
             }
         }

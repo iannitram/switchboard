@@ -5,7 +5,10 @@
 use std::path::{Path, PathBuf};
 
 use switchboard_core::faces::REGISTRY;
-use switchboard_core::parity::{face_calls, handler_names, problems, usage_has, Row};
+use switchboard_core::parity::{
+    face_call_gaps, face_calls, handler_names, problems, read_handlers, usage_has,
+    usage_subcommands, Row,
+};
 
 const MAIN_RS: &str = r#"
 fn main() {
@@ -83,8 +86,37 @@ fn handler_names_is_empty_without_a_generate_handler_list() {
 }
 
 #[test]
+fn read_handlers_names_a_missing_or_open_list() {
+    assert_eq!(read_handlers(MAIN_RS), Ok(handlers()));
+    assert_eq!(
+        read_handlers("fn main() {}"),
+        Err("main.rs has no generate_handler![ list".to_string())
+    );
+    assert_eq!(
+        read_handlers("generate_handler![commands::sky,"),
+        Err("main.rs's generate_handler![ list has no closing ]".to_string())
+    );
+}
+
+#[test]
 fn face_calls_finds_each_call_with_a_string_name_in_order() {
     assert_eq!(face_calls(FACE_TS), calls());
+}
+
+#[test]
+fn face_call_gaps_skip_the_definition_and_method_calls() {
+    assert_eq!(face_call_gaps(FACE_TS), Vec::<usize>::new());
+}
+
+#[test]
+fn face_call_gaps_name_each_call_without_a_string_name_by_line() {
+    let ts = "const a = () => call(command);\n\
+              const b = () => call(`sky`);\n\
+              const c = () => call<Record<string, () => void>>(name);\n\
+              const d = () => call<Record<string, () => void>>(\"sky\");\n\
+              const e = () => call<Open(\"sky\");\n";
+    assert_eq!(face_call_gaps(ts), vec![1, 2, 3, 5]);
+    assert_eq!(face_calls(ts), strings(&["sky"]));
 }
 
 #[test]
@@ -95,6 +127,53 @@ fn usage_has_matches_whole_words_only() {
     for word in ["pool", "kind", "all", "edit", "as", "text", "cap"] {
         assert!(!usage_has(USAGE, word), "{word} is not a subcommand");
     }
+}
+
+#[test]
+fn usage_subcommands_are_the_top_level_alternatives() {
+    assert_eq!(
+        usage_subcommands(USAGE),
+        strings(&[
+            "sky",
+            "backup <repo>",
+            "backup --all",
+            "ask \"<text>\"",
+            "ask_as_job <kind> \"<text>\"",
+            "pool_edit <pool> [--cap <n>]",
+        ])
+    );
+    assert_eq!(
+        usage_subcommands("x <a | \\\n    b <c | d>>"),
+        strings(&["a", "b <c | d>"])
+    );
+}
+
+#[test]
+fn a_subcommand_word_left_only_as_an_argument_is_named() {
+    let usage = USAGE.replace("<sky | ", "<drop <sky | backup> | ");
+    assert!(usage_has(&usage, "sky"));
+    assert_eq!(
+        problems(&ROWS, &handlers(), &calls(), &usage, &MCP),
+        strings(&["sky: CLI subcommand sky is missing"])
+    );
+}
+
+#[test]
+fn a_usage_line_with_no_subcommand_list_is_named() {
+    assert_eq!(
+        problems(
+            &ROWS,
+            &handlers(),
+            &calls(),
+            "usage: switchboard [--json]",
+            &MCP
+        ),
+        strings(&[
+            "the CLI usage has no <a | b> subcommand list",
+            "sky: CLI subcommand sky is missing",
+            "backup_repo: CLI subcommand backup is missing",
+        ])
+    );
 }
 
 #[test]
@@ -225,7 +304,8 @@ fn real_usage() -> String {
     rest[..rest.find("\";").expect("end of USAGE")].to_string()
 }
 
-fn face_sources(dir: &Path, out: &mut Vec<String>) {
+/// Each window source file under app/src (not tests), as (path from the repo root, text).
+fn face_files(dir: &Path, out: &mut Vec<(String, String)>) {
     for entry in std::fs::read_dir(dir).expect("read a face folder") {
         let path = entry.expect("a folder entry").path();
         let name = path
@@ -233,17 +313,26 @@ fn face_sources(dir: &Path, out: &mut Vec<String>) {
             .and_then(|n| n.to_str())
             .unwrap_or_default();
         if path.is_dir() {
-            face_sources(&path, out);
+            face_files(&path, out);
         } else if (name.ends_with(".ts") || name.ends_with(".tsx")) && !name.contains(".test.") {
-            out.push(std::fs::read_to_string(&path).expect("read a face file"));
+            let rel = path.strip_prefix(repo()).unwrap_or(&path);
+            let rel = rel.to_string_lossy().replace('\\', "/");
+            out.push((
+                rel,
+                std::fs::read_to_string(&path).expect("read a face file"),
+            ));
         }
     }
 }
 
-fn real_calls() -> Vec<String> {
-    let mut sources = Vec::new();
-    face_sources(&repo().join("app/src"), &mut sources);
-    let calls: Vec<String> = sources.iter().flat_map(|s| face_calls(s)).collect();
+fn real_face_files() -> Vec<(String, String)> {
+    let mut files = Vec::new();
+    face_files(&repo().join("app/src"), &mut files);
+    files
+}
+
+fn calls_in(files: &[(String, String)]) -> Vec<String> {
+    let calls: Vec<String> = files.iter().flat_map(|(_, ts)| face_calls(ts)).collect();
     // A moved app/src or a changed call() shape must not pass by finding nothing.
     assert!(
         calls.len() >= 10,
@@ -252,24 +341,22 @@ fn real_calls() -> Vec<String> {
     calls
 }
 
-/// The MCP face's served tools. `tools()` in crates/cli/src/mcp.rs builds tools/list from
-/// REGISTRY, so a served tool is a registry MCP name that some caller may list: role-free
-/// reads by default, anything else for the roles it names. A tool no caller can list is missing.
-fn real_mcp_tools() -> Vec<&'static str> {
-    // A CRLF checkout (Windows CI) reads the same as LF.
-    let mcp_rs = read("crates/cli/src/mcp.rs").replace("\r\n", "\n");
-    let start = mcp_rs.find("fn tools(").expect("tools() in mcp.rs");
-    let body = &mcp_rs[start..];
-    let body = &body[..body.find("\n}\n").expect("end of tools()")];
-    assert!(
-        body.contains("REGISTRY") && body.contains("spec.mcp"),
-        "tools/list is no longer built from REGISTRY: read the served names from mcp.rs here"
-    );
-    REGISTRY
+/// The call sites this test cannot read, by file and line.
+fn gaps_in(files: &[(String, String)]) -> Vec<String> {
+    files
         .iter()
-        .filter(|s| s.listed_without_role() || !s.mcp_roles.is_empty())
-        .filter_map(|s| s.mcp)
+        .flat_map(|(path, ts)| {
+            face_call_gaps(ts)
+                .into_iter()
+                .map(move |line| format!("{path}:{line}: call() has no string command name"))
+        })
         .collect()
+}
+
+/// Every registry MCP name. Which of them tools/list really serves is checked against the
+/// served list itself in crates/cli/tests/face_parity_mcp.rs (core cannot run the MCP face).
+fn registry_mcp_names() -> Vec<&'static str> {
+    REGISTRY.iter().filter_map(|s| s.mcp).collect()
 }
 
 fn real_rows() -> Vec<Row<'static>> {
@@ -285,22 +372,35 @@ fn real_rows() -> Vec<Row<'static>> {
         .collect()
 }
 
-fn real_problems(main_rs: &str, usage: &str) -> Vec<String> {
+fn problems_in(main_rs: &str, usage: &str, files: &[(String, String)]) -> Vec<String> {
     let rows = real_rows();
-    problems(
+    let mut got = gaps_in(files);
+    let handlers = read_handlers(main_rs).unwrap_or_else(|e| {
+        got.push(e);
+        Vec::new()
+    });
+    got.extend(problems(
         &rows,
-        &handler_names(main_rs),
-        &real_calls(),
+        &handlers,
+        &calls_in(files),
         usage,
-        &real_mcp_tools(),
-    )
+        &registry_mcp_names(),
+    ));
+    got
+}
+
+fn real_problems(main_rs: &str, usage: &str) -> Vec<String> {
+    problems_in(main_rs, usage, &real_face_files())
 }
 
 #[test]
 fn the_real_faces_have_no_parity_problems() {
     let main_rs = read("app/src-tauri/src/main.rs");
     assert!(
-        handler_names(&main_rs).len() >= 21,
+        read_handlers(&main_rs)
+            .expect("the window's handler list")
+            .len()
+            >= 21,
         "the window registers its commands"
     );
     assert_eq!(real_problems(&main_rs, &real_usage()), Vec::<String>::new());
@@ -320,6 +420,17 @@ fn a_new_tauri_command_with_no_row_fails_by_name() {
 }
 
 #[test]
+fn a_moved_handler_list_fails_with_its_cause_first() {
+    let main_rs = read("app/src-tauri/src/main.rs").replace("generate_handler![", "handlers![");
+    let got = real_problems(&main_rs, &real_usage());
+    assert_eq!(
+        got.first().map(String::as_str),
+        Some("main.rs has no generate_handler![ list"),
+        "{got:?}"
+    );
+}
+
+#[test]
 fn removing_a_cli_subcommand_fails_with_its_name() {
     let usage = real_usage();
     assert!(usage.contains("backup <repo> | backup --all | "));
@@ -334,30 +445,17 @@ fn removing_a_cli_subcommand_fails_with_its_name() {
 }
 
 #[test]
-fn an_mcp_tool_no_caller_can_list_fails_by_name() {
-    let rows = real_rows();
-    let row = rows
-        .iter()
-        .find(|r| r.tauri.is_some() && r.mcp.is_some())
-        .expect("a window command with an MCP tool");
-    let served: Vec<&str> = real_mcp_tools()
-        .into_iter()
-        .filter(|t| Some(*t) != row.mcp)
-        .collect();
-    let main_rs = read("app/src-tauri/src/main.rs");
-    let got = problems(
-        &rows,
-        &handler_names(&main_rs),
-        &real_calls(),
-        &real_usage(),
-        &served,
-    );
+fn a_face_call_without_a_string_name_fails_by_file_and_line() {
+    let mut files = real_face_files();
+    let (path, ts) = files
+        .iter_mut()
+        .find(|(_, ts)| !face_calls(ts).is_empty())
+        .expect("a face file with calls");
+    ts.push_str("\nexport const dynamic = (name: string) => call(name);\n");
+    let line = ts.lines().count();
+    let want = format!("{path}:{line}: call() has no string command name");
     assert_eq!(
-        got,
-        vec![format!(
-            "{}: MCP tool {} is missing",
-            row.tauri.unwrap_or_default(),
-            row.mcp.unwrap_or_default()
-        )]
+        problems_in(&read("app/src-tauri/src/main.rs"), &real_usage(), &files),
+        vec![want]
     );
 }
