@@ -4,6 +4,7 @@ Run: python3 -I -m unittest discover -s tools -p "test_*.py" -v
 """
 
 import os
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -12,6 +13,17 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 SCRIPT = HERE / "build-appimage.sh"
+BASH = os.environ.get("SWITCHBOARD_BASH", "bash")
+
+
+def shell_path(path):
+    if shutil.which("cygpath"):
+        return subprocess.check_output(["cygpath", "-u", str(path)], text=True).strip()
+    return str(path)
+
+
+def shell_cwd(path):
+    return subprocess.check_output([BASH, "-c", "pwd -P"], cwd=path, text=True).strip()
 
 # A stand-in for npm: `npm run ...` drops an AppImage where cargo would, `npm ci` does nothing.
 FAKE_NPM = """#!/usr/bin/env bash
@@ -46,13 +58,13 @@ def run(*args, target=None, fake_target=None, metadata_target=None, cwd=None):
         env["CONTAINER_ID"] = "craft-build"
         env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
         if target is not None:
-            env["CARGO_TARGET_DIR"] = target
-        env["FAKE_DEFAULT_TARGET"] = fake_target or str(Path(tmp) / "unused")
+            env["CARGO_TARGET_DIR"] = shell_path(target)
+        env["FAKE_DEFAULT_TARGET"] = shell_path(fake_target or Path(tmp) / "unused")
         env.pop("FAKE_METADATA_TARGET", None)
         if metadata_target is not None:
-            env["FAKE_METADATA_TARGET"] = metadata_target
+            env["FAKE_METADATA_TARGET"] = shell_path(metadata_target)
         return subprocess.run(
-            ["bash", str(SCRIPT), *args],
+            [BASH, str(SCRIPT), *args],
             capture_output=True,
             text=True,
             timeout=60,
@@ -67,7 +79,7 @@ class TargetDir(unittest.TestCase):
             out = run(target=target)
             self.assertEqual(out.returncode, 0, out.stderr)
             self.assertIn(
-                f"AppImage: {target}/release/bundle/appimage/Switchboard_0.0.1_amd64.AppImage",
+                f"AppImage: {shell_path(target)}/release/bundle/appimage/Switchboard_0.0.1_amd64.AppImage",
                 out.stdout,
             )
 
@@ -92,7 +104,7 @@ class TargetDir(unittest.TestCase):
             out = run(target="rel-target", cwd=start)
             self.assertEqual(out.returncode, 0, out.stderr)
             self.assertIn(
-                f"AppImage: {start}/rel-target/release/bundle/appimage/Switchboard_0.0.1_amd64.AppImage",
+                f"AppImage: {shell_cwd(start)}/rel-target/release/bundle/appimage/Switchboard_0.0.1_amd64.AppImage",
                 out.stdout,
             )
 
@@ -101,7 +113,7 @@ class TargetDir(unittest.TestCase):
             out = run(fake_target=target, metadata_target=target)
             self.assertEqual(out.returncode, 0, out.stderr)
             self.assertIn(
-                f"AppImage: {target}/release/bundle/appimage/Switchboard_0.0.1_amd64.AppImage",
+                f"AppImage: {shell_path(target)}/release/bundle/appimage/Switchboard_0.0.1_amd64.AppImage",
                 out.stdout,
             )
 
@@ -109,7 +121,7 @@ class TargetDir(unittest.TestCase):
         # cargo metadata fails, so the script looks in <root>/target, where the fake npm built nothing.
         out = run()
         self.assertEqual(out.returncode, 1)
-        self.assertIn(f"no AppImage under {HERE.parent}/target/release/bundle/appimage", out.stderr)
+        self.assertIn(f"no AppImage under {shell_path(HERE.parent)}/target/release/bundle/appimage", out.stderr)
 
 
 if __name__ == "__main__":

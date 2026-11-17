@@ -13,6 +13,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 SCRIPT = HERE / "build-appimage.sh"
+BASH = os.environ.get("SWITCHBOARD_BASH", "bash")
 
 REFUSAL = (
     "build-appimage: run this inside the craft-build container: "
@@ -31,7 +32,7 @@ def run(*args, container=None, cwd=None):
     if container is not None:
         env["CONTAINER_ID"] = container
     return subprocess.run(
-        ["bash", str(SCRIPT), *args],
+        [BASH, str(SCRIPT), *args],
         capture_output=True, text=True, timeout=60, env=env, cwd=cwd or ROOT,
     )
 
