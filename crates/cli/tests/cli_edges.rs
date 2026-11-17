@@ -176,7 +176,7 @@ fn json_sky_without_an_app_data_path_returns_setting_missing() {
         .output()
         .expect("run switchboard");
     // Catches: a missing app data path being reported as usage or text instead of JSON.
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(2));
     let answer: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(answer["error"]["code"], "setting_missing");
     assert_eq!(answer["error"]["retryable"], false);
