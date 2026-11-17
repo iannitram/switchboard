@@ -14,7 +14,7 @@ use std::process::ExitCode;
 
 use serde_json::Value;
 use switchboard_core::clock::{Clock, SystemClock};
-use switchboard_core::error::CoreError;
+use switchboard_core::error::{CoreError, ErrorCode};
 use switchboard_core::fleet::FleetBridge;
 use switchboard_core::frontdoor::ask::{self, Asked};
 use switchboard_core::frontdoor::chat::{self, ChatPick};
@@ -22,7 +22,10 @@ use switchboard_core::frontdoor::rating_log;
 use switchboard_core::it;
 use switchboard_core::rules::{self, Caller, Verdict};
 
-use super::{data_or_fail, emit_to, pipeline_or_fail, refuse, terminal_safe, Fail, USAGE};
+use super::{
+    data_or_fail, die, emit_to, exit_with_on, pipeline_or_fail, refuse, terminal_safe,
+    usage_failure, Fail,
+};
 
 /// The front door's flags taken out of `argv`: `ask`'s `--dry-run`, `ask` and `ask_as_job`'s
 /// `--thread <id>`, `ask_as_job`'s `--unmet <need>[,<need>]`.
@@ -297,9 +300,7 @@ pub fn command(
     let call = match call_from(words, flags) {
         Ok(call) => call,
         Err(e) => {
-            let _ = writeln!(err, "switchboard: {e}");
-            let _ = writeln!(err, "{USAGE}");
-            return ExitCode::from(2);
+            return usage_failure(&e, json, err);
         }
     };
     // A dry run only reads, so anyone may ask for one.
@@ -308,22 +309,27 @@ pub fn command(
         if let Verdict::Refuse(text) | Verdict::ToWaiting(text) =
             rules::guard_front_door(caller, what)
         {
-            return refuse(err, &terminal_safe(&text));
+            return refuse(err, &terminal_safe(&text), json);
         }
     }
     let (text, value) = match run_call(&call) {
         Ok(done) => done,
         Err(fail) => {
-            let _ = writeln!(err, "{}", fail.message());
-            return ExitCode::from(fail.code);
+            return exit_with_on(fail, json, err);
         }
     };
     let text = if json {
         match serde_json::to_string_pretty(&value) {
             Ok(text) => text,
             Err(e) => {
-                let _ = writeln!(err, "switchboard: {e}");
-                return ExitCode::from(1);
+                return die(
+                    ErrorCode::Parse,
+                    1,
+                    format!("switchboard: {e}"),
+                    None,
+                    json,
+                    err,
+                );
             }
         }
     } else {

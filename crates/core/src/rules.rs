@@ -61,6 +61,14 @@ pub enum Verdict {
 /// The guard. Merge eligibility (PASS on head, CI green) is GH-5's and is checked after
 /// `Allow`; this decides who may ask.
 ///
+/// The ending of every refusal made because the process runs inside a job worktree.
+pub const JOB_WORKTREE_REFUSAL: &str = "refused inside a job worktree";
+
+/// Whether a refusal text is the job worktree one (and not a bad PR, a missing role, ...).
+pub fn is_job_worktree_refusal(text: &str) -> bool {
+    text.ends_with(JOB_WORKTREE_REFUSAL)
+}
+
 /// Inside a job worktree everything is refused. A merge is mine from the app and the
 /// project-manager role's from the CLI or MCP. Archiving a repo (the `delete` request; nothing
 /// is ever deleted) and restoring over a live one need my confirm in the app; from the CLI or MCP they become a Waiting on you item.
@@ -72,7 +80,7 @@ pub fn guard(caller: &Caller, action: &GuardedAction) -> Verdict {
         GuardedAction::RestoreOverLive { repo } => format!("restore over {repo}"),
     };
     if caller.in_job_worktree {
-        return Verdict::Refuse(format!("{what}: refused inside a job worktree"));
+        return Verdict::Refuse(format!("{what}: {JOB_WORKTREE_REFUSAL}"));
     }
     match action {
         GuardedAction::Merge { .. } => match (caller.face, &caller.role) {
@@ -98,7 +106,7 @@ pub fn guard(caller: &Caller, action: &GuardedAction) -> Verdict {
 pub fn guard_restore_new(caller: &Caller, repo: &str) -> Verdict {
     let what = format!("restore over {repo}");
     if caller.in_job_worktree {
-        return Verdict::Refuse(format!("{what}: refused inside a job worktree"));
+        return Verdict::Refuse(format!("{what}: {JOB_WORKTREE_REFUSAL}"));
     }
     match caller.face {
         Face::Gui | Face::Cli if caller.role.is_none() || caller.face == Face::Gui => {
@@ -119,7 +127,7 @@ pub fn guard_restore_new(caller: &Caller, repo: &str) -> Verdict {
 pub fn guard_pool_edit(caller: &Caller, pool: &str) -> Verdict {
     let what = format!("edit pool {pool}");
     if caller.in_job_worktree {
-        return Verdict::Refuse(format!("{what}: refused inside a job worktree"));
+        return Verdict::Refuse(format!("{what}: {JOB_WORKTREE_REFUSAL}"));
     }
     match (caller.face, &caller.role) {
         (Face::Gui, _) | (Face::Cli | Face::Mcp, Some(Role::BudgetManager)) => Verdict::Allow,
@@ -136,7 +144,7 @@ pub fn guard_pool_edit(caller: &Caller, pool: &str) -> Verdict {
 /// same way.
 pub fn guard_autopilot(caller: &Caller, what: &str, needs: &Role) -> Verdict {
     if caller.in_job_worktree {
-        return Verdict::Refuse(format!("{what}: refused inside a job worktree"));
+        return Verdict::Refuse(format!("{what}: {JOB_WORKTREE_REFUSAL}"));
     }
     match (caller.face, &caller.role) {
         (Face::Gui, _) => Verdict::Allow,
@@ -154,7 +162,7 @@ pub fn guard_autopilot(caller: &Caller, what: &str, needs: &Role) -> Verdict {
 /// not one of CORE-3's guarded actions, so it never becomes a Waiting on you item.
 pub fn guard_front_door(caller: &Caller, what: &str) -> Verdict {
     if caller.in_job_worktree {
-        return Verdict::Refuse(format!("{what}: refused inside a job worktree"));
+        return Verdict::Refuse(format!("{what}: {JOB_WORKTREE_REFUSAL}"));
     }
     match (caller.face, &caller.role) {
         (Face::Gui, _) | (Face::Cli | Face::Mcp, Some(Role::ProjectManager)) => Verdict::Allow,

@@ -43,7 +43,7 @@ impl ErrorCode {
     }
 
     pub fn retryable(self) -> bool {
-        matches!(self, Self::FleetSpawn | Self::FleetTimeout | Self::GitHub)
+        matches!(self, Self::FleetTimeout | Self::GitHub)
     }
 
     fn fix(self) -> &'static str {
@@ -244,7 +244,7 @@ mod tests {
             (
                 fleet(FleetErrorReason::Spawn("missing".into())),
                 ErrorCode::FleetSpawn,
-                true,
+                false,
             ),
             (
                 fleet(FleetErrorReason::Timeout(30)),
@@ -254,10 +254,100 @@ mod tests {
         ];
         for (error, code, retryable) in cases {
             let body = ErrorBody::from(&error);
-            // Catches: changing a CoreError or FleetErrorReason classification or fix text.
+            // Catches: changing a CoreError or FleetErrorReason classification, or its retryable flag.
             assert_eq!(body.code, code);
             assert_eq!(body.retryable, retryable);
+            // Catches: a body with no fix text at all.
             assert!(!body.fix.is_empty());
+        }
+    }
+
+    #[test]
+    fn every_error_code_pins_its_name_retryable_flag_and_fix_text() {
+        let table = [
+            (
+                ErrorCode::Usage,
+                "usage",
+                false,
+                "Check the command syntax and try again.",
+            ),
+            (
+                ErrorCode::SettingMissing,
+                "setting_missing",
+                false,
+                "Set the missing value in Settings.",
+            ),
+            (
+                ErrorCode::Refused,
+                "refused",
+                false,
+                "Review the requested action and its requirements.",
+            ),
+            (
+                ErrorCode::FleetFailed,
+                "fleet_failed",
+                false,
+                "Check the fleet command output and try again.",
+            ),
+            (
+                ErrorCode::FleetBadJson,
+                "fleet_bad_json",
+                false,
+                "Check the fleet tool output and try again.",
+            ),
+            (
+                ErrorCode::FleetSpawn,
+                "fleet_spawn",
+                false,
+                "Check that the fleet tool is installed and try again.",
+            ),
+            (
+                ErrorCode::FleetTimeout,
+                "fleet_timeout",
+                true,
+                "Check whether the fleet tool is still running, then retry.",
+            ),
+            (
+                ErrorCode::GitHub,
+                "github",
+                true,
+                "Check GitHub connectivity and try again.",
+            ),
+            (
+                ErrorCode::File,
+                "file",
+                false,
+                "Check that the file exists and is accessible.",
+            ),
+            (
+                ErrorCode::Parse,
+                "parse",
+                false,
+                "Check the file contents and correct its format.",
+            ),
+            (
+                ErrorCode::NotFound,
+                "not_found",
+                false,
+                "Check the name and try again.",
+            ),
+            (
+                ErrorCode::InJobWorktree,
+                "in_job_worktree",
+                false,
+                "Run this command outside the job worktree.",
+            ),
+        ];
+        for (code, name, retryable, fix) in table {
+            let body = ErrorBody::new(code, "message");
+            // Catches: `as_str` drifting from the serialized name.
+            assert_eq!(code.as_str(), name);
+            assert_eq!(serde_json::to_value(code).unwrap(), name);
+            // Catches: changing the retryable flag of any ErrorCode, including Usage, NotFound
+            // and InJobWorktree.
+            assert_eq!(body.retryable, retryable, "{name}");
+            // Catches: changing the fix text of any ErrorCode.
+            assert_eq!(body.fix, fix, "{name}");
         }
     }
 }

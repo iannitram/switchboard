@@ -19,6 +19,7 @@ use switchboard_core::autopilot::run::{self, Pass, PassReport, RunEnv, Satellite
 use switchboard_core::autopilot::weekly::local_utc_offset;
 use switchboard_core::backup::{self, RepoBackup};
 use switchboard_core::clock::{Clock, SystemClock};
+use switchboard_core::error::ErrorCode;
 use switchboard_core::fleet::{FleetBridge, FleetErrorLog};
 use switchboard_core::github::transport::GitHubTransport;
 use switchboard_core::rules::{self, Caller, Face, Role, Verdict};
@@ -316,10 +317,9 @@ pub fn command_with(
     }
     let rest: Vec<String> = argv.iter().filter(|w| *w != "--dry-run").cloned().collect();
     let dry_run = rest.len() != argv.len();
+    let json = rest.iter().any(|w| w == "--json");
     let usage = |err: &mut dyn std::io::Write, message: String| {
-        let _ = writeln!(err, "switchboard: {message}");
-        let _ = writeln!(err, "{}", cli::USAGE);
-        Some(ExitCode::from(2))
+        Some(cli::usage_failure(&message, json, err))
     };
     let args = match super::parse_args(&rest) {
         Ok(args) => args,
@@ -335,8 +335,7 @@ pub fn command_with(
         Some(flag) => match Role::parse(flag) {
             Some(role) => Some(role),
             None => {
-                let _ = writeln!(err, "switchboard: unknown role: {flag}");
-                return Some(ExitCode::from(2));
+                return usage_only(err, format!("unknown role: {flag}"), json);
             }
         },
     };
@@ -363,10 +362,10 @@ pub fn command_with(
         return Some(match headless.status() {
             Ok(status) if args.json => match serde_json::to_string_pretty(&status) {
                 Ok(text) => cli::emit_to(out, &format!("{text}\n")),
-                Err(e) => fail(err, &stop(1, format!("switchboard: {e}"))),
+                Err(e) => fail(err, &stop(1, format!("switchboard: {e}")), json),
             },
             Ok(status) => cli::emit_to(out, &run::status_text(&status)),
-            Err(stop) => fail(err, &stop),
+            Err(stop) => fail(err, &stop, json),
         });
     }
     let Some(pass) = Pass::parse(word) else {
@@ -382,11 +381,11 @@ pub fn command_with(
     if let Verdict::Refuse(text) | Verdict::ToWaiting(text) =
         rules::guard_autopilot(&caller, &what, &pass.role())
     {
-        return Some(fail(err, &stop(1, text)));
+        return Some(fail(err, &stop(1, text), json));
     }
     let report = match headless.run_pass(pass, dry_run) {
         Ok(report) => report,
-        Err(stop) => return Some(fail(err, &stop)),
+        Err(stop) => return Some(fail(err, &stop, json)),
     };
     // A satellite tick's report waits for the loops it started; a poll pass's is printed
     // first, then the job launchers are waited for.
@@ -398,7 +397,7 @@ pub fn command_with(
     let text = if args.json {
         match serde_json::to_string_pretty(&report) {
             Ok(text) => format!("{text}\n"),
-            Err(e) => return Some(fail(err, &stop(1, format!("switchboard: {e}")))),
+            Err(e) => return Some(fail(err, &stop(1, format!("switchboard: {e}")), json)),
         }
     } else {
         report
@@ -422,9 +421,27 @@ pub fn command_with(
     })
 }
 
-fn fail(err: &mut dyn std::io::Write, stop: &Stop) -> ExitCode {
-    let _ = writeln!(err, "{}", stop.message);
-    ExitCode::from(stop.code)
+fn fail(err: &mut dyn std::io::Write, stop: &Stop, json: bool) -> ExitCode {
+    cli::die(
+        ErrorCode::Refused,
+        stop.code,
+        stop.message.clone(),
+        None,
+        json,
+        err,
+    )
+}
+
+/// A usage error that prints no usage text (an unknown role), exit 2.
+fn usage_only(err: &mut dyn std::io::Write, message: String, json: bool) -> Option<ExitCode> {
+    Some(cli::die(
+        ErrorCode::Usage,
+        2,
+        format!("switchboard: {message}"),
+        None,
+        json,
+        err,
+    ))
 }
 
 /// The MCP's core with the autopilot tools: `autopilot_status`, `autopilot_pass` and

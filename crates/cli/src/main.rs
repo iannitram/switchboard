@@ -59,7 +59,7 @@ impl Core {
         self.data.as_deref().ok_or_else(|| {
             let mut body = ErrorBody::new(
                 ErrorCode::SettingMissing,
-                format!("switchboard: set {} to the app data folder", cli::DATA_ENV),
+                format!("set {} to the app data folder", cli::DATA_ENV),
             );
             body.reason = Some(cli::DATA_ENV.to_string());
             body
@@ -224,7 +224,16 @@ fn main() -> ExitCode {
     let json_requested = raw_argv.iter().any(|arg| arg == "--json");
     let argv = match utf8_args(raw_argv) {
         Ok(argv) => argv,
-        Err(e) => return usage_error(&e, cli::USAGE, json_requested),
+        Err(e) => {
+            return cli::die(
+                ErrorCode::Usage,
+                2,
+                format!("switchboard: {e}"),
+                Some(cli::USAGE),
+                json_requested,
+                &mut std::io::stderr(),
+            )
+        }
     };
     let role = match mcp_call(&argv) {
         None => match autopilot::command(&argv) {
@@ -234,7 +243,16 @@ fn main() -> ExitCode {
         Some(Ok(McpCall::Help)) => return cli::emit(&format!("{MCP_USAGE}\n")),
         Some(Ok(McpCall::Version)) => return cli::emit(&format!("{}\n", cli::version_text())),
         Some(Ok(McpCall::Serve(role))) => role,
-        Some(Err(e)) => return mcp_usage_error(&e, json_requested),
+        Some(Err(e)) => {
+            return cli::die(
+                ErrorCode::Usage,
+                2,
+                format!("switchboard mcp: {e}"),
+                Some(MCP_USAGE),
+                json_requested,
+                &mut std::io::stderr(),
+            )
+        }
     };
     // MCP-2: the real write core: the CLI's own merge, the pipeline checkout and the
     // app data folder from the environment, the real clock.
@@ -268,29 +286,6 @@ fn main() -> ExitCode {
             ExitCode::from(1)
         }
     }
-}
-
-fn usage_error(message: &str, usage: &str, json: bool) -> ExitCode {
-    let body = ErrorBody::new(ErrorCode::Usage, format!("switchboard: {message}"));
-    if json {
-        eprintln!("{}", body.message);
-        eprintln!("{usage}");
-        println!("{}", serde_json::json!({ "error": body }));
-    } else {
-        eprintln!("{}", body.message);
-        eprintln!("{usage}");
-    }
-    ExitCode::from(2)
-}
-
-fn mcp_usage_error(message: &str, json: bool) -> ExitCode {
-    let body = ErrorBody::new(ErrorCode::Usage, format!("switchboard mcp: {message}"));
-    eprintln!("{}", body.message);
-    eprintln!("{MCP_USAGE}");
-    if json {
-        println!("{}", serde_json::json!({ "error": body }));
-    }
-    ExitCode::from(2)
 }
 
 #[cfg(test)]
