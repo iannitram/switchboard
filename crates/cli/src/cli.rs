@@ -2073,7 +2073,7 @@ pub(crate) fn sky_answer(data: &Path) -> Result<Value, Fail> {
 pub(crate) fn constellation_answer(data: &Path, repo: &str) -> Result<Value, Fail> {
     let (model, _) = sky_model(data)?;
     let full = resolve_repo(repo, model.constellations.iter().map(|c| c.repo.as_str()))
-        .map_err(|e| fail_core(&e, format!("switchboard: {e}")))?;
+        .map_err(|e| fail(1, format!("switchboard: {e}")))?;
     let found = full.and_then(|full| model.constellations.iter().find(|c| c.repo == full));
     match found {
         Some(c) => {
@@ -2162,7 +2162,7 @@ fn star_facts(data: &Path, target: &str) -> Result<Star, Fail> {
     };
     let snaps = snapshots("star", data)?;
     let full = resolve_repo(repo, snaps.iter().map(|s| s.repo.as_str()))
-        .map_err(|e| fail_core(&e, format!("switchboard: {e}")))?;
+        .map_err(|e| fail(1, format!("switchboard: {e}")))?;
     let snap = full.and_then(|full| snaps.iter().find(|s| s.repo == full));
     let Some((snap, issue)) =
         snap.and_then(|s| Some((s, s.issues.iter().find(|i| i.number == number)?)))
