@@ -23,9 +23,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: cargo fmt --all -- --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
+      - run: tools/ci.sh rust
+        shell: bash
 
   # The Tauri app is not a default member, so the job above never compiles it. Check it here,
   # on Linux, with the system libraries Tauri 2 needs (the AppImage build stays in the container).
@@ -65,29 +64,26 @@ jobs:
             timeout 120 sudo apt-get $APT_OPTS update
           fi
           timeout 600 sudo apt-get $APT_OPTS install -y libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev librsvg2-dev libayatana-appindicator3-dev patchelf
-      - run: cargo clippy -p switchboard-app --all-targets -- -D warnings
-      - run: cargo test -p switchboard-app
+      - run: tools/ci.sh app
+        shell: bash
 
   face:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: app
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - run: npm ci
-      - run: npm run build
-      - run: npm test
+      - run: tools/ci.sh face
+        shell: bash
 
   notices:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: python3 -I -m unittest discover -s tools -p "test_*.py" -v
-      - run: python3 -I tools/check-notices.py
+      - run: tools/ci.sh lint
+        shell: bash

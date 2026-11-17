@@ -1,6 +1,6 @@
 # Roadmap: Switchboard
 
-Updated: 2026-11-12
+Updated: 2026-11-17
 
 features:
 - core: The core and the fleet bridge, with the abilities index (release: 1.0)
@@ -105,7 +105,7 @@ unspecified:
 
 `docs/code-map.md` holds the modules, what each owns, how they interlink and each one's status. The skeleton is committed: one Rust workspace (`crates/core`, `crates/cli`, `app/src-tauri`) whose modules carry their types and signatures with `todo!("<Must id>")` bodies, the React face (`app/`) with five empty views, a stub `fleet.py` for core tests (`crates/core/tests/fixtures/fleet-stub/`), and CI on Linux, Mac and Windows. Issues fill the stubs; each moves its module from planned to present.
 
-Build and test: `cargo test` (the core and the CLI), `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all -- --check`; the face with `npm ci && npm run build && npm test` in `app/`; the Tauri app and the AppImage with `cargo build -p switchboard-app` / `npm run tauri build` in `app/`. Rust and Tauri are compiled only inside the build container on the Strix Halo computer, never on the host.
+Build and test: `tools/ci.sh` runs the Rust format, lint and tests, the face checks, Python tests, notice check and architecture lints; `tools/ci.sh rust|app|face|lint` runs one part. The Tauri app and the AppImage build with `cargo build -p switchboard-app` / `npm run tauri build` in `app/`. Rust and Tauri are compiled only inside the build container on the Strix Halo computer, never on the host.
 
 ## Open source brought in
 
