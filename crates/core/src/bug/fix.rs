@@ -39,8 +39,8 @@ const SEVERITY_ORDER: [&str; 5] = ["data-loss", "privacy", "crash", "wrong-resul
 
 /// `bug next`: the open bug no worker holds that comes first by severity (data-loss, privacy,
 /// crash, wrong-result, cosmetic), then by the most reports, then the oldest (the earliest row of
-/// `bugs`). `claimed` are the issue numbers a worker holds. `None` is exit 75.
-pub fn next<'a>(bugs: &'a [Bug], claimed: &[u64]) -> Option<&'a Bug> {
+/// `bugs`). `claimed` are the (repo, issue) pairs workers hold. `None` is exit 75.
+pub fn next<'a>(bugs: &'a [Bug], claimed: &[(&str, u64)]) -> Option<&'a Bug> {
     let rank = |bug: &Bug| {
         SEVERITY_ORDER
             .iter()
@@ -49,7 +49,7 @@ pub fn next<'a>(bugs: &'a [Bug], claimed: &[u64]) -> Option<&'a Bug> {
     };
     bugs.iter()
         .enumerate()
-        .filter(|(_, bug)| bug.is_open() && !claimed.contains(&bug.issue))
+        .filter(|(_, bug)| bug.is_open() && !claimed.contains(&(bug.repo.as_str(), bug.issue)))
         .min_by_key(|(row, bug)| (rank(bug), std::cmp::Reverse(bug.reports.len()), *row))
         .map(|(_, bug)| bug)
 }
@@ -142,6 +142,8 @@ pub enum Refusal {
     NoScope,
     /// A `files_allowed` glob of the fix would let it edit the repro test.
     TouchesRepro(String),
+    /// Scope patterns support only `/` separators and `*` or `**` wildcards.
+    UnsupportedGlob(String),
     /// The brief is over `BRIEF_LIMIT` bytes.
     BriefTooLong(usize),
     Run(CoreError),
@@ -163,12 +165,16 @@ fn slug(id: &str) -> String {
         .collect()
 }
 
-/// Where the repro job writes its one test: the owner's test directory glob with `bug_<id>` in
-/// the place of its first `*`.
+/// Where the repro job writes its one test: recursive directories use zero levels, and each
+/// remaining wildcard in the owner's glob becomes `bug_<id>`.
 pub fn repro_path(owner: &OwnerRow, bug: &Bug) -> String {
     let name = format!("bug_{}", slug(&bug.id));
     if owner.test_dir.contains('*') {
-        owner.test_dir.replacen('*', &name, 1)
+        owner
+            .test_dir
+            .replace("**/", "")
+            .replace("**", "*")
+            .replace('*', &name)
     } else {
         format!("{}/{name}", owner.test_dir.trim_end_matches('/'))
     }
@@ -211,7 +217,8 @@ fn check(name: &str, cmd: &str, expect: Expect) -> Verify {
 /// `bug job`: the repro job when the bug has no repro test, else the fix job. The fix job is
 /// written only after the repro command, run on main, exited non-zero with the bug's error
 /// signature in its output; it lists the repro command as `fail-before` and its `files_allowed`
-/// is the request's scope, which must not match the repro test.
+/// is the request's scope, which must use only `/`, `*` and `**` glob syntax and must not match
+/// the repro test.
 pub fn job(req: &Request, main: &dyn Main) -> Result<Job, Refusal> {
     let bug = req.bug;
     let owner = req.owner;
@@ -257,6 +264,13 @@ pub fn job(req: &Request, main: &dyn Main) -> Result<Job, Refusal> {
             }
             if req.scope.is_empty() {
                 return Err(Refusal::NoScope);
+            }
+            if let Some(glob) = req
+                .scope
+                .iter()
+                .find(|g| g.chars().any(|c| matches!(c, '?' | '[' | '\\')))
+            {
+                return Err(Refusal::UnsupportedGlob(glob.clone()));
             }
             if let Some(glob) = req.scope.iter().find(|g| glob_match(g, &repro.test)) {
                 return Err(Refusal::TouchesRepro(glob.clone()));
@@ -416,7 +430,7 @@ impl GitGrep {
 
     /// The files the diff `base..head` changes.
     pub fn changed(&self, base: &str, head: &str) -> Result<Vec<String>, CoreError> {
-        let out = self.git(&["diff", "--name-only", base, head])?;
+        let out = self.git(&["diff", "--name-only", "-z", base, head])?;
         if !out.status.success() {
             return Err(CoreError::Io(format!(
                 "git diff: {}",
@@ -424,7 +438,8 @@ impl GitGrep {
             )));
         }
         Ok(String::from_utf8_lossy(&out.stdout)
-            .lines()
+            .split('\0')
+            .filter(|path| !path.is_empty())
             .map(str::to_string)
             .collect())
     }

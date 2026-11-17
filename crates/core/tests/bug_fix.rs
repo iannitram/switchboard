@@ -77,8 +77,13 @@ fn next_orders_by_severity_then_reports_then_age_and_skips_claimed() {
         bug("e", 5, "data-loss", 1),
     ];
     assert_eq!(next(&bugs, &[]).unwrap().id, "e");
-    assert_eq!(next(&bugs, &[5]).unwrap().id, "c");
-    assert_eq!(next(&bugs, &[5, 3]).unwrap().id, "d");
+    assert_eq!(next(&bugs, &[("o/app", 5)]).unwrap().id, "c");
+    assert_eq!(next(&bugs, &[("o/app", 5), ("o/app", 3)]).unwrap().id, "d");
+    let mut other = bug("other", 5, "data-loss", 1);
+    other.repo = "o/other".into();
+    let mut repos = bugs.clone();
+    repos.push(other);
+    assert_eq!(next(&repos, &[("o/app", 5)]).unwrap().id, "other");
     let mut closed = bugs.clone();
     closed.iter_mut().for_each(|b| b.status = "closed".into());
     assert!(next(&closed, &[]).is_none());
@@ -107,6 +112,11 @@ fn without_a_repro_test_the_repro_job_is_written_for_one_test_file() {
     assert_eq!(j.files_allowed, vec!["tests/bug_b1.rs".to_string()]);
     assert!(!j.open_pr);
     assert!(j.brief.contains("panic: index out of range"));
+    let mut recursive = o.clone();
+    recursive.test_dir = "tests/**/*.rs".into();
+    assert_eq!(repro_path(&recursive, &b), "tests/bug_b1.rs");
+    recursive.test_dir = "tests/**/test_*.py".into();
+    assert_eq!(repro_path(&recursive, &b), "tests/test_bug_b1.py");
 }
 
 #[test]
@@ -199,6 +209,17 @@ fn fix_job_files_allowed_excludes_the_repro_test() {
     };
     let j = job(&req, &red()).unwrap();
     assert!(j.files_allowed.iter().all(|g| !glob_match(g, &r.test)));
+    for glob in ["tests/bug_b?.rs", "tests/bug_b[1].rs", r"tests\*.rs"] {
+        let scope = [glob.to_string()];
+        let unsafe_req = Request {
+            scope: &scope,
+            ..req
+        };
+        assert!(matches!(
+            job(&unsafe_req, &red()),
+            Err(Refusal::UnsupportedGlob(_))
+        ));
+    }
     let none = Request {
         bug: &b,
         owner: &o,
@@ -327,20 +348,20 @@ fn signature_patterns_hit_at_base_and_nowhere_at_head() {
     let dir = tmp("sig");
     git(&dir, &["init", "--quiet"]);
     std::fs::write(
-        dir.join("a.rs"),
+        dir.join("caf\u{e9}.rs"),
         "let x = v[v.len()];\nlet y = unwrap_it();\nok();\n",
     )
     .unwrap();
-    git(&dir, &["add", "a.rs"]);
+    git(&dir, &["add", "caf\u{e9}.rs"]);
     git(&dir, &["commit", "--quiet", "-m", "base"]);
     let base = git(&dir, &["rev-parse", "HEAD"]);
-    std::fs::write(dir.join("a.rs"), "let x = v.get(0);\nok();\n").unwrap();
+    std::fs::write(dir.join("caf\u{e9}.rs"), "let x = v.get(0);\nok();\n").unwrap();
     git(&dir, &["commit", "--quiet", "-am", "fix"]);
     let head = git(&dir, &["rev-parse", "HEAD"]);
 
     let grep = GitGrep { clone: dir.clone() };
     let files = grep.changed(&base, &head).unwrap();
-    assert_eq!(files, vec!["a.rs".to_string()]);
+    assert_eq!(files, vec!["caf\u{e9}.rs".to_string()]);
     let p = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
 
     let good = p(&[r"v\[v\.len\(\)\]", "unwrap_it"]);
@@ -381,4 +402,24 @@ fn the_status_row_replaces_its_area_and_is_never_doubled() {
     assert!(status_row_ok(&added, "tests/bug_b1.rs", "abc123"));
     assert!(!status_row_ok(table, "tests/bug_b1.rs", "abc123"));
     assert!(!status_row_ok(&once, "tests/bug_b1.rs", "other"));
+}
+
+#[test]
+fn the_code_map_covers_the_bug_fix_files() {
+    use switchboard_core::sky::codemap::{check_modules, Touched};
+    let map = include_str!("../../../docs/code-map.md");
+    let touched: Vec<Touched> = [
+        ("crates/core/src/bug/fix.rs", true),
+        ("crates/core/src/bug/mod.rs", false),
+        ("crates/core/tests/bug_fix.rs", true),
+        ("docs/code-map.md", false),
+    ]
+    .into_iter()
+    .map(|(path, added)| Touched {
+        path: path.into(),
+        added,
+    })
+    .collect();
+    let findings = check_modules("bug-fix", &touched, map, map);
+    assert!(findings.is_empty(), "{findings:?}");
 }
