@@ -436,7 +436,7 @@ pub struct McpCore<'a> {
 }
 
 impl ReadCore for McpCore<'_> {
-    fn call(&self, tool: &str, args: &Value) -> Result<Value, String> {
+    fn call(&self, tool: &str, args: &Value) -> Result<Value, switchboard_core::error::ErrorBody> {
         let dry_run = args["dry_run"].as_bool().unwrap_or(false);
         let pass = match tool {
             "autopilot_status" => return self.headless.status().map_err(|stop| stop.message),

@@ -28,7 +28,7 @@ const RESTORE: &str = "I was asked from MCP to restore over o/switchboard";
 struct FakeRead;
 
 impl ReadCore for FakeRead {
-    fn call(&self, _: &str, _: &Value) -> Result<Value, String> {
+    fn call(&self, _: &str, _: &Value) -> Result<Value, switchboard_core::error::ErrorBody> {
         Ok(json!([]))
     }
 }

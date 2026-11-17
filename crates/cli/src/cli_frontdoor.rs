@@ -221,7 +221,11 @@ fn ask_text(asked: &Asked) -> String {
 fn run_call(call: &Call) -> Result<(String, Value), Fail> {
     let core = |command: &str, e: CoreError| Fail {
         code: 1,
-        message: terminal_safe(&format!("{command}: {e}")),
+        body: {
+            let mut body = switchboard_core::error::ErrorBody::from(&e);
+            body.message = terminal_safe(&format!("{command}: {e}"));
+            body
+        },
     };
     match call {
         Call::Ask {
@@ -310,7 +314,12 @@ pub fn command(
     let (text, value) = match run_call(&call) {
         Ok(done) => done,
         Err(fail) => {
-            let _ = writeln!(err, "{}", fail.message);
+            let _ = writeln!(
+                err,
+                "{} (code: {})",
+                fail.message(),
+                fail.body.code.as_str()
+            );
             return ExitCode::from(fail.code);
         }
     };

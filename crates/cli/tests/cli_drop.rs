@@ -157,7 +157,7 @@ fn drop_inside_a_job_worktree_is_refused_whatever_the_role() {
     assert_eq!(code, ExitCode::from(1));
     assert_eq!(
         err,
-        "drop the request to archive o/switchboard: refused inside a job worktree\n"
+        "drop the request to archive o/switchboard: refused inside a job worktree (code: in_job_worktree)\n"
     );
     assert_eq!(waiting(&s), [ARCHIVE]);
 }

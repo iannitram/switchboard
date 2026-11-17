@@ -319,7 +319,13 @@ fn assert_usage(out: &Output, message: &str) {
 /// Exit 1 with exactly `message` on stderr, nothing on stdout.
 fn assert_refused(out: &Output, message: &str) {
     assert_eq!(out.status.code(), Some(1), "{}", stderr(out));
-    assert_eq!(stderr(out).trim_end(), message);
+    let actual = stderr(out);
+    assert!(actual.trim_end().starts_with(message), "{actual}");
+    assert!(
+        actual.trim_end().ends_with("(code: refused)")
+            || actual.trim_end().ends_with("(code: in_job_worktree)"),
+        "{actual}"
+    );
     assert_eq!(stdout(out), "");
 }
 

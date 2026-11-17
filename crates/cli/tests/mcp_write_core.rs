@@ -42,7 +42,7 @@ with open(os.path.join(here, "calls.log"), "a") as f:
 struct FakeRead;
 
 impl ReadCore for FakeRead {
-    fn call(&self, _: &str, _: &Value) -> Result<Value, String> {
+    fn call(&self, _: &str, _: &Value) -> Result<Value, switchboard_core::error::ErrorBody> {
         Ok(json!({}))
     }
 }
@@ -559,7 +559,10 @@ fn the_binary_merge_without_a_pass_is_refused_with_the_cli_text() {
         "a real refusal: {}",
         mcp.1
     );
-    assert_eq!(mcp.1, cli.1, "the same refusal text as the CLI");
+    let body: Value = serde_json::from_str(&mcp.1).expect("MCP error body JSON");
+    // Catches: the MCP failure changing its face-specific envelope or current human message.
+    assert_eq!(body["code"], "refused");
+    assert_eq!(body["message"], cli.1);
     assert!(
         cli.2.is_empty() && mcp.2.is_empty(),
         "merge_pr.py never ran"

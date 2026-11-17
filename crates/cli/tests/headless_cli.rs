@@ -229,7 +229,7 @@ fn set_pool_cap_is_refused_inside_a_job_worktree() {
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(
         stderr(&out),
-        "edit pool deepseek: refused inside a job worktree\n"
+        "edit pool deepseek: refused inside a job worktree (code: in_job_worktree)\n"
     );
     assert!(unchanged(&d.root));
 }

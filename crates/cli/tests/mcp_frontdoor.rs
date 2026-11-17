@@ -18,7 +18,7 @@ use switchboard_core::rules::Role;
 struct FakeRead;
 
 impl ReadCore for FakeRead {
-    fn call(&self, tool: &str, args: &Value) -> Result<Value, String> {
+    fn call(&self, tool: &str, args: &Value) -> Result<Value, switchboard_core::error::ErrorBody> {
         Ok(json!({ "tool": tool, "args": args }))
     }
 }
@@ -290,10 +290,11 @@ fn a_core_refusal_is_a_tool_error_with_its_text() {
         )],
     );
     assert_eq!(replies[0]["result"]["isError"], true);
-    assert_eq!(
-        replies[0]["result"]["content"][0]["text"],
-        "rate: refused: no thread chat-nope"
-    );
+    let body: Value =
+        serde_json::from_str(replies[0]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    // Catches: front-door refusals bypassing the MCP error envelope.
+    assert_eq!(body["code"], "refused");
+    assert_eq!(body["message"], "rate: refused: no thread chat-nope");
 }
 
 #[test]
@@ -325,8 +326,8 @@ fn a_core_with_no_front_door_says_so() {
     .unwrap();
     let reply: Value = serde_json::from_slice(&out).unwrap();
     assert_eq!(reply["result"]["isError"], true);
-    assert_eq!(
-        reply["result"]["content"][0]["text"],
-        "ask: this core has no front door"
-    );
+    let body: Value =
+        serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(body["code"], "refused");
+    assert_eq!(body["message"], "ask: this core has no front door");
 }

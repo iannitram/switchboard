@@ -62,6 +62,10 @@ _Avoid_: bug, incident, alert
 A fault in a project's own code, such as Z13-Helper's tests failing. It's filed as a bug in that project's repo, never as an IT ticket.
 _Avoid_: IT ticket, fleet error
 
+**Error code**:
+A stable machine-readable name for a failure. Faces return the same code, message, retryability, fix and optional reason so a caller can branch on the code.
+_Avoid_: error text as identifier
+
 **Adopted loop**:
 A satellite loop whose run ended while it still ran (the window closed, a headless run killed). It stays on disk, and the next satellite tick on that machine, from any face, takes it over and watches it to its end instead of starting another copy.
 _Avoid_: orphan, zombie

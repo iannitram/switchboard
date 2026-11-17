@@ -36,4 +36,4 @@ pub mod sky;
 pub mod unit;
 pub mod waiting;
 
-pub use error::CoreError;
+pub use error::{CoreError, ErrorBody, ErrorCode};

@@ -12,7 +12,7 @@ use switchboard_core::rules::Role;
 struct Read;
 
 impl ReadCore for Read {
-    fn call(&self, _: &str, _: &Value) -> Result<Value, String> {
+    fn call(&self, _: &str, _: &Value) -> Result<Value, switchboard_core::error::ErrorBody> {
         Ok(Value::Null)
     }
 }

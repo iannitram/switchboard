@@ -20,7 +20,7 @@ use serde_json::{json, Value};
 use switchboard_core::budget::{self, PoolEdit};
 use switchboard_core::clock::Clock;
 use switchboard_core::confirm;
-use switchboard_core::error::CoreError;
+use switchboard_core::error::{CoreError, ErrorBody, ErrorCode};
 use switchboard_core::faces::{Effect, REGISTRY};
 use switchboard_core::fleet::FleetBridge;
 use switchboard_core::github::snapshot::SnapshotStore;
@@ -33,7 +33,7 @@ pub mod frontdoor;
 /// The core behind the tools. `serve` passes a read tool's name and arguments here and returns
 /// the answer as text. The real core is a thin struct in main.rs.
 pub trait ReadCore {
-    fn call(&self, tool: &str, args: &Value) -> Result<Value, String>;
+    fn call(&self, tool: &str, args: &Value) -> Result<Value, ErrorBody>;
 }
 
 /// The core behind the write tools (MCP-2). The real one is a thin struct in main.rs.
@@ -296,14 +296,20 @@ fn autopilot_call(
     if let Verdict::Refuse(text) | Verdict::ToWaiting(text) =
         rules::guard_autopilot(&caller, name, needs)
     {
-        return said(text, true);
+        let code = if in_job_worktree {
+            ErrorCode::InJobWorktree
+        } else {
+            ErrorCode::Refused
+        };
+        let body = ErrorBody::new(code, text);
+        return said(serde_json::to_string(&body).unwrap_or_default(), true);
     }
     match core.call(name, args) {
         Ok(answer) => {
             let failed = answer["errors"].as_array().is_some_and(|e| !e.is_empty());
             said(answer.to_string(), failed)
         }
-        Err(message) => said(message, true),
+        Err(body) => said(serde_json::to_string(&body).unwrap_or_default(), true),
     }
 }
 
@@ -564,9 +570,9 @@ fn read_call(id: &Value, name: &str, args: &Value, core: &dyn ReadCore) -> Value
             id,
             json!({ "content": [{ "type": "text", "text": answer.to_string() }], "isError": false }),
         ),
-        Err(message) => ok(
+        Err(body) => ok(
             id,
-            json!({ "content": [{ "type": "text", "text": message }], "isError": true }),
+            json!({ "content": [{ "type": "text", "text": serde_json::to_string(&body).unwrap_or_default() }], "isError": true }),
         ),
     }
 }
@@ -661,10 +667,18 @@ fn write_call(
             id,
             json!({ "content": [{ "type": "text", "text": text }], "isError": false }),
         ),
-        Err(message) => ok(
-            id,
-            json!({ "content": [{ "type": "text", "text": message }], "isError": true }),
-        ),
+        Err(message) => {
+            let code = if in_job_worktree {
+                ErrorCode::InJobWorktree
+            } else {
+                ErrorCode::Refused
+            };
+            let body = ErrorBody::new(code, message);
+            ok(
+                id,
+                json!({ "content": [{ "type": "text", "text": serde_json::to_string(&body).unwrap_or_default() }], "isError": true }),
+            )
+        }
     }
 }
 

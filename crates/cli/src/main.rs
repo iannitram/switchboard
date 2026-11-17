@@ -11,6 +11,7 @@ pub mod mcp;
 use std::process::ExitCode;
 
 use switchboard_core::clock::SystemClock;
+use switchboard_core::error::{ErrorBody, ErrorCode};
 use switchboard_core::fleet::FleetBridge;
 use switchboard_core::rules;
 
@@ -54,15 +55,20 @@ struct Core {
 }
 
 impl Core {
-    fn data(&self) -> Result<&std::path::Path, String> {
-        self.data
-            .as_deref()
-            .ok_or_else(|| format!("set {} to the app data folder", cli::DATA_ENV))
+    fn data(&self) -> Result<&std::path::Path, ErrorBody> {
+        self.data.as_deref().ok_or_else(|| {
+            let mut body = ErrorBody::new(
+                ErrorCode::SettingMissing,
+                format!("switchboard: set {} to the app data folder", cli::DATA_ENV),
+            );
+            body.reason = Some(cli::DATA_ENV.to_string());
+            body
+        })
     }
 }
 
 impl mcp::ReadCore for Core {
-    fn call(&self, tool: &str, args: &serde_json::Value) -> Result<serde_json::Value, String> {
+    fn call(&self, tool: &str, args: &serde_json::Value) -> Result<serde_json::Value, ErrorBody> {
         let text = |key: &str| args.get(key).and_then(|v| v.as_str());
         let limit = args
             .get("limit")
@@ -71,15 +77,18 @@ impl mcp::ReadCore for Core {
         let answer = match tool {
             "sky" => cli::sky_answer(self.data()?),
             "constellation" => {
-                let repo = text("repo").ok_or("constellation: repo is required")?;
+                let repo = text("repo").ok_or_else(|| {
+                    ErrorBody::new(ErrorCode::Usage, "constellation: repo is required")
+                })?;
                 cli::constellation_answer(self.data()?, repo)
             }
             "star" => {
-                let repo = text("repo").ok_or("star: repo is required")?;
+                let repo = text("repo")
+                    .ok_or_else(|| ErrorBody::new(ErrorCode::Usage, "star: repo is required"))?;
                 let issue = args
                     .get("issue")
                     .and_then(|v| v.as_u64())
-                    .ok_or("star: issue is required")?;
+                    .ok_or_else(|| ErrorBody::new(ErrorCode::Usage, "star: issue is required"))?;
                 cli::star_answer(self.data()?, &format!("{repo}#{issue}"))
             }
             "waiting" => cli::waiting_items(self.data()?).and_then(|mut items| {
@@ -100,9 +109,14 @@ impl mcp::ReadCore for Core {
                 .and_then(|rows| serde_json::to_value(rows).map_err(cli::Fail::from)),
             // #375: the satellite's read tool (`mcp::role_read_tools`).
             "errors" => cli::errors_answer(self.data()?).map(|answer| answer.to_json()),
-            other => return Err(format!("unknown tool: {other}")),
+            other => {
+                return Err(ErrorBody::new(
+                    ErrorCode::Usage,
+                    format!("unknown tool: {other}"),
+                ))
+            }
         };
-        answer.map_err(|fail| fail.message)
+        answer.map_err(|fail| fail.body)
     }
 }
 
@@ -206,13 +220,11 @@ pub fn utf8_args(
 }
 
 fn main() -> ExitCode {
-    let argv = match utf8_args(std::env::args_os().skip(1)) {
+    let raw_argv: Vec<_> = std::env::args_os().skip(1).collect();
+    let json_requested = raw_argv.iter().any(|arg| arg == "--json");
+    let argv = match utf8_args(raw_argv) {
         Ok(argv) => argv,
-        Err(e) => {
-            eprintln!("switchboard: {e}");
-            eprintln!("{}", cli::USAGE);
-            return ExitCode::from(2);
-        }
+        Err(e) => return usage_error(&e, &cli::USAGE, json_requested),
     };
     let role = match mcp_call(&argv) {
         None => match autopilot::command(&argv) {
@@ -222,11 +234,7 @@ fn main() -> ExitCode {
         Some(Ok(McpCall::Help)) => return cli::emit(&format!("{MCP_USAGE}\n")),
         Some(Ok(McpCall::Version)) => return cli::emit(&format!("{}\n", cli::version_text())),
         Some(Ok(McpCall::Serve(role))) => role,
-        Some(Err(e)) => {
-            eprintln!("switchboard mcp: {e}");
-            eprintln!("{MCP_USAGE}");
-            return ExitCode::from(2);
-        }
+        Some(Err(e)) => return usage_error(&format!("mcp: {e}"), MCP_USAGE, json_requested),
     };
     // MCP-2: the real write core: the CLI's own merge, the pipeline checkout and the
     // app data folder from the environment, the real clock.
@@ -260,6 +268,19 @@ fn main() -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+fn usage_error(message: &str, usage: &str, json: bool) -> ExitCode {
+    let body = ErrorBody::new(ErrorCode::Usage, format!("switchboard: {message}"));
+    if json {
+        eprintln!("{}", body.message);
+        eprintln!("{usage}");
+        println!("{}", serde_json::json!({ "error": body }));
+    } else {
+        eprintln!("{} (code: usage)", body.message);
+        eprintln!("{usage}");
+    }
+    ExitCode::from(2)
 }
 
 #[cfg(test)]

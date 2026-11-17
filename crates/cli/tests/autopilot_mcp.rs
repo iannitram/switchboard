@@ -23,7 +23,7 @@ use switchboard_core::rules::Role;
 struct FakeRead;
 
 impl ReadCore for FakeRead {
-    fn call(&self, tool: &str, _args: &Value) -> Result<Value, String> {
+    fn call(&self, tool: &str, _args: &Value) -> Result<Value, switchboard_core::error::ErrorBody> {
         Ok(json!({ "tool": tool }))
     }
 }

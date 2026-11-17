@@ -25,7 +25,7 @@ use switchboard_core::backup_run::{self, BackupRow};
 use switchboard_core::budget::{self, PoolEdit, PoolRow};
 use switchboard_core::clock::{Clock, SystemClock, UnixSeconds};
 use switchboard_core::confirm;
-use switchboard_core::error::CoreError;
+use switchboard_core::error::{CoreError, ErrorBody, ErrorCode};
 use switchboard_core::fleet::FleetBridge;
 use switchboard_core::fleet_errors::{self, FleetErrorRecord};
 use switchboard_core::github::live;
@@ -520,6 +520,7 @@ pub fn run_with(
     writes: &dyn Writes,
     err: &mut dyn Write,
 ) -> ExitCode {
+    let json_requested = argv.iter().any(|word| word == "--json");
     if let Some(text) = early_answer(argv) {
         return emit(&format!("{text}\n"));
     }
@@ -558,11 +559,7 @@ pub fn run_with(
     };
     let args = match super::parse_args(&argv) {
         Ok(args) => args,
-        Err(e) => {
-            eprintln!("switchboard: {e}");
-            eprintln!("{USAGE}");
-            return ExitCode::from(2);
-        }
+        Err(e) => return usage_failure(&e, json_requested, err),
     };
     if let Some(role) = &args.role {
         if Role::parse(role).is_none() {
@@ -662,15 +659,8 @@ pub fn run_with(
             args.json,
             &mut std::io::stdout(),
         ),
-        Some(other) => {
-            eprintln!("switchboard: unknown command: {other}");
-            eprintln!("{USAGE}");
-            ExitCode::from(2)
-        }
-        None => {
-            eprintln!("{USAGE}");
-            ExitCode::from(2)
-        }
+        Some(other) => usage_failure(&format!("unknown command: {other}"), args.json, err),
+        None => usage_failure(&USAGE.to_string(), args.json, err),
     }
 }
 
@@ -1119,7 +1109,12 @@ fn request_text(action: &GuardedAction) -> String {
 
 /// A refusal: its text on stderr, exit 1.
 fn refuse(err: &mut dyn Write, text: &str) -> ExitCode {
-    let _ = writeln!(err, "{text}");
+    let code = if text.contains("inside a job worktree") {
+        ErrorCode::InJobWorktree
+    } else {
+        ErrorCode::Refused
+    };
+    let _ = writeln!(err, "{text} (code: {})", code.as_str());
     ExitCode::from(1)
 }
 
@@ -1277,7 +1272,7 @@ pub fn pool_command(
     let (root, data) = match pipeline_or_fail().and_then(|root| Ok((root, data_or_fail()?))) {
         Ok(found) => found,
         Err(fail) => {
-            let _ = writeln!(err, "{}", fail.message);
+            let _ = writeln!(err, "{}", fail.message());
             return ExitCode::from(fail.code);
         }
     };
@@ -1451,52 +1446,99 @@ fn pipeline_setting() -> Result<Option<PathBuf>, String> {
 /// read tools answer with the message.
 pub(crate) struct Fail {
     code: u8,
-    pub(crate) message: String,
+    pub(crate) body: ErrorBody,
+}
+
+impl Fail {
+    pub(crate) fn message(&self) -> &str {
+        &self.body.message
+    }
 }
 
 impl From<serde_json::Error> for Fail {
     fn from(e: serde_json::Error) -> Self {
-        fail(1, format!("switchboard: {e}"))
+        Fail {
+            code: 1,
+            body: ErrorBody::new(ErrorCode::Parse, format!("switchboard: {e}")),
+        }
     }
 }
 
 fn fail(code: u8, message: String) -> Fail {
-    Fail { code, message }
+    let error_code = if code == 2 {
+        ErrorCode::Usage
+    } else {
+        ErrorCode::Refused
+    };
+    Fail {
+        code,
+        body: ErrorBody::new(error_code, message),
+    }
 }
 
-/// Say why a read failed on stderr and give its exit code.
-fn exit_with(fail: Fail) -> ExitCode {
-    eprintln!("{}", fail.message);
+fn fail_core(error: &CoreError, message: String) -> Fail {
+    let mut body = ErrorBody::from(error);
+    body.message = message;
+    Fail { code: 1, body }
+}
+
+/// Print the stable error envelope when requested, while retaining the human-readable stderr.
+fn exit_with(fail: Fail, json: bool) -> ExitCode {
+    let body = fail.body;
+    if !json {
+        eprintln!("{} (code: {})", body.message, body.code.as_str());
+    } else {
+        eprintln!("{}", body.message);
+        println!("{}", serde_json::json!({ "error": body }));
+    }
     ExitCode::from(fail.code)
+}
+
+fn usage_failure(message: &str, json: bool, err: &mut dyn Write) -> ExitCode {
+    let body = ErrorBody::new(ErrorCode::Usage, format!("switchboard: {message}"));
+    if json {
+        let _ = writeln!(err, "{}", body.message);
+        let _ = writeln!(err, "{USAGE}");
+        println!("{}", serde_json::json!({ "error": body }));
+    } else {
+        let _ = writeln!(err, "{} (code: usage)", body.message);
+        let _ = writeln!(err, "{USAGE}");
+    }
+    ExitCode::from(2)
 }
 
 /// The pipeline checkout, or the failure saying it is not set.
 fn pipeline_or_fail() -> Result<PathBuf, Fail> {
     match pipeline_setting() {
         Ok(Some(root)) => Ok(root),
-        Ok(None) => Err(fail(
-            2,
-            format!(
-                "switchboard: set {PIPELINE_ENV} to your pipeline checkout \
-                 (or pipeline_repo in settings.json)"
-            ),
-        )),
+        Ok(None) => {
+            let mut body = ErrorBody::new(
+                ErrorCode::SettingMissing,
+                format!(
+                    "switchboard: set {PIPELINE_ENV} to your pipeline checkout \
+                     (or pipeline_repo in settings.json)"
+                ),
+            );
+            body.reason = Some(PIPELINE_ENV.to_string());
+            Err(Fail { code: 1, body })
+        }
         Err(e) => Err(fail(1, format!("switchboard: {e}"))),
     }
 }
 
 /// The pipeline checkout, or the exit code after saying it is not set.
-fn pipeline_root() -> Result<PathBuf, ExitCode> {
-    pipeline_or_fail().map_err(exit_with)
-}
-
 /// The app data folder, or the failure saying it is not set.
 fn data_or_fail() -> Result<PathBuf, Fail> {
-    data_dir().ok_or_else(|| {
-        fail(
-            2,
-            format!("switchboard: set {DATA_ENV} to the app data folder"),
-        )
+    data_dir().ok_or_else(|| Fail {
+        code: 1,
+        body: {
+            let mut body = ErrorBody::new(
+                ErrorCode::SettingMissing,
+                format!("switchboard: set {DATA_ENV} to the app data folder"),
+            );
+            body.reason = Some(DATA_ENV.to_string());
+            body
+        },
     })
 }
 
@@ -1511,7 +1553,7 @@ fn budget(json: bool, refresh: bool) -> ExitCode {
     };
     let rows = match rows {
         Ok(rows) => rows,
-        Err(fail) => return exit_with(fail),
+        Err(fail) => return exit_with(fail, json),
     };
     if json {
         print_json("budget", serde_json::to_string_pretty(&rows))
@@ -1523,14 +1565,15 @@ fn budget(json: bool, refresh: bool) -> ExitCode {
 /// MCP-1: the pool rows `budget` prints.
 pub(crate) fn budget_rows() -> Result<Vec<PoolRow>, Fail> {
     let root = pipeline_or_fail()?;
-    budget::read(&FleetBridge::new(&root)).map_err(|e| fail(1, format!("switchboard budget: {e}")))
+    budget::read(&FleetBridge::new(&root))
+        .map_err(|e| fail_core(&e, format!("switchboard budget: {e}")))
 }
 
 /// BUD-3 (#374): the pool rows after `fleet budget --refresh`.
 fn budget_refreshed_rows() -> Result<Vec<PoolRow>, Fail> {
     let root = pipeline_or_fail()?;
     budget::refresh(&FleetBridge::new(&root))
-        .map_err(|e| fail(1, format!("switchboard budget: {e}")))
+        .map_err(|e| fail_core(&e, format!("switchboard budget: {e}")))
 }
 
 /// One line per pool, in row order, with what the budget panel shows (BUD-1, #361):
@@ -1576,7 +1619,7 @@ fn snapshots(command: &str, data: &Path) -> Result<Vec<RepoSnapshot>, Fail> {
             warn_unreadable(command, &bad);
             Ok(snaps)
         }
-        Err(e) => Err(fail(1, format!("switchboard {command}: {e}"))),
+        Err(e) => Err(fail_core(&e, format!("switchboard {command}: {e}"))),
     }
 }
 
@@ -1605,7 +1648,7 @@ pub(crate) struct ErrorsAnswer {
 /// errors file are counted in `skipped_lines` and named on stderr.
 pub(crate) fn errors_answer(data: &Path) -> Result<ErrorsAnswer, Fail> {
     let recorded =
-        fleet_errors::load(data).map_err(|e| fail(1, format!("switchboard errors: {e}")))?;
+        fleet_errors::load(data).map_err(|e| fail_core(&e, format!("switchboard errors: {e}")))?;
     if recorded.skipped > 0 {
         eprintln!(
             "switchboard errors: {} line(s) of {} did not read; skipped",
@@ -1615,7 +1658,7 @@ pub(crate) fn errors_answer(data: &Path) -> Result<ErrorsAnswer, Fail> {
     }
     let (snaps, bad) = SnapshotStore::new(data)
         .load_each()
-        .map_err(|e| fail(1, format!("switchboard errors: {e}")))?;
+        .map_err(|e| fail_core(&e, format!("switchboard errors: {e}")))?;
     warn_unreadable("errors", &bad);
     Ok(ErrorsAnswer {
         fleet_errors: recorded.errors.iter().map(FleetErrorRecord::from).collect(),
@@ -1640,7 +1683,7 @@ impl ErrorsAnswer {
 fn errors_command(json: bool) -> ExitCode {
     let answer = match data_or_fail().and_then(|data| errors_answer(&data)) {
         Ok(answer) => answer,
-        Err(fail) => return exit_with(fail),
+        Err(fail) => return exit_with(fail, json),
     };
     if json {
         return print_json("errors", serde_json::to_string_pretty(&answer.to_json()));
@@ -1789,7 +1832,7 @@ fn errors_text(answer: &ErrorsAnswer) -> String {
 fn waiting(json: bool) -> ExitCode {
     let items = match data_or_fail().and_then(|data| waiting_items(&data)) {
         Ok(items) => items,
-        Err(fail) => return exit_with(fail),
+        Err(fail) => return exit_with(fail, json),
     };
     if json {
         return print_json("waiting", serde_json::to_string_pretty(&items));
@@ -1801,11 +1844,11 @@ fn waiting(json: bool) -> ExitCode {
 pub(crate) fn waiting_items(data: &Path) -> Result<Vec<Item>, Fail> {
     let (snaps, bad) = SnapshotStore::new(data)
         .load_each()
-        .map_err(|e| fail(1, format!("switchboard waiting: {e}")))?;
+        .map_err(|e| fail_core(&e, format!("switchboard waiting: {e}")))?;
     warn_unreadable("waiting", &bad);
     let local = LocalItems::new(data)
         .load()
-        .map_err(|e| fail(1, format!("switchboard waiting: {e}")))?;
+        .map_err(|e| fail_core(&e, format!("switchboard waiting: {e}")))?;
     if snaps.is_empty() && local.is_empty() {
         return Err(fail(1, NO_SNAPSHOT.to_string()));
     }
@@ -1839,9 +1882,9 @@ fn waiting_text(items: &[waiting::Item]) -> String {
 /// `switchboard reports`: the reports from the fleet's done cards and the job log, newest first,
 /// narrowed by the filter flags: one line each (text) or the reports as a JSON array (`--json`).
 fn reports(json: bool, filter: &Filter) -> ExitCode {
-    let root = match pipeline_root() {
+    let root = match pipeline_or_fail() {
         Ok(root) => root,
-        Err(code) => return code,
+        Err(failure) => return exit_with(failure, json),
     };
     let state = std::env::var_os(reports::FLEET_STATE_DIR_ENV);
     let shown = match load_reports(&root, state.as_deref(), data_dir().as_deref(), filter) {
@@ -1966,7 +2009,7 @@ struct SkyRow {
 fn sky_command(json: bool) -> ExitCode {
     let rows = match data_or_fail().and_then(|data| sky_rows(&data)) {
         Ok(rows) => rows,
-        Err(fail) => return exit_with(fail),
+        Err(fail) => return exit_with(fail, json),
     };
     if json {
         print_json("sky", serde_json::to_string_pretty(&sky_json(&rows)))
@@ -1978,9 +2021,9 @@ fn sky_command(json: bool) -> ExitCode {
 /// The sky model and the snapshots it was built from.
 fn sky_model(data: &Path) -> Result<(sky::model::SkyModel, Vec<RepoSnapshot>), Fail> {
     let snaps = snapshots("sky", data)?;
-    let events = ledger_events().map_err(|e| fail(1, format!("switchboard sky: {e}")))?;
+    let events = ledger_events().map_err(|e| fail_core(&e, format!("switchboard sky: {e}")))?;
     let model = sky::model::load_with_ledger(data, &events.unwrap_or_default(), SystemClock.now())
-        .map_err(|e| fail(1, format!("switchboard sky: {e}")))?;
+        .map_err(|e| fail_core(&e, format!("switchboard sky: {e}")))?;
     Ok((model, snaps))
 }
 
@@ -2030,13 +2073,19 @@ pub(crate) fn sky_answer(data: &Path) -> Result<Value, Fail> {
 pub(crate) fn constellation_answer(data: &Path, repo: &str) -> Result<Value, Fail> {
     let (model, _) = sky_model(data)?;
     let full = resolve_repo(repo, model.constellations.iter().map(|c| c.repo.as_str()))
-        .map_err(|e| fail(1, format!("switchboard: {e}")))?;
+        .map_err(|e| fail_core(&e, format!("switchboard: {e}")))?;
     let found = full.and_then(|full| model.constellations.iter().find(|c| c.repo == full));
     match found {
         Some(c) => {
             serde_json::to_value(c).map_err(|e| fail(1, format!("switchboard constellation: {e}")))
         }
-        None => Err(fail(1, format!("switchboard: no such repo: {repo}"))),
+        None => Err(Fail {
+            code: 1,
+            body: ErrorBody::new(
+                ErrorCode::NotFound,
+                format!("switchboard: no such repo: {repo}"),
+            ),
+        }),
     }
 }
 
@@ -2090,7 +2139,7 @@ struct Star {
 fn star_command(target: &str, json: bool) -> ExitCode {
     let star = match data_or_fail().and_then(|data| star_facts(&data, target)) {
         Ok(star) => star,
-        Err(fail) => return exit_with(fail),
+        Err(fail) => return exit_with(fail, json),
     };
     if json {
         print_json("star", serde_json::to_string_pretty(&star_json(&star)))
@@ -2113,12 +2162,18 @@ fn star_facts(data: &Path, target: &str) -> Result<Star, Fail> {
     };
     let snaps = snapshots("star", data)?;
     let full = resolve_repo(repo, snaps.iter().map(|s| s.repo.as_str()))
-        .map_err(|e| fail(1, format!("switchboard: {e}")))?;
+        .map_err(|e| fail_core(&e, format!("switchboard: {e}")))?;
     let snap = full.and_then(|full| snaps.iter().find(|s| s.repo == full));
     let Some((snap, issue)) =
         snap.and_then(|s| Some((s, s.issues.iter().find(|i| i.number == number)?)))
     else {
-        return Err(fail(1, format!("switchboard: no such star: {target}")));
+        return Err(Fail {
+            code: 1,
+            body: ErrorBody::new(
+                ErrorCode::NotFound,
+                format!("switchboard: no such star: {target}"),
+            ),
+        });
     };
     let job =
         running_job(&snap.repo, number).map_err(|e| fail(1, format!("switchboard star: {e}")))?;
@@ -2181,7 +2236,7 @@ pub(crate) fn reports_answer(filter: &Filter) -> Result<Vec<Report>, Fail> {
     let root = pipeline_or_fail()?;
     let env = std::env::var_os(reports::FLEET_STATE_DIR_ENV);
     load_reports(&root, env.as_deref(), data_dir().as_deref(), filter)
-        .map_err(|e| fail(1, format!("switchboard reports: {e}")))
+        .map_err(|e| fail_core(&e, format!("switchboard reports: {e}")))
 }
 
 /// One fact per line, the issue first.
