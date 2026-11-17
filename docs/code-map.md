@@ -1,6 +1,6 @@
 # Code map
 
-Updated: 2026-11-16
+Updated: 2026-11-17
 
 What each module owns, the Musts it carries (`SPEC.md`), what it talks to, and its status. An issue that fills a module moves its status from **planned** to **present** in the same PR (RUBRIC). Words are the glossary's (`GLOSSARY.md`).
 
@@ -42,7 +42,7 @@ crates/core/                  switchboard-core: every rule, read and write
 crates/cli/                   the `switchboard` binary: cli.rs (CLI-1..3), mcp.rs (MCP-1..3)
 app/                          the React face (Vite): src/App.tsx, src/views/, src/core.ts, src/brocrew/
 app/src-tauri/                the Tauri shell: thin commands into the core
-tools/                        repo checks (the notice check, SHELL-2)
+tools/                        repo checks and CI gate (`ci.sh`, architecture lints, notice check; `arch_lint.py` allows `Command::new` only in files named in `SPAWN_ALLOWLIST` and in `crates/*/tests/`, whose integration tests spawn the binaries under test)
 .github/workflows/ci.yml      Linux, Mac and Windows
 ```
 
