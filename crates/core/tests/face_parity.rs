@@ -243,7 +243,33 @@ fn face_sources(dir: &Path, out: &mut Vec<String>) {
 fn real_calls() -> Vec<String> {
     let mut sources = Vec::new();
     face_sources(&repo().join("app/src"), &mut sources);
-    sources.iter().flat_map(|s| face_calls(s)).collect()
+    let calls: Vec<String> = sources.iter().flat_map(|s| face_calls(s)).collect();
+    // A moved app/src or a changed call() shape must not pass by finding nothing.
+    assert!(
+        calls.len() >= 10,
+        "the window's face calls were found: {calls:?}"
+    );
+    calls
+}
+
+/// The MCP face's served tools. `tools()` in crates/cli/src/mcp.rs builds tools/list from
+/// REGISTRY, so a served tool is a registry MCP name that some caller may list: role-free
+/// reads by default, anything else for the roles it names. A tool no caller can list is missing.
+fn real_mcp_tools() -> Vec<&'static str> {
+    // A CRLF checkout (Windows CI) reads the same as LF.
+    let mcp_rs = read("crates/cli/src/mcp.rs").replace("\r\n", "\n");
+    let start = mcp_rs.find("fn tools(").expect("tools() in mcp.rs");
+    let body = &mcp_rs[start..];
+    let body = &body[..body.find("\n}\n").expect("end of tools()")];
+    assert!(
+        body.contains("REGISTRY") && body.contains("spec.mcp"),
+        "tools/list is no longer built from REGISTRY: read the served names from mcp.rs here"
+    );
+    REGISTRY
+        .iter()
+        .filter(|s| s.listed_without_role() || !s.mcp_roles.is_empty())
+        .filter_map(|s| s.mcp)
+        .collect()
 }
 
 fn real_rows() -> Vec<Row<'static>> {
@@ -261,8 +287,13 @@ fn real_rows() -> Vec<Row<'static>> {
 
 fn real_problems(main_rs: &str, usage: &str) -> Vec<String> {
     let rows = real_rows();
-    let mcp: Vec<&str> = rows.iter().filter_map(|r| r.mcp).collect();
-    problems(&rows, &handler_names(main_rs), &real_calls(), usage, &mcp)
+    problems(
+        &rows,
+        &handler_names(main_rs),
+        &real_calls(),
+        usage,
+        &real_mcp_tools(),
+    )
 }
 
 #[test]
@@ -299,5 +330,34 @@ fn removing_a_cli_subcommand_fails_with_its_name() {
     assert!(
         got.contains(&"backup_repo: CLI subcommand backup is missing".to_string()),
         "{got:?}"
+    );
+}
+
+#[test]
+fn an_mcp_tool_no_caller_can_list_fails_by_name() {
+    let rows = real_rows();
+    let row = rows
+        .iter()
+        .find(|r| r.tauri.is_some() && r.mcp.is_some())
+        .expect("a window command with an MCP tool");
+    let served: Vec<&str> = real_mcp_tools()
+        .into_iter()
+        .filter(|t| Some(*t) != row.mcp)
+        .collect();
+    let main_rs = read("app/src-tauri/src/main.rs");
+    let got = problems(
+        &rows,
+        &handler_names(&main_rs),
+        &real_calls(),
+        &real_usage(),
+        &served,
+    );
+    assert_eq!(
+        got,
+        vec![format!(
+            "{}: MCP tool {} is missing",
+            row.tauri.unwrap_or_default(),
+            row.mcp.unwrap_or_default()
+        )]
     );
 }
