@@ -318,8 +318,17 @@ fn resolve_writes_one_record_closes_the_issue_and_releases_the_claim_file() {
     assert!(files(&store).contains(CLAIM_FILE));
 
     let forge = FakeForge::default();
-    let done =
-        land::resolve(REPO, 406, 7, &claim.token, &store, &mirror, &forge).expect("resolves");
+    let done = land::resolve(
+        REPO,
+        "unit-land",
+        406,
+        7,
+        &claim.token,
+        &store,
+        &mirror,
+        &forge,
+    )
+    .expect("resolves");
     assert_eq!(
         done,
         land::Resolved {
@@ -330,6 +339,14 @@ fn resolve_writes_one_record_closes_the_issue_and_releases_the_claim_file() {
     let comments = forge.comments.lock().unwrap();
     assert_eq!(comments.len(), 1);
     assert!(comments[0].starts_with(RECORD_MARK), "{}", comments[0]);
+    let block = comments[0]
+        .split("```json\n")
+        .nth(1)
+        .and_then(|b| b.split("\n```").next());
+    let record: Value = serde_json::from_str(block.expect("one JSON block")).expect("JSON");
+    assert_eq!(record["node_id"], "unit-land");
+    assert_eq!(record["pr"], 7);
+    assert!(record["answer"].as_str().is_some_and(|a| !a.is_empty()));
     assert_eq!(*forge.closed.lock().unwrap(), [406]);
     assert!(!files(&store).contains(CLAIM_FILE), "{}", files(&store));
     assert_eq!(
@@ -344,8 +361,28 @@ fn resolving_twice_leaves_one_record_and_no_claim_to_release() {
     let mirror = FakeMirror::default();
     let claim = claim_406(&store, &mirror, "builder");
     let forge = FakeForge::default();
-    land::resolve(REPO, 406, 7, &claim.token, &store, &mirror, &forge).expect("first");
-    let again = land::resolve(REPO, 406, 7, &claim.token, &store, &mirror, &forge).expect("second");
+    land::resolve(
+        REPO,
+        "unit-land",
+        406,
+        7,
+        &claim.token,
+        &store,
+        &mirror,
+        &forge,
+    )
+    .expect("first");
+    let again = land::resolve(
+        REPO,
+        "unit-land",
+        406,
+        7,
+        &claim.token,
+        &store,
+        &mirror,
+        &forge,
+    )
+    .expect("second");
     assert_eq!(
         again,
         land::Resolved {
@@ -376,8 +413,17 @@ fn resolve_with_a_stale_token_leaves_the_new_holders_claim_alone() {
     // A fresh mirror, so any call resolve makes on the replaced claim shows up alone.
     let mirror = FakeMirror::default();
     let forge = FakeForge::default();
-    let done =
-        land::resolve(REPO, 406, 7, &stale.token, &store, &mirror, &forge).expect("resolves");
+    let done = land::resolve(
+        REPO,
+        "unit-land",
+        406,
+        7,
+        &stale.token,
+        &store,
+        &mirror,
+        &forge,
+    )
+    .expect("resolves");
     assert_eq!(
         done,
         land::Resolved {

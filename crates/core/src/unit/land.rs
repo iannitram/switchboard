@@ -87,8 +87,10 @@ pub fn open_pr(pr: &Pr, git: &dyn Git, forge: &dyn Forge) -> Result<u64, CoreErr
 /// claim that `claim_token` names (the token of the claim the caller acquired). A claim another
 /// worker holds now has another token, so it is left alone. Running it again changes nothing once
 /// each step has been done.
+#[allow(clippy::too_many_arguments)]
 pub fn resolve(
     repo: &str,
+    node_id: &str,
     issue: u64,
     pr_number: u64,
     claim_token: &str,
@@ -101,7 +103,7 @@ pub fn resolve(
         .iter()
         .any(|body| body.starts_with(RECORD_MARK));
     if !recorded {
-        forge.comment(repo, issue, &resolution_record(issue, pr_number))?;
+        forge.comment(repo, issue, &resolution_record(node_id, issue, pr_number))?;
     }
     forge.close(repo, issue)?;
     let claim_released = release_claim(store, mirror, repo, issue, claim_token)?;
@@ -125,9 +127,15 @@ pub fn pr_body(issue: u64, node: &NodeSpec, done_card: &Value) -> Result<String,
     Ok(out)
 }
 
-/// The resolution record: the marker, then the pull request that resolved the issue.
-pub fn resolution_record(issue: u64, pr_number: u64) -> String {
-    format!("{RECORD_MARK}\nResolved #{issue} by pull request #{pr_number}.")
+/// The resolution record: the marker, then one JSON block with the node, the answer and the pull
+/// request that resolved the issue (`resolution` in `specs/roadmap-run.json`).
+pub fn resolution_record(node_id: &str, issue: u64, pr_number: u64) -> String {
+    let record = serde_json::json!({
+        "node_id": node_id,
+        "answer": format!("Resolved #{issue} by pull request #{pr_number}."),
+        "pr": pr_number,
+    });
+    format!("{RECORD_MARK}\n```json\n{record}\n```")
 }
 
 /// Each verify of the node with the done card's check of the same name. A verify the card has no
