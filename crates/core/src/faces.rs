@@ -172,7 +172,7 @@ pub static REGISTRY: &[CommandSpec] = &[
     row!("loadout", READ, Some("loadout"), Some("loadout"), None, None, ALL_ROLES, None, None),
     row!("confirm_guarded", GITHUB, Some("confirm_guarded"), None, None, Some("the typed confirm is in the app only (CORE-3)"), ALL_ROLES, None, None),
     row!("confirm", GITHUB, None, Some("confirm"), None, None, ALL_ROLES, None, None),
-    row!("autopilot", SPAWN, None, Some("autopilot"), None, None, ALL_ROLES, None, None),
+    row!("autopilot", &[Effect::Read, Effect::WriteLocal, Effect::WriteGithub, Effect::Spawn], None, Some("autopilot"), None, None, ALL_ROLES, None, None),
     row!("spec", READ, None, Some("spec"), None, None, ALL_ROLES, None, None),
     row!("roadmap", READ, None, Some("roadmap"), None, None, ALL_ROLES, None, None),
     row!("mcp", READ, None, Some("mcp"), None, None, ALL_ROLES, None, None),
