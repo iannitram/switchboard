@@ -1,6 +1,8 @@
 //! The bug-loop's core: the bug row and the owner table (`Bug`, `OwnerRow`), and the intake
-//! steps that turn a dropped report into one tracked bug (`intake`).
+//! steps that turn a dropped report into one tracked bug (`intake`), and the steps that choose a
+//! bug, write its repro and fix jobs, stop it and check its record (`fix`).
 
+pub mod fix;
 pub mod intake;
 
 use crate::CoreError;
