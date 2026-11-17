@@ -249,12 +249,10 @@ fn a_waiting_item_that_cannot_be_added_leaves_the_pool_as_it_was() {
     let body: Value = serde_json::from_str(&said).expect("MCP error body JSON");
     assert!(is_error, "{said}");
     assert_eq!(body["code"], "refused");
-    assert!(
-        body["message"]
-            .as_str()
-            .unwrap()
-            .starts_with("set_pool_cap deepseek: ")
-    );
+    assert!(body["message"]
+        .as_str()
+        .unwrap()
+        .starts_with("set_pool_cap deepseek: "));
     assert!(body["message"].as_str().unwrap().contains("local.json"));
     assert_eq!(
         config(&root),

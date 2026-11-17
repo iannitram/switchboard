@@ -204,10 +204,7 @@ fn role_merge_inside_a_job_worktree_is_refused_with_the_worktree_text() {
         &fake,
     );
     assert_eq!(code, ExitCode::from(1));
-    assert_eq!(
-        err,
-        "merge switchboard#12: refused inside a job worktree\n"
-    );
+    assert_eq!(err, "merge switchboard#12: refused inside a job worktree\n");
     assert!(fake.merged.borrow().is_empty());
 }
 
@@ -220,10 +217,7 @@ fn delete_inside_a_job_worktree_is_refused_and_adds_no_waiting_item() {
         &fake,
     );
     assert_eq!(code, ExitCode::from(1));
-    assert_eq!(
-        err,
-        "archive switchboard: refused inside a job worktree\n"
-    );
+    assert_eq!(err, "archive switchboard: refused inside a job worktree\n");
     assert!(fake.waiting.borrow().is_empty());
 }
 
