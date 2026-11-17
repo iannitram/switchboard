@@ -25,6 +25,7 @@ pub mod github;
 pub mod it;
 pub mod joblog;
 pub mod lock;
+pub mod parity;
 pub mod platform;
 pub mod renumber;
 pub mod reports;

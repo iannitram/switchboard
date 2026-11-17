@@ -19,6 +19,7 @@ modules:
 - bug-fix: crates/core/src/bug/fix.rs (present)
 - bug-fix: crates/core/src/bug/mod.rs (present)
 - bug-fix: crates/core/tests/bug_fix.rs (present)
+- face-parity: crates/core/src/parity.rs (present)
 - faces: crates/core/src/faces.rs (present)
 
 (The sky reads the `reuses:` block, SKY-6. The code map check reads `modules:`, unit-proof (#405). Ideas taken from projects that are not ours, such as wayfinder-maps' look, are credited in the README, not here.)
