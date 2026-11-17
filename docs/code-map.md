@@ -1,6 +1,6 @@
 # Code map
 
-Updated: 2026-11-16
+Updated: 2026-11-17
 
 What each module owns, the Musts it carries (`SPEC.md`), what it talks to, and its status. An issue that fills a module moves its status from **planned** to **present** in the same PR (RUBRIC). Words are the glossary's (`GLOSSARY.md`).
 
@@ -10,6 +10,7 @@ reuses:
 - brocrew: the chat parts, the Waiting on you item, the work report entry and the fixed-report shape (Apache-2.0; our fork is archived, read and copied from only)
 
 modules:
+- faces: crates/core/src/faces.rs (present)
 - unit-proof: crates/core/src/unit/proof.rs (present)
 - unit-claim: crates/core/src/unit/claim.rs (present)
 - unit-job: crates/core/src/unit/job.rs (present)
@@ -28,6 +29,7 @@ modules:
 Cargo.toml                    one Rust workspace (core, cli, app/src-tauri)
 crates/core/                  switchboard-core: every rule, read and write
   src/{settings,fleet,fleet_errors,abilities,joblog,rules,platform,clock,error,lock}.rs
+  src/faces.rs                 command effects and GUI, CLI and MCP registry
   src/github/                 snapshot, transport, poll, queue, merge
   src/sky/                    features, layout, drift, chain, codemap, priority, labels, jobs
   src/{waiting,reports,budget,backup,it}.rs
