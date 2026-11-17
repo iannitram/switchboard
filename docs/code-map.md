@@ -42,7 +42,7 @@ crates/core/                  switchboard-core: every rule, read and write
 crates/cli/                   the `switchboard` binary: cli.rs (CLI-1..3), mcp.rs (MCP-1..3)
 app/                          the React face (Vite): src/App.tsx, src/views/, src/core.ts, src/brocrew/
 app/src-tauri/                the Tauri shell: thin commands into the core
-tools/                        repo checks and CI gate (`ci.sh`, architecture lints, notice check)
+tools/                        repo checks and CI gate (`ci.sh`, architecture lints, notice check; `arch_lint.py` allows `Command::new` only in files named in `SPAWN_ALLOWLIST` and in `crates/*/tests/`, whose integration tests spawn the binaries under test)
 .github/workflows/ci.yml      Linux, Mac and Windows
 ```
 
