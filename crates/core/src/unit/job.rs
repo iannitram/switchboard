@@ -90,6 +90,12 @@ pub fn build(
     let claim = claim.ok_or_else(|| {
         CoreError::Refused(format!("unit {} has no claim; claim it first", node.id))
     })?;
+    if claim.unit != format!("{repo}#{}", claim.issue) {
+        return Err(CoreError::Refused(format!(
+            "claim {} does not cover {repo}#{}",
+            claim.unit, claim.issue
+        )));
+    }
     let lines = code_map_lines(code_map_md, &node.code_map_entries)?;
     let issue = claim.issue;
     let json = json!({

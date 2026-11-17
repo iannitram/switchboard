@@ -27,7 +27,7 @@ fn code_map() -> String {
 fn claim(issue: u64) -> Claim {
     Claim {
         issue,
-        unit: format!("owner/name#{issue}"),
+        unit: format!("{REPO}#{issue}"),
         machine: "builder".into(),
         token: "token-1".into(),
         claimed_at: 1_000,
@@ -118,6 +118,16 @@ fn the_brief_has_what_expectations_and_code_map_lines_and_nothing_from_outside_t
 fn a_unit_with_no_claim_is_refused() {
     let err = job::build(&node(), Size::Medium, None, REPO, &code_map()).unwrap_err();
     assert!(matches!(err, CoreError::Refused(_)), "{err:?}");
+}
+
+#[test]
+fn a_claim_for_another_repository_or_issue_is_refused() {
+    let mut held = claim(404);
+    for unit in ["other/project#404", "example/switchboard#405"] {
+        held.unit = unit.into();
+        let err = job::build(&node(), Size::Medium, Some(&held), REPO, &code_map()).unwrap_err();
+        assert!(matches!(err, CoreError::Refused(_)), "{err:?}");
+    }
 }
 
 #[test]
