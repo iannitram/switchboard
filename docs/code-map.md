@@ -28,8 +28,7 @@ modules:
 ```
 Cargo.toml                    one Rust workspace (core, cli, app/src-tauri)
 crates/core/                  switchboard-core: every rule, read and write
-  src/{settings,fleet,fleet_errors,abilities,joblog,rules,platform,clock,error,lock}.rs
-  src/faces.rs                 command effects and GUI, CLI and MCP registry
+  src/{settings,fleet,fleet_errors,abilities,joblog,rules,platform,clock,error,lock,faces}.rs
   src/github/                 snapshot, transport, poll, queue, merge
   src/sky/                    features, layout, drift, chain, codemap, priority, labels, jobs
   src/{waiting,reports,budget,backup,it}.rs

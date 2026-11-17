@@ -643,7 +643,7 @@ fn write_call(
             }
         }
         // #384: the front door, the same check the CLI makes.
-        tool if matches!(tool, "ask" | "ask_as_job" | "rate") => {
+        tool if mcp_spec(tool).is_some_and(|spec| spec.front_door) => {
             let call = match frontdoor::call_from(tool, args) {
                 Ok(call) => call,
                 Err(message) => return error(id, INVALID_PARAMS, &message),

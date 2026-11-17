@@ -26,6 +26,8 @@ pub struct CommandSpec {
     pub mcp_roles: &'static [Role],
     pub mcp_input: Option<fn() -> Value>,
     pub mcp_description: Option<&'static str>,
+    /// The tool goes through the front door (`frontdoor::call_from`), not a hand-written arm.
+    pub front_door: bool,
 }
 
 impl CommandSpec {
@@ -115,6 +117,9 @@ fn rate() -> Value {
 
 macro_rules! row {
     ($id:literal, $effects:expr, $tauri:expr, $cli:expr, $mcp:expr, $ui:expr, $roles:expr, $input:expr, $desc:expr) => {
+        row!(@ false, $id, $effects, $tauri, $cli, $mcp, $ui, $roles, $input, $desc)
+    };
+    (@ $fd:expr, $id:literal, $effects:expr, $tauri:expr, $cli:expr, $mcp:expr, $ui:expr, $roles:expr, $input:expr, $desc:expr) => {
         CommandSpec {
             id: $id,
             effects: $effects,
@@ -125,6 +130,7 @@ macro_rules! row {
             mcp_roles: $roles,
             mcp_input: $input,
             mcp_description: $desc,
+            front_door: $fd,
         }
     };
 }
@@ -143,9 +149,9 @@ pub static REGISTRY: &[CommandSpec] = &[
     row!("autopilot_status", READ, None, Some("autopilot"), Some("autopilot_status"), None, PM_SATELLITE, Some(autopilot_status), Some("The autopilot's state: what its passes have started and seen, whether the weekly run is due, the running jobs, and the satellite's loops and holds.")),
     // Project-manager tools, preserving tools/list order.
     row!("merge", GITHUB, None, Some("merge"), Some("merge"), None, PM, Some(merge), Some("Merge a PR once its latest PASS is on its head and CI is green on that head.")),
-    row!("ask", &[Effect::Network, Effect::WriteLocal], Some("chat_route"), Some("ask"), Some("ask"), None, PM, Some(ask), Some("Route one message through the front door and answer it; dry_run returns the route and its reason and sends, stores and spends nothing.")),
-    row!("ask_as_job", &[Effect::WriteLocal, Effect::Spawn], Some("chat_send_as_job"), Some("ask_as_job"), Some("ask_as_job"), None, PM, Some(ask_as_job), Some("Send a request this machine cannot serve as a fleet job another machine pulls. With thread, the job carries that chat's packet (summary, last 6 turns, links) and the move is stored.")),
-    row!("rate", LOCAL, Some("chat_rate"), Some("rate"), Some("rate"), None, PM, Some(rate), Some("Rate one answer of a thread up or down; a second rating of a turn replaces the first.")),
+    row!(@ true, "ask", &[Effect::Network, Effect::WriteLocal], Some("chat_route"), Some("ask"), Some("ask"), None, PM, Some(ask), Some("Route one message through the front door and answer it; dry_run returns the route and its reason and sends, stores and spends nothing.")),
+    row!(@ true, "ask_as_job", &[Effect::WriteLocal, Effect::Spawn], Some("chat_send_as_job"), Some("ask_as_job"), Some("ask_as_job"), None, PM, Some(ask_as_job), Some("Send a request this machine cannot serve as a fleet job another machine pulls. With thread, the job carries that chat's packet (summary, last 6 turns, links) and the move is stored.")),
+    row!(@ true, "rate", LOCAL, Some("chat_rate"), Some("rate"), Some("rate"), None, PM, Some(rate), Some("Rate one answer of a thread up or down; a second rating of a turn replaces the first.")),
     row!("request_archive", LOCAL, None, Some("archive"), Some("request_archive"), None, PM, Some(request_archive), Some("Ask to archive a repo (read-only on GitHub). This only files a Waiting on you request; the owner confirms it in the app.")),
     row!("request_restore", LOCAL, None, Some("restore"), Some("request_restore"), None, PM, Some(request_restore), Some("Ask to restore a repo's backup over the live repo. This only files a Waiting on you request; the owner confirms it in the app.")),
     row!("drop_request", LOCAL, Some("drop_guarded"), Some("drop"), Some("drop_request"), None, PM, Some(drop_request), Some("Turn down a waiting archive or restore request: it leaves Waiting on you and nothing else happens.")),
@@ -154,20 +160,4 @@ pub static REGISTRY: &[CommandSpec] = &[
     row!("budget_refresh", NETWORK_READ, Some("budget_refresh"), Some("budget"), Some("budget_refresh"), None, BM, Some(budget_refresh), Some("Re-read every pool that has a reader now, then return the budget rows.")),
     row!("autopilot_pass", &[Effect::WriteLocal, Effect::Spawn], None, Some("autopilot"), Some("autopilot_pass"), None, PM, Some(autopilot_pass), Some("Run one autopilot pass now, as the app's poll does, and return its report. With dry_run it starts no job, merges nothing and writes no state, and reports what it would do.")),
     row!("satellite_tick", &[Effect::WriteLocal, Effect::Spawn], None, Some("autopilot"), Some("satellite_tick"), None, SATELLITE, Some(satellite_tick), Some("Run one tick of the satellite loop on this machine and return its report; the loops it starts run on while this server lives. With dry_run it starts nothing and reports the lanes it would start.")),
-    // The remaining Tauri commands and command-only CLI faces.
-    row!("views", READ, Some("views"), None, None, Some("the window's tab order"), ALL_ROLES, None, None),
-    row!("settings_missing", READ, Some("settings_missing"), Some("settings"), None, None, ALL_ROLES, None, None),
-    row!("settings_get", READ, Some("settings_get"), Some("settings"), None, None, ALL_ROLES, None, None),
-    row!("settings_save", LOCAL, Some("settings_save"), None, None, Some("settings are changed in the app only (ruling on #373)"), ALL_ROLES, None, None),
-    row!("chat_implicit", LOCAL, Some("chat_implicit"), None, None, Some("a signal from a press in the app (FD-8, FD-9)"), ALL_ROLES, None, None),
-    row!("refresh_all", NETWORK_READ, Some("refresh_all"), Some("refresh"), None, None, ALL_ROLES, None, None),
-    row!("backup_repo", &[Effect::Read, Effect::WriteLocal, Effect::Network], Some("backup_repo"), Some("backup"), None, None, ALL_ROLES, None, None),
-    row!("backup_all", &[Effect::Read, Effect::WriteLocal, Effect::Network], Some("backup_all"), Some("backup"), None, None, ALL_ROLES, None, None),
-    row!("loadout", READ, Some("loadout"), Some("loadout"), None, None, ALL_ROLES, None, None),
-    row!("confirm_guarded", GITHUB, Some("confirm_guarded"), None, None, Some("the typed confirm is in the app only (CORE-3)"), ALL_ROLES, None, None),
-    row!("confirm", GITHUB, None, Some("confirm"), None, None, ALL_ROLES, None, None),
-    row!("autopilot", SPAWN, None, Some("autopilot"), None, None, ALL_ROLES, None, None),
-    row!("spec", READ, None, Some("spec"), None, None, ALL_ROLES, None, None),
-    row!("roadmap", READ, None, Some("roadmap"), None, None, ALL_ROLES, None, None),
-    row!("mcp", READ, None, Some("mcp"), None, None, ALL_ROLES, None, None),
 ];
