@@ -285,6 +285,12 @@ impl Store {
         .map(Some)
     }
 
+    /// Read an existing claim from the current fleet-state branch.
+    fn existing(&self, repo: &str, issue: u64) -> Result<Option<Claim>, CoreError> {
+        let (attempt, base) = self.begin()?;
+        self.read(&attempt, &base, repo, issue)
+    }
+
     /// Commit `base` plus (or minus) one claim file and push it with a lease on `base`.
     /// `Ok(false)` when the branch moved: the caller looks again.
     fn publish(
@@ -463,6 +469,11 @@ pub fn claim(
     validate_repo(repo)?;
     let open = mirror.open_blockers(repo, issue)?;
     if !open.is_empty() {
+        if let Some(held) = store.existing(repo, issue)? {
+            if held.machine == worker {
+                return Ok(Outcome::Claimed(held));
+            }
+        }
         return Ok(Outcome::Blocked(open));
     }
     let (outcome, write_mirror) = store.create(repo, issue, worker, clock.now(), base_sha)?;

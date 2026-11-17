@@ -756,7 +756,7 @@ fn remote_head(store: &Store) -> String {
 #[test]
 fn a_reclaim_by_the_holder_exits_zero_and_writes_nothing() {
     let (store, root) = store("reclaim-holder");
-    let fake = Fake::default();
+    let mut fake = Fake::default();
     let first = held(
         claim(
             &store,
@@ -771,6 +771,8 @@ fn a_reclaim_by_the_holder_exits_zero_and_writes_nothing() {
     );
     let head = remote_head(&store);
     let calls = fake.calls();
+    // A retry by the holder stays successful even if blockers appeared after acquisition.
+    fake.blockers = vec![12];
     let again = claim(
         &store,
         &fake,
