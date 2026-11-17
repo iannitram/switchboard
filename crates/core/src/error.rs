@@ -16,6 +16,7 @@ pub enum ErrorCode {
     FleetBadJson,
     FleetSpawn,
     FleetTimeout,
+    #[serde(rename = "github")]
     GitHub,
     File,
     Parse,

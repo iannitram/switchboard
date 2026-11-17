@@ -1109,12 +1109,7 @@ fn request_text(action: &GuardedAction) -> String {
 
 /// A refusal: its text on stderr, exit 1.
 fn refuse(err: &mut dyn Write, text: &str) -> ExitCode {
-    let code = if text.contains("inside a job worktree") {
-        ErrorCode::InJobWorktree
-    } else {
-        ErrorCode::Refused
-    };
-    let _ = writeln!(err, "{text} (code: {})", code.as_str());
+    let _ = writeln!(err, "{text}");
     ExitCode::from(1)
 }
 
@@ -1485,13 +1480,22 @@ fn fail_core(error: &CoreError, message: String) -> Fail {
 /// Print the stable error envelope when requested, while retaining the human-readable stderr.
 fn exit_with(fail: Fail, json: bool) -> ExitCode {
     let body = fail.body;
+    let code = if json {
+        if body.code == ErrorCode::Usage {
+            2
+        } else {
+            1
+        }
+    } else {
+        fail.code
+    };
     if !json {
-        eprintln!("{} (code: {})", body.message, body.code.as_str());
+        eprintln!("{}", body.message);
     } else {
         eprintln!("{}", body.message);
         println!("{}", serde_json::json!({ "error": body }));
     }
-    ExitCode::from(fail.code)
+    ExitCode::from(code)
 }
 
 fn usage_failure(message: &str, json: bool, err: &mut dyn Write) -> ExitCode {
@@ -1501,7 +1505,7 @@ fn usage_failure(message: &str, json: bool, err: &mut dyn Write) -> ExitCode {
         let _ = writeln!(err, "{USAGE}");
         println!("{}", serde_json::json!({ "error": body }));
     } else {
-        let _ = writeln!(err, "{} (code: usage)", body.message);
+        let _ = writeln!(err, "{}", body.message);
         let _ = writeln!(err, "{USAGE}");
     }
     ExitCode::from(2)
@@ -1520,7 +1524,7 @@ fn pipeline_or_fail() -> Result<PathBuf, Fail> {
                 ),
             );
             body.reason = Some(PIPELINE_ENV.to_string());
-            Err(Fail { code: 1, body })
+            Err(Fail { code: 2, body })
         }
         Err(e) => Err(fail(1, format!("switchboard: {e}"))),
     }
@@ -1530,7 +1534,7 @@ fn pipeline_or_fail() -> Result<PathBuf, Fail> {
 /// The app data folder, or the failure saying it is not set.
 fn data_or_fail() -> Result<PathBuf, Fail> {
     data_dir().ok_or_else(|| Fail {
-        code: 1,
+        code: 2,
         body: {
             let mut body = ErrorBody::new(
                 ErrorCode::SettingMissing,

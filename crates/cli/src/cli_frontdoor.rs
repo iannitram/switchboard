@@ -314,12 +314,7 @@ pub fn command(
     let (text, value) = match run_call(&call) {
         Ok(done) => done,
         Err(fail) => {
-            let _ = writeln!(
-                err,
-                "{} (code: {})",
-                fail.message(),
-                fail.body.code.as_str()
-            );
+            let _ = writeln!(err, "{}", fail.message());
             return ExitCode::from(fail.code);
         }
     };

@@ -234,7 +234,7 @@ fn main() -> ExitCode {
         Some(Ok(McpCall::Help)) => return cli::emit(&format!("{MCP_USAGE}\n")),
         Some(Ok(McpCall::Version)) => return cli::emit(&format!("{}\n", cli::version_text())),
         Some(Ok(McpCall::Serve(role))) => role,
-        Some(Err(e)) => return usage_error(&format!("mcp: {e}"), MCP_USAGE, json_requested),
+        Some(Err(e)) => return mcp_usage_error(&e, json_requested),
     };
     // MCP-2: the real write core: the CLI's own merge, the pipeline checkout and the
     // app data folder from the environment, the real clock.
@@ -277,8 +277,18 @@ fn usage_error(message: &str, usage: &str, json: bool) -> ExitCode {
         eprintln!("{usage}");
         println!("{}", serde_json::json!({ "error": body }));
     } else {
-        eprintln!("{} (code: usage)", body.message);
+        eprintln!("{}", body.message);
         eprintln!("{usage}");
+    }
+    ExitCode::from(2)
+}
+
+fn mcp_usage_error(message: &str, json: bool) -> ExitCode {
+    let body = ErrorBody::new(ErrorCode::Usage, format!("switchboard mcp: {message}"));
+    eprintln!("{}", body.message);
+    eprintln!("{MCP_USAGE}");
+    if json {
+        println!("{}", serde_json::json!({ "error": body }));
     }
     ExitCode::from(2)
 }

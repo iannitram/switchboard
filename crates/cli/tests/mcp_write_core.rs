@@ -164,10 +164,12 @@ fn a_refused_cli_merge_is_the_reply_text_word_for_word() {
         &writes,
         &[call(2, "merge", json!({ "repo": "switchboard", "pr": 12 }))],
     );
-    assert_eq!(
-        text(&replies[0]),
-        (true, "no VERDICT: PASS on this PR".to_string())
-    );
+    // Catches: a write-tool refusal returning plain text instead of the stable error body.
+    let (is_error, encoded) = text(&replies[0]);
+    let body: Value = serde_json::from_str(&encoded).expect("MCP error body JSON");
+    assert!(is_error);
+    assert_eq!(body["code"], "refused");
+    assert_eq!(body["message"], "no VERDICT: PASS on this PR");
 }
 
 #[test]
@@ -243,9 +245,17 @@ fn a_waiting_item_that_cannot_be_added_leaves_the_pool_as_it_was() {
         )],
     );
     let (is_error, said) = text(&replies[0]);
+    // Catches: pool-edit failures returning plain text instead of the stable error body.
+    let body: Value = serde_json::from_str(&said).expect("MCP error body JSON");
     assert!(is_error, "{said}");
-    assert!(said.starts_with("set_pool_cap deepseek: "), "{said}");
-    assert!(said.contains("local.json"), "{said}");
+    assert_eq!(body["code"], "refused");
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("set_pool_cap deepseek: ")
+    );
+    assert!(body["message"].as_str().unwrap().contains("local.json"));
     assert_eq!(
         config(&root),
         serde_json::from_str::<Value>(CONFIG).unwrap()
@@ -304,20 +314,23 @@ fn a_refused_pool_cap_writes_nothing_and_says_why() {
             call(5, "set_pool_cap", json!({ "pool": "deepseek", "cap": -1 })),
         ],
     );
-    assert_eq!(
-        text(&replies[0]),
+    // Catches: refused pool-cap writes returning plain text instead of the stable error body.
+    for (reply, message) in [
         (
-            true,
-            "set_pool_cap nope: parse: no pool nope in config.json".to_string()
-        )
-    );
-    assert_eq!(
-        text(&replies[1]),
+            &replies[0],
+            "set_pool_cap nope: parse: no pool nope in config.json",
+        ),
         (
-            true,
-            "set_pool_cap deepseek: parse: cap must be a number 0 or more".to_string()
-        )
-    );
+            &replies[1],
+            "set_pool_cap deepseek: parse: cap must be a number 0 or more",
+        ),
+    ] {
+        let (is_error, encoded) = text(reply);
+        let body: Value = serde_json::from_str(&encoded).expect("MCP error body JSON");
+        assert!(is_error);
+        assert_eq!(body["code"], "refused");
+        assert_eq!(body["message"], message);
+    }
     assert_eq!(
         config(&root),
         serde_json::from_str::<Value>(CONFIG).unwrap()
@@ -344,25 +357,28 @@ fn set_pool_cap_without_a_pipeline_or_data_folder_names_the_variable() {
         clock: &clock,
     };
     let cap = call(6, "set_pool_cap", json!({ "pool": "deepseek", "cap": 25 }));
-    assert_eq!(
-        text(
-            &run(
-                Role::BudgetManager,
-                &no_pipeline,
-                std::slice::from_ref(&cap)
-            )[0]
-        ),
-        (
-            true,
-            "set_pool_cap: set SWITCHBOARD_PIPELINE to your pipeline checkout".to_string()
-        )
+    // Catches: MCP settings errors returning plain text instead of the stable error body.
+    let (is_error, encoded) = text(
+        &run(
+            Role::BudgetManager,
+            &no_pipeline,
+            std::slice::from_ref(&cap),
+        )[0],
     );
+    let body: Value = serde_json::from_str(&encoded).expect("MCP error body JSON");
+    assert!(is_error);
+    assert_eq!(body["code"], "refused");
     assert_eq!(
-        text(&run(Role::BudgetManager, &no_data, &[cap])[0]),
-        (
-            true,
-            "set_pool_cap: set SWITCHBOARD_DATA to the app data folder".to_string()
-        )
+        body["message"],
+        "set_pool_cap: set SWITCHBOARD_PIPELINE to your pipeline checkout"
+    );
+    let (is_error, encoded) = text(&run(Role::BudgetManager, &no_data, &[cap])[0]);
+    let body: Value = serde_json::from_str(&encoded).expect("MCP error body JSON");
+    assert!(is_error);
+    assert_eq!(body["code"], "refused");
+    assert_eq!(
+        body["message"],
+        "set_pool_cap: set SWITCHBOARD_DATA to the app data folder"
     );
     assert_eq!(
         config(&root),

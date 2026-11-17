@@ -216,14 +216,16 @@ fn a_repo_switchboard_does_not_know_files_nothing() {
             call(4, "request_archive", json!({ "repo": 7 })),
         ],
     );
-    assert_eq!(
-        text(&replies[0]),
-        ("request_archive: no such repo: nope", true)
-    );
-    assert_eq!(
-        text(&replies[1]),
-        ("request_restore: no such repo: o/gone", true)
-    );
+    // Catches: MCP request errors returning plain text instead of the stable error body.
+    for (reply, message) in [
+        (&replies[0], "request_archive: no such repo: nope"),
+        (&replies[1], "request_restore: no such repo: o/gone"),
+    ] {
+        assert!(text(reply).1);
+        let body: Value = serde_json::from_str(text(reply).0).expect("MCP error body JSON");
+        assert_eq!(body["code"], "refused");
+        assert_eq!(body["message"], message);
+    }
     assert!(replies[2]["error"]["message"].is_string());
     assert!(replies[3]["error"]["message"].is_string());
     assert_eq!(waiting(&dir), Vec::<String>::new());
@@ -357,27 +359,26 @@ fn drop_request_takes_the_request_out_and_does_nothing_else() {
             ),
         ],
     );
-    assert_eq!(
-        text(&replies[0]),
+    // Catches: a dropped request refusal losing its stable MCP error body.
+    for (reply, message) in [
         (
+            &replies[0],
             "archive o/switchboard: no such request is waiting on you; nothing was dropped",
-            true
-        )
-    );
-    assert_eq!(
-        text(&replies[1]),
+        ),
         (
+            &replies[1],
             "restore over o/gone: no such request is waiting on you; nothing was dropped",
-            true
-        )
-    );
+        ),
+        (&replies[3], "drop_request: no such repo: nope"),
+    ] {
+        assert!(text(reply).1);
+        let body: Value = serde_json::from_str(text(reply).0).expect("MCP error body JSON");
+        assert_eq!(body["code"], "refused");
+        assert_eq!(body["message"], message);
+    }
     assert_eq!(
         replies[2]["error"]["message"],
         "drop_request needs kind (archive or restore) and repo (string)"
-    );
-    assert_eq!(
-        text(&replies[3]),
-        ("drop_request: no such repo: nope", true)
     );
     assert_eq!(waiting(&dir), [RESTORE]);
 }

@@ -143,7 +143,7 @@ fn project_manager_merge_without_a_pass_on_head_is_refused_with_the_merge_text()
         &fake,
     );
     assert_eq!(code, ExitCode::from(1));
-    assert_eq!(err, "switchboard#12: no PASS on head (code: refused)\n");
+    assert_eq!(err, "switchboard#12: no PASS on head\n");
     assert!(fake.merged.borrow().is_empty());
 }
 
@@ -159,7 +159,7 @@ fn project_manager_merge_with_ci_not_green_is_refused_with_the_merge_text() {
         &fake,
     );
     assert_eq!(code, ExitCode::from(1));
-    assert_eq!(err, "CI on the head is failure (code: refused)\n");
+    assert_eq!(err, "CI on the head is failure\n");
     assert!(fake.merged.borrow().is_empty());
 }
 
@@ -206,7 +206,7 @@ fn role_merge_inside_a_job_worktree_is_refused_with_the_worktree_text() {
     assert_eq!(code, ExitCode::from(1));
     assert_eq!(
         err,
-        "merge switchboard#12: refused inside a job worktree (code: in_job_worktree)\n"
+        "merge switchboard#12: refused inside a job worktree\n"
     );
     assert!(fake.merged.borrow().is_empty());
 }
@@ -222,7 +222,7 @@ fn delete_inside_a_job_worktree_is_refused_and_adds_no_waiting_item() {
     assert_eq!(code, ExitCode::from(1));
     assert_eq!(
         err,
-        "archive switchboard: refused inside a job worktree (code: in_job_worktree)\n"
+        "archive switchboard: refused inside a job worktree\n"
     );
     assert!(fake.waiting.borrow().is_empty());
 }

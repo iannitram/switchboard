@@ -320,12 +320,7 @@ fn assert_usage(out: &Output, message: &str) {
 fn assert_refused(out: &Output, message: &str) {
     assert_eq!(out.status.code(), Some(1), "{}", stderr(out));
     let actual = stderr(out);
-    assert!(actual.trim_end().starts_with(message), "{actual}");
-    assert!(
-        actual.trim_end().ends_with("(code: refused)")
-            || actual.trim_end().ends_with("(code: in_job_worktree)"),
-        "{actual}"
-    );
+    assert_eq!(actual.trim_end(), message);
     assert_eq!(stdout(out), "");
 }
 
@@ -1155,9 +1150,14 @@ fn mcp_project_manager_asks_dry_then_for_real_then_rates() {
         serde_json::from_str(replies[0]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(row["id"], format!("{thread}#rating-1"));
     assert_eq!(w.rows(thread).len(), 3);
+    // Catches: front-door MCP failures returning human text instead of the stable error body.
     let refused = |reply: &Value, text: &str| {
         assert_eq!(reply["result"]["isError"], true, "{reply}");
-        assert_eq!(reply["result"]["content"][0]["text"], text);
+        let body: Value =
+            serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap())
+                .expect("MCP error body JSON");
+        assert_eq!(body["code"], "refused");
+        assert_eq!(body["message"], text);
     };
     refused(&replies[1], "rate: refused: no thread chat-nope");
     refused(
