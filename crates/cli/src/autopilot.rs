@@ -439,7 +439,7 @@ impl ReadCore for McpCore<'_> {
     fn call(&self, tool: &str, args: &Value) -> Result<Value, switchboard_core::error::ErrorBody> {
         let dry_run = args["dry_run"].as_bool().unwrap_or(false);
         let pass = match tool {
-            "autopilot_status" => return self.headless.status().map_err(|stop| stop.message),
+            "autopilot_status" => return Ok(self.headless.status().map_err(|stop| stop.message)?),
             "satellite_tick" => Pass::Satellite,
             "autopilot_pass" => args["pass"]
                 .as_str()
@@ -452,6 +452,6 @@ impl ReadCore for McpCore<'_> {
             .headless
             .run_pass(pass, dry_run)
             .map_err(|stop| stop.message)?;
-        serde_json::to_value(&report).map_err(|e| format!("{tool}: {e}"))
+        Ok(serde_json::to_value(&report).map_err(|e| format!("{tool}: {e}"))?)
     }
 }

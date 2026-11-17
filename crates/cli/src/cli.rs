@@ -2175,8 +2175,8 @@ fn star_facts(data: &Path, target: &str) -> Result<Star, Fail> {
             ),
         });
     };
-    let job =
-        running_job(&snap.repo, number).map_err(|e| fail(1, format!("switchboard star: {e}")))?;
+    let job = running_job(&snap.repo, number)
+        .map_err(|e| fail_core(&e, format!("switchboard star: {e}")))?;
     Ok(Star {
         repo: snap.repo.clone(),
         number,
@@ -2273,7 +2273,7 @@ fn star_text(star: &Star) -> String {
 /// (`pipeline_dir`: `SWITCHBOARD_PIPELINE`, else `pipeline_repo` in settings.json, #359).
 /// The fleet state folder is `SWITCHBOARD_STATE` when set, else the one `reports` and the app
 /// read (`reports::state_dir`: `FLEET_STATE_DIR`, then the pipeline checkout's rule).
-fn ledger_events() -> Result<Option<Vec<Value>>, String> {
+fn ledger_events() -> Result<Option<Vec<Value>>, CoreError> {
     let Some(pipeline) = pipeline_dir() else {
         return Ok(None);
     };
@@ -2281,15 +2281,13 @@ fn ledger_events() -> Result<Option<Vec<Value>>, String> {
         let env = std::env::var_os(reports::FLEET_STATE_DIR_ENV);
         reports::state_dir(&pipeline, env.as_deref())
     });
-    joblog::read_ledger(&joblog::ledger_files(&pipeline, &state))
-        .map(Some)
-        .map_err(|e| e.to_string())
+    joblog::read_ledger(&joblog::ledger_files(&pipeline, &state)).map(Some)
 }
 
 /// The fleet job running on `repo#number`: the last ledger `start` event for it with no `end`
 /// after it, as `<lane> <model> on <machine>, attempt <n>`. `Ok(None)` when the pipeline
 /// checkout is not set, so the job log cannot be read.
-fn running_job(repo: &str, number: u64) -> Result<Option<Option<String>>, String> {
+fn running_job(repo: &str, number: u64) -> Result<Option<Option<String>>, CoreError> {
     let Some(events) = ledger_events()? else {
         return Ok(None);
     };

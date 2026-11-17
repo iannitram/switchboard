@@ -349,10 +349,9 @@ mod tests {
         let core = Core {
             data: Some(stub_data("errors")),
         };
-        assert!(core
-            .call("nope", &json!({}))
-            .unwrap_err()
-            .contains("unknown tool"));
+        let error = core.call("nope", &json!({})).unwrap_err();
+        assert_eq!(error.code, ErrorCode::Usage);
+        assert_eq!(error.message, "unknown tool: nope");
         assert!(core
             .call("constellation", &json!({ "repo": "zzz" }))
             .is_err());
