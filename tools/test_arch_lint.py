@@ -60,6 +60,18 @@ class ArchitectureLintTests(unittest.TestCase):
         module.write_text("FleetBridge::run();\n", encoding="utf-8")
         self.assertEqual(arch_lint.spawn_findings(self.root), [])
 
+    def test_spawn_dir_allowlist_covers_only_the_named_test_dirs(self):
+        allowed = self.root / "crates/core/tests/fixture.rs"
+        allowed.parent.mkdir(parents=True)
+        allowed.write_text("Command::new(\"git\");\n", encoding="utf-8")
+        self.assertEqual(arch_lint.spawn_findings(self.root), [])
+        nested = self.root / "crates/core/src/tests/inner.rs"
+        nested.parent.mkdir(parents=True)
+        nested.write_text("Command::new(\"git\");\n", encoding="utf-8")
+        finding = arch_lint.spawn_findings(self.root)
+        self.assertEqual(len(finding), 1)
+        self.assertIn("inner.rs:1", finding[0])
+
     def test_generated_mcp_doc_fails_when_stale_then_passes(self):
         doc = self.root / arch_lint.DOC
         doc.write_text("# old tool list\n", encoding="utf-8")

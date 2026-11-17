@@ -28,9 +28,12 @@ SPAWN_ALLOWLIST = {
     "crates/core/src/reports.rs",
     "crates/core/src/unit/claim.rs",
 }
-# Directory exemption: Rust integration tests under crates/*/tests/ spawn their fixture processes
-# on purpose (the CLI and MCP binaries under test), so the spawn rule does not cover them.
-SPAWN_TESTS_DIR_EXEMPT = "tests"
+# Named directory allowlist, entry -> reason. Only these two integration-test directories are
+# exempt; a tests/ directory anywhere else (e.g. inside src/) is still checked.
+SPAWN_DIR_ALLOWLIST = {
+    "crates/cli/tests": "integration tests spawn the switchboard binary under test",
+    "crates/core/tests": "integration tests spawn the fleet-stub and git fixture processes",
+}
 FACE_PATTERNS = (
     (re.compile(r"\bfetch\s*\("), "use invoke through app/src/core.ts's call"),
     (re.compile(r"\bXMLHttpRequest\b"), "use invoke through app/src/core.ts's call"),
@@ -74,7 +77,7 @@ def spawn_findings(root: Path) -> list[str]:
             continue
         for path in sorted(base.rglob("*.rs")):
             rel = _relative(path, root)
-            if rel in SPAWN_ALLOWLIST or SPAWN_TESTS_DIR_EXEMPT in path.relative_to(base).parts:
+            if rel in SPAWN_ALLOWLIST or any(rel.startswith(d + "/") for d in SPAWN_DIR_ALLOWLIST):
                 continue
             try:
                 lines = path.read_text(encoding="utf-8").splitlines()
