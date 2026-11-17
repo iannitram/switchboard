@@ -34,10 +34,7 @@ fn default_mcp_filter_is_read_only_and_role_free() {
     let fake = CommandSpec {
         id: "fake_write",
         effects: &[Effect::WriteLocal],
-        tauri: None,
-        cli: None,
         mcp: Some("fake_write"),
-        ui_only: None,
         front_door: false,
         mcp_roles: &[],
         mcp_input: Some(|| Value::Null),

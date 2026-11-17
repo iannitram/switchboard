@@ -10,7 +10,6 @@ reuses:
 - brocrew: the chat parts, the Waiting on you item, the work report entry and the fixed-report shape (Apache-2.0; our fork is archived, read and copied from only)
 
 modules:
-- faces: crates/core/src/faces.rs (present)
 - unit-proof: crates/core/src/unit/proof.rs (present)
 - unit-claim: crates/core/src/unit/claim.rs (present)
 - unit-job: crates/core/src/unit/job.rs (present)
@@ -20,6 +19,7 @@ modules:
 - bug-fix: crates/core/src/bug/fix.rs (present)
 - bug-fix: crates/core/src/bug/mod.rs (present)
 - bug-fix: crates/core/tests/bug_fix.rs (present)
+- faces: crates/core/src/faces.rs (present)
 
 (The sky reads the `reuses:` block, SKY-6. The code map check reads `modules:`, unit-proof (#405). Ideas taken from projects that are not ours, such as wayfinder-maps' look, are credited in the README, not here.)
 
@@ -104,6 +104,9 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 
 ### core-clock, core-error
 `crates/core/src/clock.rs`, `error.rs` · present. The injected clock (`Clock`, `SystemClock`, `FixedClock`) and `CoreError`, the one error faces see.
+
+### core-faces
+`crates/core/src/faces.rs` · #489 · present. The command registry: each command's effects and its MCP tool (name, roles, input schema, description); `mcp.rs` lists and gates tools from it and `write_call` routes the front-door ones by it. The Tauri and CLI faces are not in it yet (#497).
 
 ### core-lock
 `crates/core/src/lock.rs` · BUD-2, CORE-2 · present. One writer at a time for a file the core reads, changes and writes back, across threads and processes on every OS, no extra crate (#416): `FileLock::take(target, wait)` makes `<target>.switchboard-lock` with `create_new`, waits up to `wait`, takes over a lock older than `STALE_LOCK` (10 min, a dead run's), and removes it on drop. `run_tag` and `temp_path` give each run its own temp file names, as the backup's `run_tag` does (#363). A lock held longer than a moment is kept fresh (`refresh`, `keep_fresh`; `kept_fresh` for one held across calls, by its own thread, #385) so it is not taken for a dead run's; `held(target)` says whether a live run holds it. #431: the lock file names its holder (`token=`, `place=`, `pid=`, `start=`, `holder=` lines; `place` is the boot and pid namespace on Linux, the machine name elsewhere, and a holder from another place is never judged gone; `take_for` says what it is doing, `note` changes that while held); `refresh`, `kept_fresh` and the drop touch or remove it only while it still holds their token; a lock whose holder's process is provably gone (`autopilot::loops::alive`) is taken over at once, one with no process in it (the old one-line format) waits for `STALE_LOCK`; the timeout error names the holder and says to wait or check, and offers removal only when the holder is gone. `write_whole(target, text)` writes a temp file of its own and renames it over the target (snapshots, `autopilot.json`, backup restore marks). `rename_retrying(from, to)` shares its bounded Windows access-refusal retry (100 retries, 10 ms apart); on other platforms it is a plain rename (#447).
