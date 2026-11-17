@@ -588,7 +588,7 @@ pub fn run_with(
         );
     }
     if let Some(e) = frontdoor::misplaced(&door_flags, command) {
-        return usage_failure(&e, json_requested, &mut std::io::stderr());
+        return usage_failure(e, json_requested, &mut std::io::stderr());
     }
     if into.is_some() && command != Some("confirm") {
         return usage_failure(
