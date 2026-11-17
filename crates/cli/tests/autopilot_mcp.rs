@@ -202,8 +202,9 @@ fn bad_arguments_are_refused_before_anything_runs() {
         for pass in ["satellite", "sweep", "status"] {
             let (is_error, text) = tool(PM, h, "autopilot_pass", json!({ "pass": pass }));
             assert!(is_error);
+            assert_eq!(text["code"], "refused");
             assert_eq!(
-                text,
+                text["message"],
                 "autopilot_pass: pass must be roadmap, review, merge or weekly"
             );
         }
@@ -379,7 +380,8 @@ fn a_pass_is_an_error_result_while_another_run_holds_the_lock() {
         let (is_error, text) = tool(PM, h, "autopilot_pass", json!({ "pass": "review" }));
         assert!(is_error);
         assert!(
-            text.as_str()
+            text["message"]
+                .as_str()
                 .unwrap()
                 .contains("another run holds the passes"),
             "{text}"

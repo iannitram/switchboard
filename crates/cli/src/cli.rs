@@ -660,7 +660,7 @@ pub fn run_with(
             &mut std::io::stdout(),
         ),
         Some(other) => usage_failure(&format!("unknown command: {other}"), args.json, err),
-        None => usage_failure(&USAGE.to_string(), args.json, err),
+        None => usage_failure(USAGE, args.json, err),
     }
 }
 

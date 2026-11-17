@@ -224,7 +224,7 @@ fn main() -> ExitCode {
     let json_requested = raw_argv.iter().any(|arg| arg == "--json");
     let argv = match utf8_args(raw_argv) {
         Ok(argv) => argv,
-        Err(e) => return usage_error(&e, &cli::USAGE, json_requested),
+        Err(e) => return usage_error(&e, cli::USAGE, json_requested),
     };
     let role = match mcp_call(&argv) {
         None => match autopilot::command(&argv) {
