@@ -21,6 +21,7 @@ use switchboard_core::budget::{self, PoolEdit};
 use switchboard_core::clock::Clock;
 use switchboard_core::confirm;
 use switchboard_core::error::CoreError;
+use switchboard_core::faces::{Effect, REGISTRY};
 use switchboard_core::fleet::FleetBridge;
 use switchboard_core::github::snapshot::SnapshotStore;
 use switchboard_core::rules::{self, Caller, Face, GuardedAction, Role, Verdict};
@@ -217,55 +218,43 @@ impl CoreWrites<'_> {
     }
 }
 
-/// MCP-1: the read tools, in this order.
-pub const READ_TOOLS: [&str; 6] = [
-    "sky",
-    "constellation",
-    "star",
-    "waiting",
-    "reports",
-    "budget",
-];
-
 /// MCP-2: the write tools a role holds, in this order. No role, or a role with none, holds none.
 /// #385: the autopilot's pass tools come last: `autopilot_pass` for the Project Manager,
 /// `satellite_tick` for the satellite.
 pub fn write_tools(role: &Role) -> Vec<&'static str> {
-    let mut tools = role_write_tools(role);
-    match role {
-        Role::ProjectManager => tools.push("autopilot_pass"),
-        Role::Satellite => tools.push("satellite_tick"),
-        Role::BudgetManager => {}
-    }
-    tools
-}
-
-fn role_write_tools(role: &Role) -> Vec<&'static str> {
-    match role {
-        Role::ProjectManager => {
-            let mut held = vec!["merge"];
-            held.extend(frontdoor::TOOLS);
-            // #347: the tools that file or turn down a guarded request; none confirms.
-            held.extend(["request_archive", "request_restore", "drop_request"]);
-            held
-        }
-        Role::BudgetManager => vec!["set_pool_cap", "pool_edit", "budget_refresh"],
-        Role::Satellite => vec![],
-    }
+    REGISTRY
+        .iter()
+        .filter(|spec| {
+            spec.mcp.is_some() && spec.mcp_roles.contains(role) && spec.effects != [Effect::Read]
+        })
+        .filter_map(|spec| spec.mcp)
+        .collect()
 }
 
 /// #375: the read tools a role adds to MCP-1's six, in this order. The satellite is the machine
 /// that triages IT tickets (IT-3), so it reads the fleet errors and the tickets.
 pub fn role_read_tools(role: &Role) -> Vec<&'static str> {
-    let mut tools = match role {
-        Role::Satellite => vec!["errors"],
-        Role::ProjectManager | Role::BudgetManager => vec![],
-    };
-    // #385: the two roles that run autopilot passes read its state.
-    if matches!(role, Role::ProjectManager | Role::Satellite) {
-        tools.push("autopilot_status");
+    REGISTRY
+        .iter()
+        .filter(|spec| {
+            spec.mcp.is_some() && spec.mcp_roles.contains(role) && spec.effects == [Effect::Read]
+        })
+        .filter_map(|spec| spec.mcp)
+        .collect()
+}
+
+fn mcp_spec(name: &str) -> Option<&'static switchboard_core::faces::CommandSpec> {
+    REGISTRY.iter().find(|spec| spec.mcp == Some(name))
+}
+
+fn may_call(spec: &switchboard_core::faces::CommandSpec, role: Option<&Role>) -> bool {
+    match role {
+        None => spec.listed_without_role(),
+        Some(role) => {
+            (spec.effects == [Effect::Read] && spec.mcp_roles.is_empty())
+                || spec.mcp_roles.contains(role)
+        }
     }
-    tools
 }
 
 /// #385: the role an autopilot tool is guarded with (`rules::guard_autopilot`), or `None` for
@@ -481,9 +470,9 @@ fn call_tool(
         return error(id, INVALID_PARAMS, "tools/call needs name (string)");
     };
     let raw_args = params.get("arguments").unwrap_or(&Value::Null);
+    let spec = mcp_spec(name);
     let held = role.is_some_and(|r| write_tools(r).contains(&name));
-    let read =
-        READ_TOOLS.contains(&name) || role.is_some_and(|r| role_read_tools(r).contains(&name));
+    let read = spec.is_some_and(|spec| spec.effects == [Effect::Read] && may_call(spec, role));
     if !read && !held {
         return error(id, INVALID_PARAMS, &format!("unknown tool: {name}"));
     }
@@ -504,15 +493,9 @@ fn call_tool(
     }
 }
 
-/// A tool's `inputSchema`, from the same lists `tools/list` serves.
+/// The registered input schema for one MCP tool.
 fn tool_schema(name: &str) -> Option<Value> {
-    let all = read_tools().as_array().cloned().unwrap_or_default();
-    all.into_iter()
-        .chain(role_read_schemas().into_iter().map(|(_, schema)| schema))
-        .chain(write_schemas().into_iter().map(|(_, schema)| schema))
-        .chain(frontdoor::schemas().into_iter().map(|(_, schema)| schema))
-        .find(|tool| tool["name"] == name)
-        .map(|tool| tool["inputSchema"].clone())
+    mcp_spec(name)?.mcp_input.map(|schema| schema())
 }
 
 /// Check `args` against a tool's `inputSchema` (#360): an object; every `required` property
@@ -660,7 +643,7 @@ fn write_call(
             }
         }
         // #384: the front door, the same check the CLI makes.
-        tool if frontdoor::TOOLS.contains(&tool) => {
+        tool if matches!(tool, "ask" | "ask_as_job" | "rate") => {
             let call = match frontdoor::call_from(tool, args) {
                 Ok(call) => call,
                 Err(message) => return error(id, INVALID_PARAMS, &message),
@@ -763,227 +746,21 @@ fn guarded_merge(
     }
 }
 
-/// MCP-1 and MCP-2: the six read tools, then the role's read tools (#375), then its write tools.
+/// `tools/list` is the registry filtered by effects and the caller's role.
 fn tools(role: Option<&Role>) -> Value {
-    let mut list = read_tools().as_array().cloned().unwrap_or_default();
-    if let Some(role) = role {
-        let reads = role_read_tools(role);
-        list.extend(
-            role_read_schemas()
-                .into_iter()
-                .filter(|(name, _)| reads.contains(name))
-                .map(|(_, schema)| schema),
-        );
-        let held = write_tools(role);
-        // In `write_tools`' order, so the front door's tools (#384) stay beside `merge` and
-        // the autopilot's pass tool (#385) comes last.
-        let all: Vec<(&str, Value)> = write_schemas()
-            .into_iter()
-            .chain(frontdoor::schemas())
-            .collect();
-        list.extend(held.iter().filter_map(|h| {
-            all.iter()
-                .find(|(name, _)| name == h)
-                .map(|(_, schema)| schema.clone())
-        }));
-    }
-    Value::Array(list)
-}
-
-/// #375: every role read tool's `(name, schema)`; `tools` lists the ones a role holds.
-fn role_read_schemas() -> [(&'static str, Value); 2] {
-    [
-        (
-            "errors",
-            json!({
-                "name": "errors",
-                "description": "The fleet errors the app recorded, newest first, and the open IT tickets.",
-                "inputSchema": { "type": "object", "properties": {} }
-            }),
-        ),
-        (
-            "autopilot_status",
-            json!({
-                "name": "autopilot_status",
-                "description": "The autopilot's state: what its passes have started and seen, whether the weekly run is due, the running jobs, and the satellite's loops and holds.",
-                "inputSchema": { "type": "object", "properties": {} }
-            }),
-        ),
-    ]
-}
-
-/// MCP-2: every write tool's `(name, schema)`; `tools` lists the ones a role holds.
-fn write_schemas() -> [(&'static str, Value); 9] {
-    let repo = json!({ "type": "string", "description": "The repo's name or owner/name" });
-    [
-        (
-            "merge",
-            json!({
-                "name": "merge",
-                "description": "Merge a PR once its latest PASS is on its head and CI is green on that head.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "repo": { "type": "string", "description": "The repo's name, e.g. switchboard" },
-                        "pr": { "type": "integer", "minimum": 1 }
-                    },
-                    "required": ["repo", "pr"]
-                }
-            }),
-        ),
-        (
-            "request_archive",
-            json!({
-                "name": "request_archive",
-                "description": "Ask to archive a repo (read-only on GitHub). This only files a Waiting on you request; the owner confirms it in the app.",
-                "inputSchema": { "type": "object", "properties": { "repo": repo }, "required": ["repo"] }
-            }),
-        ),
-        (
-            "request_restore",
-            json!({
-                "name": "request_restore",
-                "description": "Ask to restore a repo's backup over the live repo. This only files a Waiting on you request; the owner confirms it in the app.",
-                "inputSchema": { "type": "object", "properties": { "repo": repo }, "required": ["repo"] }
-            }),
-        ),
-        (
-            "drop_request",
-            json!({
-                "name": "drop_request",
-                "description": "Turn down a waiting archive or restore request: it leaves Waiting on you and nothing else happens.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "kind": { "type": "string", "description": "archive or restore" },
-                        "repo": repo
-                    },
-                    "required": ["kind", "repo"]
-                }
-            }),
-        ),
-        (
-            "set_pool_cap",
-            json!({
-                "name": "set_pool_cap",
-                "description": "Set one budget pool's dollar cap; the reply states the new cap.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "pool": { "type": "string", "description": "The pool's name" },
-                        "cap": { "type": "number", "minimum": 0 }
-                    },
-                    "required": ["pool", "cap"]
-                }
-            }),
-        ),
-        (
-            "pool_edit",
-            json!({
-                "name": "pool_edit",
-                "description": "Edit one budget pool in place (plan, cap, reset, cost), as the Budget panel does.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "pool": { "type": "string", "description": "The pool's name" },
-                        "plan": { "type": "string" },
-                        "cap": { "type": "number", "minimum": 0 },
-                        "reset": { "type": "string", "description": "e.g. Sun 6:00am" },
-                        "cost_usd": { "type": "number", "minimum": 0 }
-                    },
-                    "required": ["pool"]
-                }
-            }),
-        ),
-        (
-            "budget_refresh",
-            json!({
-                "name": "budget_refresh",
-                "description": "Re-read every pool that has a reader now, then return the budget rows.",
-                "inputSchema": { "type": "object", "properties": {} }
-            }),
-        ),
-        (
-            "autopilot_pass",
-            json!({
-                "name": "autopilot_pass",
-                "description": "Run one autopilot pass now, as the app's poll does, and return its report. With dry_run it starts no job, merges nothing and writes no state, and reports what it would do.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "pass": { "type": "string", "enum": ["roadmap", "review", "merge", "weekly"] },
-                        "dry_run": { "type": "boolean" }
-                    },
-                    "required": ["pass"]
-                }
-            }),
-        ),
-        (
-            "satellite_tick",
-            json!({
-                "name": "satellite_tick",
-                "description": "Run one tick of the satellite loop on this machine and return its report; the loops it starts run on while this server lives. With dry_run it starts nothing and reports the lanes it would start.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": { "dry_run": { "type": "boolean" } }
-                }
-            }),
-        ),
-    ]
-}
-
-/// MCP-1: the six read tools with one-sentence descriptions and small input schemas.
-fn read_tools() -> Value {
-    let limit = json!({ "type": "integer", "minimum": 1 });
-    let repo = json!({ "type": "string", "description": "The repo's name, e.g. switchboard" });
-    json!([
-        {
-            "name": "sky",
-            "description": "The sky: one constellation per repo, as the GUI shows it.",
-            "inputSchema": { "type": "object", "properties": {} }
-        },
-        {
-            "name": "constellation",
-            "description": "One repo's constellation: its stars and where they sit.",
-            "inputSchema": {
-                "type": "object",
-                "properties": { "repo": repo.clone() },
-                "required": ["repo"]
-            }
-        },
-        {
-            "name": "star",
-            "description": "One star: an issue or PR with its labels, size, PR and review.",
-            "inputSchema": {
-                "type": "object",
-                "properties": { "repo": repo, "issue": { "type": "integer", "minimum": 1 } },
-                "required": ["repo", "issue"]
-            }
-        },
-        {
-            "name": "waiting",
-            "description": "The Waiting on you list: items that need a person, one merged list.",
-            "inputSchema": { "type": "object", "properties": { "limit": limit.clone() } }
-        },
-        {
-            "name": "reports",
-            "description": "Reports built from job cards and handoff threads.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "limit": limit,
-                    "project": { "type": "string" },
-                    "outcome": { "type": "string" },
-                    "pool": { "type": "string" }
-                }
-            }
-        },
-        {
-            "name": "budget",
-            "description": "Fleet budget: the pool rows and what is left in each.",
-            "inputSchema": { "type": "object", "properties": {} }
-        }
-    ])
+    Value::Array(
+        REGISTRY
+            .iter()
+            .filter(|spec| spec.mcp.is_some() && may_call(spec, role))
+            .map(|spec| {
+                json!({
+                    "name": spec.mcp.unwrap(),
+                    "description": spec.mcp_description.unwrap_or_default(),
+                    "inputSchema": (spec.mcp_input.expect("MCP tools declare an input schema"))()
+                })
+            })
+            .collect(),
+    )
 }
 
 fn ok(id: &Value, result: Value) -> Value {

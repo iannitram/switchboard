@@ -7,15 +7,12 @@
 
 use std::path::Path;
 
-use serde_json::{json, Value};
+use serde_json::Value;
 use switchboard_core::clock::{Clock, SystemClock};
 use switchboard_core::fleet::FleetBridge;
 use switchboard_core::frontdoor::ask;
 use switchboard_core::frontdoor::rating_log;
 use switchboard_core::it;
-
-/// The front door's tools, in the order `tools/list` gives them.
-pub const TOOLS: [&str; 3] = ["ask", "ask_as_job", "rate"];
 
 /// One front door tool call, its arguments read.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,61 +47,6 @@ impl Call {
             Call::Rate { .. } => "rate",
         }
     }
-}
-
-/// Every front door tool's `(name, schema)`.
-pub fn schemas() -> [(&'static str, Value); 3] {
-    [
-        (
-            "ask",
-            json!({
-                "name": "ask",
-                "description": "Route one message through the front door and answer it; dry_run returns the route and its reason and sends, stores and spends nothing.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "message": { "type": "string" },
-                        "thread": { "type": "string", "description": "An open thread's id; none starts a thread" },
-                        "dry_run": { "type": "boolean" }
-                    },
-                    "required": ["message"]
-                }
-            }),
-        ),
-        (
-            "ask_as_job",
-            json!({
-                "name": "ask_as_job",
-                "description": "Send a request this machine cannot serve as a fleet job another machine pulls. With thread, the job carries that chat's packet (summary, last 6 turns, links) and the move is stored.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "kind": { "type": "string", "description": "The request kind" },
-                        "request": { "type": "string" },
-                        "unmet": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "The needs this machine does not meet; left out, they are read from this machine's loadout" },
-                        "thread": { "type": "string", "description": "The chat's thread id, to send the chat with its packet" }
-                    },
-                    "required": ["kind", "request"]
-                }
-            }),
-        ),
-        (
-            "rate",
-            json!({
-                "name": "rate",
-                "description": "Rate one answer of a thread up or down; a second rating of a turn replaces the first.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "thread": { "type": "string" },
-                        "turn": { "type": "integer", "minimum": 0, "description": "The answer's index among the thread's turns" },
-                        "rating": { "type": "string", "enum": ["up", "down"] }
-                    },
-                    "required": ["thread", "turn", "rating"]
-                }
-            }),
-        ),
-    ]
 }
 
 /// The call `name` and `args` ask for (`args` already checked against the schema's strings and
