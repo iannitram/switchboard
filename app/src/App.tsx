@@ -15,10 +15,17 @@ function settingsLine(result: CoreResult<string[]>): string | null {
   return result.ok.length > 0 ? `Settings needed: ${result.ok.join(", ")}` : null;
 }
 
-// DEV only: VITE_VIEW=<view name> in .env.development.local opens that view first. Dead in builds and tests.
+// DEV only: scene / fixture mode or VITE_VIEW opens that view first. Dead in builds and tests.
 function devView(): ViewName {
-  const asked = import.meta.env.DEV && import.meta.env.MODE === "development" ? import.meta.env.VITE_VIEW : undefined;
-  return asked && asked in VIEWS ? (asked as ViewName) : "Sky";
+  if (import.meta.env.DEV && import.meta.env.MODE === "development") {
+    if (typeof window !== "undefined") {
+      const active = (window as unknown as { __ACTIVE_SCENE__?: { view: ViewName } }).__ACTIVE_SCENE__;
+      if (active && active.view in VIEWS) return active.view;
+    }
+    const asked = import.meta.env.VITE_VIEW;
+    if (asked && asked in VIEWS) return asked as ViewName;
+  }
+  return "Sky";
 }
 
 // Line glyphs for the nav tabs (16x16 grid), drawn as inline SVG so no asset or CSP change is needed.

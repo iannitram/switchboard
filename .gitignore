@@ -1,6 +1,7 @@
 /target/
 /app/node_modules/
 /app/dist/
+/app/scenes-out/
 /app/src-tauri/gen/
 /app/src-tauri/target/
 *.AppImage

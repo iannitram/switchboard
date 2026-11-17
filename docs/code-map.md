@@ -41,7 +41,7 @@ crates/core/                  switchboard-core: every rule, read and write
   src/workloop/               planned (after 1.0, `local-only`): backlog, run, packet, judge, progress, handoff
   tests/                      one test file per issue; fixtures/ (fleet stub, recorded answers)
 crates/cli/                   the `switchboard` binary: cli.rs (CLI-1..3), mcp.rs (MCP-1..3)
-app/                          the React face (Vite): src/App.tsx, src/views/, src/core.ts, src/brocrew/
+app/                          the React face (Vite): src/App.tsx, src/views/, src/core.ts, src/brocrew/, src/scenes.ts, scripts/scenes.mjs
 app/src-tauri/                the Tauri shell: thin commands into the core
 tools/                        repo checks and CI gate (`ci.sh`, architecture lints, notice check; `arch_lint.py` allows `Command::new` only in files named in `SPAWN_ALLOWLIST` and in `crates/*/tests/`, whose integration tests spawn the binaries under test)
 .github/workflows/ci.yml      Linux, Mac and Windows
