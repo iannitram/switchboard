@@ -130,7 +130,7 @@ fn call_sites(ts: &str) -> Vec<(usize, Site)> {
             .and_then(|rest| rest.find('"').map(|end| rest[..end].to_string()));
         match name {
             Some(name) => sites.push((start, Site::Name(name))),
-            None if method && ts[pos..].starts_with("this") => {}
+            None if method && this_first(&ts[pos..]) => {}
             None if !quiet => sites.push((start, Site::Unread)),
             None => {}
         }
@@ -159,25 +159,67 @@ pub fn face_call_gaps(ts: &str) -> Vec<usize> {
         .collect()
 }
 
-/// The 1-based lines that reach the core without `call`: `invoke` itself, or `call` imported
-/// under another name. Only the core wrappers (core.ts, dev-core.ts) may do either.
+/// Whether an argument list starts with the word `this` as its own argument (`this,` or `this)`).
+fn this_first(args: &str) -> bool {
+    args.strip_prefix("this")
+        .is_some_and(|rest| matches!(rest.trim_start().chars().next(), Some(',' | ')')))
+}
+
+/// The 1-based lines that reach the core without a `call(` this test can read: `invoke` itself,
+/// `call` imported under another name, or `call` used as a value (`const run = call`,
+/// `f(call, ...)`, `{ call: run }`). Comments are skipped, and so is `call` in an import list.
+/// Only the core wrappers (core.ts, dev-core.ts) may do any of these.
 pub fn face_bypasses(ts: &str) -> Vec<usize> {
-    let word = |at: usize, len: usize| {
-        !ts[..at].chars().next_back().is_some_and(is_identifier_char)
-            && !ts[at + len..]
-                .chars()
-                .next()
-                .is_some_and(is_identifier_char)
-    };
-    let mut lines: Vec<usize> = ts
-        .match_indices("invoke")
-        .filter(|(at, _)| word(*at, "invoke".len()))
-        .chain(ts.match_indices("call as ").filter(|(at, _)| word(*at, 4)))
-        .map(|(at, _)| ts[..at].matches('\n').count() + 1)
-        .collect();
-    lines.sort_unstable();
-    lines.dedup();
+    let mut lines = Vec::new();
+    let mut in_import = false;
+    for (index, line) in ts.lines().enumerate() {
+        let code = line.trim_start();
+        if code.starts_with("//") || code.starts_with("/*") || code.starts_with('*') {
+            continue;
+        }
+        let import = in_import || code.starts_with("import ");
+        in_import = import && !code.contains(" from ") && !code.ends_with(';');
+        let words = word_spans(line);
+        let bypass = words.iter().enumerate().any(|(i, &(at, word))| match word {
+            "invoke" => true,
+            "call" if import => words.get(i + 1).is_some_and(|&(_, next)| next == "as"),
+            "call" => !call_is_read(line, at, i.checked_sub(1).map(|j| words[j].1)),
+            _ => false,
+        });
+        if bypass {
+            lines.push(index + 1);
+        }
+    }
     lines
+}
+
+/// A `call` word that `call_sites` reads: `call(`, `call<..>(`, `x.call(`, or the definition.
+fn call_is_read(line: &str, at: usize, previous: Option<&str>) -> bool {
+    let after = line[at + "call".len()..].trim_start();
+    previous == Some("function")
+        || after.starts_with('(')
+        || after.starts_with('<')
+        || line[..at].ends_with('.')
+}
+
+/// Each identifier in `line` with its byte offset.
+fn word_spans(line: &str) -> Vec<(usize, &str)> {
+    let mut words = Vec::new();
+    let mut from = None;
+    for (i, ch) in line
+        .char_indices()
+        .chain(std::iter::once((line.len(), ' ')))
+    {
+        match (from, is_identifier_char(ch)) {
+            (None, true) => from = Some(i),
+            (Some(start), false) => {
+                words.push((start, &line[start..i]));
+                from = None;
+            }
+            _ => {}
+        }
+    }
+    words
 }
 
 pub fn usage_has(usage: &str, word: &str) -> bool {

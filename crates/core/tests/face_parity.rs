@@ -159,6 +159,24 @@ fn face_bypasses_name_invoke_and_a_renamed_call_by_line() {
 }
 
 #[test]
+fn face_bypasses_name_call_used_as_a_value() {
+    let ts = "import {\n    call,\n    type CoreError,\n} from \"../core\";\n\
+              // call is the one way in\n\
+              const run = call;\n\
+              withRetry(call, \"ghost\");\n\
+              const { call: run2 } = await import(\"../core\");\n\
+              const ok = () => call<Row[]>(\"sky\");\n\
+              export async function call<T>(command: string) {}\n";
+    assert_eq!(face_bypasses(ts), vec![6, 7, 8]);
+}
+
+#[test]
+fn only_this_as_its_own_argument_skips_a_method_call() {
+    let ts = "fn.call(this, name);\ncore.call(thisCmd);\ncore.call(this.cmd);\n";
+    assert_eq!(face_call_gaps(ts), vec![2, 3]);
+}
+
+#[test]
 fn usage_subcommands_are_the_top_level_alternatives() {
     assert_eq!(
         usage_subcommands(USAGE),
@@ -343,7 +361,11 @@ fn face_files(dir: &Path, out: &mut Vec<(String, String)>) {
             .unwrap_or_default();
         if path.is_dir() {
             face_files(&path, out);
-        } else if (name.ends_with(".ts") || name.ends_with(".tsx")) && !name.contains(".test.") {
+        } else if [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"]
+            .iter()
+            .any(|ext| name.ends_with(ext))
+            && !name.contains(".test.")
+        {
             let rel = path.strip_prefix(repo()).unwrap_or(&path);
             let rel = rel.to_string_lossy().replace('\\', "/");
             out.push((
