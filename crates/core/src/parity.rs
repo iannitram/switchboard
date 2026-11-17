@@ -12,6 +12,8 @@ pub struct Row<'a> {
 /// The window's command names from `generate_handler![...]` in main.rs, paths dropped. An error
 /// names what is missing, so a moved or renamed list is not read as "no commands".
 pub fn read_handlers(main_rs: &str) -> Result<Vec<String>, String> {
+    // A commented-out command is not registered.
+    let main_rs = &strip_rust_comments(main_rs);
     let start = main_rs
         .find("generate_handler![")
         .ok_or("main.rs has no generate_handler![ list")?;
@@ -32,6 +34,28 @@ pub fn read_handlers(main_rs: &str) -> Result<Vec<String>, String> {
         .collect())
 }
 
+/// `text` with its `//` and `/* */` comments blanked out, line breaks kept.
+fn strip_rust_comments(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find('/') {
+        out.push_str(&rest[..i]);
+        let tail = &rest[i..];
+        if tail.starts_with("//") {
+            rest = &tail[tail.find('\n').unwrap_or(tail.len())..];
+        } else if tail.starts_with("/*") {
+            let end = tail.find("*/").map_or(tail.len(), |e| e + 2);
+            out.extend(tail[..end].chars().filter(|&ch| ch == '\n'));
+            rest = &tail[end..];
+        } else {
+            out.push('/');
+            rest = &tail[1..];
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// `read_handlers`, empty when there is no list.
 pub fn handler_names(main_rs: &str) -> Vec<String> {
     read_handlers(main_rs).unwrap_or_default()
@@ -43,8 +67,8 @@ enum Site {
 }
 
 /// Each `call(` or `call<...>(` in a face file, by byte offset: its string command name, or
-/// `Unread` when the name is not a plain string literal. Method calls (`x.call(`) are read only
-/// for a literal name, and the `function call` definition is not a call.
+/// `Unread` when the name is not a plain string literal. The `function call` definition is not
+/// a call, and neither is `fn.call(this, ...)`; any other `x.call(` is read like `call(`.
 fn call_sites(ts: &str) -> Vec<(usize, Site)> {
     let mut sites = Vec::new();
 
@@ -53,7 +77,8 @@ fn call_sites(ts: &str) -> Vec<(usize, Site)> {
         if before.is_some_and(is_identifier_char) {
             continue;
         }
-        let quiet = before == Some('.') || ts[..start].trim_end().ends_with("function");
+        let method = before == Some('.');
+        let quiet = ts[..start].trim_end().ends_with("function");
 
         let mut pos = start + "call".len();
         if ts[pos..].starts_with('<') {
@@ -89,10 +114,11 @@ fn call_sites(ts: &str) -> Vec<(usize, Site)> {
             pos = end;
         }
 
-        if !ts[pos..].starts_with('(') {
+        let spaced = ts[pos..].trim_start();
+        if !spaced.starts_with('(') {
             continue;
         }
-        pos += 1;
+        pos = ts.len() - spaced.len() + 1;
         while let Some(ch) = ts[pos..].chars().next() {
             if !ch.is_whitespace() {
                 break;
@@ -104,6 +130,7 @@ fn call_sites(ts: &str) -> Vec<(usize, Site)> {
             .and_then(|rest| rest.find('"').map(|end| rest[..end].to_string()));
         match name {
             Some(name) => sites.push((start, Site::Name(name))),
+            None if method && ts[pos..].starts_with("this") => {}
             None if !quiet => sites.push((start, Site::Unread)),
             None => {}
         }
@@ -130,6 +157,27 @@ pub fn face_call_gaps(ts: &str) -> Vec<usize> {
         .filter(|(_, site)| matches!(site, Site::Unread))
         .map(|(start, _)| ts[..start].matches('\n').count() + 1)
         .collect()
+}
+
+/// The 1-based lines that reach the core without `call`: `invoke` itself, or `call` imported
+/// under another name. Only the core wrappers (core.ts, dev-core.ts) may do either.
+pub fn face_bypasses(ts: &str) -> Vec<usize> {
+    let word = |at: usize, len: usize| {
+        !ts[..at].chars().next_back().is_some_and(is_identifier_char)
+            && !ts[at + len..]
+                .chars()
+                .next()
+                .is_some_and(is_identifier_char)
+    };
+    let mut lines: Vec<usize> = ts
+        .match_indices("invoke")
+        .filter(|(at, _)| word(*at, "invoke".len()))
+        .chain(ts.match_indices("call as ").filter(|(at, _)| word(*at, 4)))
+        .map(|(at, _)| ts[..at].matches('\n').count() + 1)
+        .collect();
+    lines.sort_unstable();
+    lines.dedup();
+    lines
 }
 
 pub fn usage_has(usage: &str, word: &str) -> bool {

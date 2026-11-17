@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use switchboard_core::faces::REGISTRY;
 use switchboard_core::parity::{
-    face_call_gaps, face_calls, handler_names, problems, read_handlers, usage_has,
+    face_bypasses, face_call_gaps, face_calls, handler_names, problems, read_handlers, usage_has,
     usage_subcommands, Row,
 };
 
@@ -99,6 +99,16 @@ fn read_handlers_names_a_missing_or_open_list() {
 }
 
 #[test]
+fn read_handlers_skips_commented_out_commands() {
+    let main_rs = "generate_handler![\n    commands::sky,\n    // commands::old,\n    \
+                   /* commands::gone, */ settings_save,\n]";
+    assert_eq!(
+        read_handlers(main_rs),
+        Ok(strings(&["sky", "settings_save"]))
+    );
+}
+
+#[test]
 fn face_calls_finds_each_call_with_a_string_name_in_order() {
     assert_eq!(face_calls(FACE_TS), calls());
 }
@@ -127,6 +137,25 @@ fn usage_has_matches_whole_words_only() {
     for word in ["pool", "kind", "all", "edit", "as", "text", "cap"] {
         assert!(!usage_has(USAGE, word), "{word} is not a subcommand");
     }
+}
+
+#[test]
+fn method_and_spaced_calls_are_read_or_named() {
+    let ts = "const a = () => core.call(name);\n\
+              const b = () => call (\"sky\");\n\
+              const c = () => fn.call(this, name);\n\
+              const d = () => core.call(\"backup_repo\");\n";
+    assert_eq!(face_call_gaps(ts), vec![1]);
+    assert_eq!(face_calls(ts), strings(&["sky", "backup_repo"]));
+}
+
+#[test]
+fn face_bypasses_name_invoke_and_a_renamed_call_by_line() {
+    let ts = "import { invoke } from \"@tauri-apps/api/core\";\n\
+              import { call as c } from \"../core\";\n\
+              const x = () => c(\"ghost\");\n\
+              const y = invoker();\n";
+    assert_eq!(face_bypasses(ts), vec![1, 2]);
 }
 
 #[test]
@@ -372,9 +401,23 @@ fn real_rows() -> Vec<Row<'static>> {
         .collect()
 }
 
+/// Face files that reach the core without `call`. Only the core wrappers may.
+fn bypasses_in(files: &[(String, String)]) -> Vec<String> {
+    files
+        .iter()
+        .filter(|(path, _)| path != "app/src/core.ts" && path != "app/src/dev-core.ts")
+        .flat_map(|(path, ts)| {
+            face_bypasses(ts)
+                .into_iter()
+                .map(move |line| format!("{path}:{line}: reaches the core without call()"))
+        })
+        .collect()
+}
+
 fn problems_in(main_rs: &str, usage: &str, files: &[(String, String)]) -> Vec<String> {
     let rows = real_rows();
-    let mut got = gaps_in(files);
+    let mut got = bypasses_in(files);
+    got.extend(gaps_in(files));
     let handlers = read_handlers(main_rs).unwrap_or_else(|e| {
         got.push(e);
         Vec::new()
@@ -427,6 +470,37 @@ fn a_moved_handler_list_fails_with_its_cause_first() {
         got.first().map(String::as_str),
         Some("main.rs has no generate_handler![ list"),
         "{got:?}"
+    );
+}
+
+#[test]
+fn a_commented_out_handler_fails_by_name() {
+    let main_rs = read("app/src-tauri/src/main.rs");
+    let line = main_rs
+        .lines()
+        .find(|l| l.trim() == "commands::drop_guarded,")
+        .expect("drop_guarded is registered");
+    let main_rs = main_rs.replacen(line, &format!("// {line}"), 1);
+    let got = real_problems(&main_rs, &real_usage());
+    assert!(
+        got.contains(&"face calls drop_guarded, which no tauri command handles".to_string()),
+        "{got:?}"
+    );
+}
+
+#[test]
+fn a_direct_invoke_in_a_face_file_fails_by_file_and_line() {
+    let mut files = real_face_files();
+    let (path, ts) = files
+        .iter_mut()
+        .find(|(path, ts)| path.starts_with("app/src/views/") && !face_calls(ts).is_empty())
+        .expect("a view with calls");
+    ts.push_str("\nimport { invoke } from \"@tauri-apps/api/core\";\n");
+    let line = ts.lines().count();
+    let want = format!("{path}:{line}: reaches the core without call()");
+    assert_eq!(
+        problems_in(&read("app/src-tauri/src/main.rs"), &real_usage(), &files),
+        vec![want]
     );
 }
 
