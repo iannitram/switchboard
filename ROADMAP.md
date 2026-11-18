@@ -1,6 +1,6 @@
 # Roadmap: Switchboard
 
-Updated: 2026-11-17
+Updated: 2026-11-18
 
 features:
 - core: The core and the fleet bridge, with the abilities index (release: 1.0)
