@@ -20,6 +20,11 @@ copyright 2026 ocuclaw, licensed under the MIT License. The file carries that li
 and a line saying what was changed:
 - app/src/sky/layers.ts
 
+This product includes software from ccusage (https://github.com/ccusage/ccusage),
+copyright (c) 2025 ryoppippi, licensed under the MIT License. The file carries that license's text
+and a line saying what was changed:
+- crates/core/src/budget.rs (the Claude configuration folders, near the end of the file)
+
 This product bundles three.js (https://threejs.org), copyright 2010-2024 three.js authors,
 licensed under the MIT License.
 

@@ -116,7 +116,7 @@ From the Prior art list in `SPEC.md` (awaiting my approval, R41). Code comes in 
 | BroCrew (our archived fork, upstream `brocrew/brocrew`) | Apache-2.0 | Code: the plain TypeScript chat parts (message paths, links, receipts, composer notices) lifted as is; the Vue composer, messages, Waiting on you item and work report entry ported to React (U2) | `app/src/brocrew/`, each file with its notice (SHELL-2) |
 | rengwu/wayfinder-maps | MIT | The look of the sky; the renderer is ours | `sky` face, credited in the README |
 | ocuclaw/obsidian-wayfinder | MIT | Ideas: dependency layers and the takeable frontier | `sky` (SKY-3, SKY-7) |
-| ccusage/ccusage | MIT | Ideas: reading Claude Code's local usage logs | BUD-4's estimate |
+| ccusage/ccusage | MIT | Ideas: reading Claude Code's local usage logs; code adopted with credit (`NOTICE`): the list of Claude configuration folders | BUD-4's estimate |
 | josegonzalez/python-github-backup | MIT | Ideas: what a full repo backup covers | `backup` (BAK-1) |
 | musistudio/claude-code-router, BerriAI/litellm, lm-sys/RouteLLM | MIT, MIT, Apache-2.0 | Ideas: rule routing, fallbacks and cost tracking, cost-quality trade | `frontdoor` router and adapters |
 | BloopAI/vibe-kanban, mvschwarz/openrig | Apache-2.0 | Ideas: a board of agent work per worktree; one map of agent roles | `reports`, `autopilot` |
