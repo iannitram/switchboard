@@ -707,3 +707,102 @@ pub fn session_log_paths(
     out.sort();
     Ok(out)
 }
+
+// SPDX-License-Identifier: MIT
+// `expand_home`, `normalize_claude_config_dir`, `claude_config_dirs` and `claude_projects_dirs`
+// are ported from ccusage, https://github.com/ccusage/ccusage
+// (rust/crates/ccusage-cli/src/home.rs at 1451e4fb20de1d5c3458a808f9b47b5f885fca21:
+// `expand_home`, `normalize_claude_config_dir`, `claude_config_dirs_from`).
+// Changed: the environment values are arguments, the answer is paths only (no `Env`, `Default`
+// or `NoHome` enum), and `claude_projects_dirs` is new: it keeps the folders that hold a
+// `projects/` directory, the ones `session_log_paths` reads.
+//
+// MIT License
+//
+// Copyright (c) 2025 ryoppippi
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+
+/// `~` or `~/x` against `home`; `~user`, `foo~` and a backslash form stay as written.
+fn expand_home(raw: &str, home: Option<&std::path::Path>) -> std::path::PathBuf {
+    match (raw.strip_prefix('~'), home) {
+        (Some(""), Some(home)) => home.to_path_buf(),
+        (Some(rest), Some(home)) if rest.starts_with('/') => home.join(&rest[1..]),
+        _ => std::path::PathBuf::from(raw),
+    }
+}
+
+/// An entry that names the `projects/` folder itself stands for its parent.
+fn normalize_claude_config_dir(path: std::path::PathBuf) -> std::path::PathBuf {
+    if path.file_name().is_some_and(|name| name == "projects") && path.is_dir() {
+        return path
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or(path);
+    }
+    path
+}
+
+/// Claude Code's configuration folders, in the order it reads them: `CLAUDE_CONFIG_DIR` when set
+/// (a comma-separated list; blanks and repeats dropped, `~` expanded), else `$XDG_CONFIG_HOME/claude`
+/// (`<home>/.config` when it is unset or empty) and `<home>/.claude`. Empty without
+/// `CLAUDE_CONFIG_DIR` and without a home. The caller passes the environment values, so a test
+/// sets no variable.
+pub fn claude_config_dirs(
+    claude_config_dir: Option<&str>,
+    xdg_config_home: Option<&std::ffi::OsStr>,
+    home: Option<&std::path::Path>,
+) -> Vec<std::path::PathBuf> {
+    if let Some(value) = claude_config_dir {
+        let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+        for raw in value
+            .split(',')
+            .map(str::trim)
+            .filter(|raw| !raw.is_empty())
+        {
+            let dir = normalize_claude_config_dir(expand_home(raw, home));
+            if !dirs.contains(&dir) {
+                dirs.push(dir);
+            }
+        }
+        return dirs;
+    }
+    let Some(home) = home else {
+        return Vec::new();
+    };
+    let config_home = xdg_config_home
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| home.join(".config"));
+    vec![config_home.join("claude"), home.join(".claude")]
+}
+
+/// The `projects/` folder of each of `claude_config_dirs` that has one: what `session_log_paths`
+/// reads. A configuration folder without `projects/` has no session logs and is left out.
+pub fn claude_projects_dirs(
+    claude_config_dir: Option<&str>,
+    xdg_config_home: Option<&std::ffi::OsStr>,
+    home: Option<&std::path::Path>,
+) -> Vec<std::path::PathBuf> {
+    claude_config_dirs(claude_config_dir, xdg_config_home, home)
+        .into_iter()
+        .map(|dir| dir.join("projects"))
+        .filter(|projects| projects.is_dir())
+        .collect()
+}
