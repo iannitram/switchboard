@@ -596,7 +596,8 @@ fn the_binary_merge_with_a_pass_does_what_the_cli_merge_does() {
     if mcp.0 {
         assert_eq!(mcp.1, "merge: done");
     } else {
-        assert_eq!(mcp.1, cli.1);
+        let body: Value = serde_json::from_str(&mcp.1).expect("MCP error body JSON");
+        assert_eq!(body["message"], cli.1);
     }
 }
 
