@@ -149,6 +149,39 @@ fn emit_writes_the_text() {
     assert_eq!(out, b"text\n");
 }
 
+#[test]
+fn json_usage_failure_has_a_stable_error_object() {
+    let dirs = Dirs::new("json-usage");
+    let out = dirs.run(&["--json", "--not-a-switchboard-flag"]);
+    // Catches: usage failures bypassing the JSON error envelope or exiting as an operation error.
+    assert_eq!(out.status.code(), Some(2));
+    let answer: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(answer["error"]["code"], "usage");
+    assert!(answer["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("unknown flag"));
+    assert!(stderr(&out).contains("usage: switchboard"));
+}
+
+#[test]
+fn json_sky_without_an_app_data_path_returns_setting_missing() {
+    let dirs = Dirs::new("json-no-data");
+    let out = dirs
+        .command(&["--json", "sky"])
+        .env_remove("SWITCHBOARD_DATA")
+        .env_remove("HOME")
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("APPDATA")
+        .output()
+        .expect("run switchboard");
+    // Catches: a missing app data path being reported as usage or text instead of JSON.
+    assert_eq!(out.status.code(), Some(2));
+    let answer: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(answer["error"]["code"], "setting_missing");
+    assert_eq!(answer["error"]["retryable"], false);
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn a_full_device_is_one_line_on_stderr_and_exit_1() {

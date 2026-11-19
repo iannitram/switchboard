@@ -323,7 +323,16 @@ fn a_missing_snapshot_exits_1_with_the_message() {
         ] {
             let out = switchboard(argv, data, None);
             assert_eq!(out.status.code(), Some(1), "{argv:?} in {}", data.display());
-            assert_eq!(stdout(&out), "");
+            if argv[0] == "--json" {
+                // Catches: --json failing without the error body on stdout (#491).
+                let body: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+                assert_eq!(
+                    body["error"]["message"],
+                    "switchboard: no snapshot yet; run switchboard refresh"
+                );
+            } else {
+                assert_eq!(stdout(&out), "");
+            }
             assert_eq!(
                 stderr(&out),
                 "switchboard: no snapshot yet; run switchboard refresh\n"

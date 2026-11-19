@@ -12,7 +12,7 @@ use switchboard_core::rules::Role;
 struct Echo;
 
 impl ReadCore for Echo {
-    fn call(&self, tool: &str, args: &Value) -> Result<Value, String> {
+    fn call(&self, tool: &str, args: &Value) -> Result<Value, switchboard_core::error::ErrorBody> {
         Ok(json!({ "tool": tool, "args": args }))
     }
 }

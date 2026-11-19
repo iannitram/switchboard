@@ -29,7 +29,7 @@ const READ: [&str; 6] = [
 struct FakeRead;
 
 impl ReadCore for FakeRead {
-    fn call(&self, tool: &str, args: &Value) -> Result<Value, String> {
+    fn call(&self, tool: &str, args: &Value) -> Result<Value, switchboard_core::error::ErrorBody> {
         Ok(json!({ "tool": tool, "args": args }))
     }
 }
@@ -171,10 +171,10 @@ fn project_manager_merge_without_a_pass_on_head_is_refused_and_merges_nothing() 
     );
     let result = &replies[0]["result"];
     assert_eq!(result["isError"], true);
-    assert_eq!(
-        result["content"][0]["text"],
-        "switchboard#12: no PASS on head"
-    );
+    let body: Value = serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+    // Catches: a write-tool refusal returning plain text instead of the shared error body.
+    assert_eq!(body["code"], "refused");
+    assert_eq!(body["message"], "switchboard#12: no PASS on head");
     assert!(write.merged.borrow().is_empty());
 }
 

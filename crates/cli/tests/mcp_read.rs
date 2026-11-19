@@ -10,6 +10,7 @@ use std::cell::RefCell;
 
 use mcp::{serve, ReadCore, WriteCore};
 use serde_json::{json, Value};
+use switchboard_core::error::{ErrorBody, ErrorCode};
 
 /// MCP-1 has no write tools: no role is passed, so no write core is ever called.
 struct NoWrites;
@@ -35,11 +36,11 @@ impl WriteCore for NoWrites {
 #[derive(Default)]
 struct FakeCore {
     calls: RefCell<Vec<(String, Value)>>,
-    fail: Option<String>,
+    fail: Option<ErrorBody>,
 }
 
 impl ReadCore for FakeCore {
-    fn call(&self, tool: &str, args: &Value) -> Result<Value, String> {
+    fn call(&self, tool: &str, args: &Value) -> Result<Value, ErrorBody> {
         self.calls
             .borrow_mut()
             .push((tool.to_string(), args.clone()));
@@ -179,13 +180,33 @@ fn each_tool_call_reaches_the_core_and_returns_its_answer_as_text() {
 #[test]
 fn core_error_returns_is_error_with_its_text() {
     let core = FakeCore {
-        fail: Some("waiting: repo is live".to_string()),
+        fail: Some(ErrorBody::new(ErrorCode::Refused, "waiting: repo is live")),
         ..Default::default()
     };
     let replies = run(&core, &[call(3, "waiting", json!({}))]);
     let result = &replies[0]["result"];
     assert_eq!(result["isError"], true);
-    assert_eq!(result["content"][0]["text"], "waiting: repo is live");
+    let body: Value = serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(body["code"], "refused");
+    assert_eq!(body["message"], "waiting: repo is live");
+}
+
+#[test]
+fn read_tool_errors_return_the_same_stable_code_as_the_cli() {
+    let core = FakeCore {
+        fail: Some(ErrorBody::new(
+            ErrorCode::SettingMissing,
+            "switchboard: set SWITCHBOARD_DATA to the app data folder",
+        )),
+        ..Default::default()
+    };
+    let replies = run(&core, &[call(3, "sky", json!({}))]);
+    let result = &replies[0]["result"];
+    let body: Value = serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+    // Catches: MCP tool errors losing the stable code shared with `switchboard --json sky`.
+    assert_eq!(result["isError"], true);
+    assert_eq!(body["code"], "setting_missing");
+    assert_eq!(body["retryable"], false);
 }
 
 #[test]

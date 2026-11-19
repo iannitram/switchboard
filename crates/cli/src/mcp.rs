@@ -20,7 +20,7 @@ use serde_json::{json, Value};
 use switchboard_core::budget::{self, PoolEdit};
 use switchboard_core::clock::Clock;
 use switchboard_core::confirm;
-use switchboard_core::error::CoreError;
+use switchboard_core::error::{CoreError, ErrorBody, ErrorCode};
 use switchboard_core::faces::{Effect, REGISTRY};
 use switchboard_core::fleet::FleetBridge;
 use switchboard_core::github::snapshot::SnapshotStore;
@@ -33,7 +33,7 @@ pub mod frontdoor;
 /// The core behind the tools. `serve` passes a read tool's name and arguments here and returns
 /// the answer as text. The real core is a thin struct in main.rs.
 pub trait ReadCore {
-    fn call(&self, tool: &str, args: &Value) -> Result<Value, String>;
+    fn call(&self, tool: &str, args: &Value) -> Result<Value, ErrorBody>;
 }
 
 /// The core behind the write tools (MCP-2). The real one is a thin struct in main.rs.
@@ -269,6 +269,23 @@ fn autopilot_needs(tool: &str, role: Option<&Role>) -> Option<Role> {
     }
 }
 
+/// A refusal as its error body: `in_job_worktree` only when the guard refused for that reason.
+fn refusal_body(text: String) -> ErrorBody {
+    let code = if rules::is_job_worktree_refusal(&text) {
+        ErrorCode::InJobWorktree
+    } else if text.contains(": no such repo: ") {
+        ErrorCode::NotFound
+    } else {
+        ErrorCode::Refused
+    };
+    ErrorBody::new(code, text)
+}
+
+/// An error body as the JSON text of a tool answer.
+fn error_text(body: &ErrorBody) -> String {
+    serde_json::to_string(body).unwrap_or_default()
+}
+
 /// #385: an autopilot tool. The guard is the CLI's; the answer is the read core's (the status,
 /// or the pass's report as JSON). A report with errors is `isError: true`, its text still the
 /// whole report.
@@ -296,14 +313,14 @@ fn autopilot_call(
     if let Verdict::Refuse(text) | Verdict::ToWaiting(text) =
         rules::guard_autopilot(&caller, name, needs)
     {
-        return said(text, true);
+        return said(error_text(&refusal_body(text)), true);
     }
     match core.call(name, args) {
         Ok(answer) => {
             let failed = answer["errors"].as_array().is_some_and(|e| !e.is_empty());
             said(answer.to_string(), failed)
         }
-        Err(message) => said(message, true),
+        Err(body) => said(error_text(&body), true),
     }
 }
 
@@ -564,9 +581,9 @@ fn read_call(id: &Value, name: &str, args: &Value, core: &dyn ReadCore) -> Value
             id,
             json!({ "content": [{ "type": "text", "text": answer.to_string() }], "isError": false }),
         ),
-        Err(message) => ok(
+        Err(body) => ok(
             id,
-            json!({ "content": [{ "type": "text", "text": message }], "isError": true }),
+            json!({ "content": [{ "type": "text", "text": error_text(&body) }], "isError": true }),
         ),
     }
 }
@@ -663,7 +680,7 @@ fn write_call(
         ),
         Err(message) => ok(
             id,
-            json!({ "content": [{ "type": "text", "text": message }], "isError": true }),
+            json!({ "content": [{ "type": "text", "text": error_text(&refusal_body(message)) }], "isError": true }),
         ),
     }
 }

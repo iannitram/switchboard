@@ -103,8 +103,10 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 ### core-platform
 `crates/core/src/platform.rs` · the R04 seams · present. See Platforms above.
 
-### core-clock, core-error
+### core-clock, core-error, core-error-code
 `crates/core/src/clock.rs`, `error.rs` · present. The injected clock (`Clock`, `SystemClock`, `FixedClock`) and `CoreError`, the one error faces see.
+
+`crates/core/src/error.rs` · #491 · present. `ErrorCode` has stable snake_case serialized names; `ErrorBody` carries the code, current message, retryability, fix and optional machine reason. Every `CoreError` and fleet failure reason maps to one body. The CLI emits `{"error": ...}` for `--json` failures; MCP tool failures put that body JSON in the text block.
 
 ### core-faces
 `crates/core/src/faces.rs` · #489 · present. The command registry: each command's effects and its MCP tool (name, roles, input schema, description); `mcp.rs` lists and gates tools from it and `write_call` routes the front-door ones by it. The Tauri and CLI faces are not in it yet (#497).
