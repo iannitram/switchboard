@@ -1207,7 +1207,12 @@ fn request_text(action: &GuardedAction) -> String {
 
 /// A refusal: its text on stderr, exit 1.
 pub(crate) fn refuse(err: &mut dyn Write, text: &str, json: bool) -> ExitCode {
-    die(ErrorCode::Refused, 1, text.to_string(), None, json, err)
+    let code = if rules::is_job_worktree_refusal(text) {
+        ErrorCode::InJobWorktree
+    } else {
+        ErrorCode::Refused
+    };
+    die(code, 1, text.to_string(), None, json, err)
 }
 
 /// `<repo>#<pr>`: a non-empty repo and a PR number from 1.

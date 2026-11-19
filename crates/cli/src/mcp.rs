@@ -273,6 +273,8 @@ fn autopilot_needs(tool: &str, role: Option<&Role>) -> Option<Role> {
 fn refusal_body(text: String) -> ErrorBody {
     let code = if rules::is_job_worktree_refusal(&text) {
         ErrorCode::InJobWorktree
+    } else if text.contains(": no such repo: ") {
+        ErrorCode::NotFound
     } else {
         ErrorCode::Refused
     };

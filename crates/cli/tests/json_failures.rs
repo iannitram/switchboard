@@ -115,7 +115,9 @@ fn the_mcp_read_tool_returns_the_same_code_as_the_cli_for_the_same_failure() {
             .env_remove("APPDATA")
     }
     let mut cli = Command::new(env!("CARGO_BIN_EXE_switchboard"));
-    let cli = bare(cli.args(["--json", "sky"]), &dirs).output().expect("run cli");
+    let cli = bare(cli.args(["--json", "sky"]), &dirs)
+        .output()
+        .expect("run cli");
     let mut mcp = Command::new(env!("CARGO_BIN_EXE_switchboard"));
     let mut child = bare(mcp.arg("mcp"), &dirs)
         .stdin(Stdio::piped())
@@ -123,7 +125,8 @@ fn the_mcp_read_tool_returns_the_same_code_as_the_cli_for_the_same_failure() {
         .stderr(Stdio::null())
         .spawn()
         .expect("run mcp");
-    let call = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"sky","arguments":{}}}"#;
+    let call =
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"sky","arguments":{}}}"#;
     writeln!(child.stdin.take().unwrap(), "{call}").unwrap();
     let out = child.wait_with_output().unwrap();
     let reply: serde_json::Value =
