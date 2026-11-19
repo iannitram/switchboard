@@ -43,7 +43,7 @@ impl ErrorCode {
     }
 
     pub fn retryable(self) -> bool {
-        matches!(self, Self::FleetTimeout | Self::GitHub)
+        matches!(self, Self::FleetSpawn | Self::FleetTimeout | Self::GitHub)
     }
 
     fn fix(self) -> &'static str {
@@ -244,7 +244,7 @@ mod tests {
             (
                 fleet(FleetErrorReason::Spawn("missing".into())),
                 ErrorCode::FleetSpawn,
-                false,
+                true,
             ),
             (
                 fleet(FleetErrorReason::Timeout(30)),
@@ -298,7 +298,7 @@ mod tests {
             (
                 ErrorCode::FleetSpawn,
                 "fleet_spawn",
-                false,
+                true,
                 "Check that the fleet tool is installed and try again.",
             ),
             (

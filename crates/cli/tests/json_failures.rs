@@ -101,3 +101,37 @@ fn no_command_prints_the_usage_once_and_exactly_as_before() {
     assert_eq!(envelope(&json)["code"], "usage");
     assert_eq!(json.stderr, plain.stderr);
 }
+
+#[test]
+fn the_mcp_read_tool_returns_the_same_code_as_the_cli_for_the_same_failure() {
+    use std::io::Write;
+    use std::process::Stdio;
+    let dirs = Dirs::new("mcp-same");
+    fn bare<'a>(cmd: &'a mut Command, dirs: &Dirs) -> &'a mut Command {
+        cmd.current_dir(&dirs.root)
+            .env_remove("SWITCHBOARD_DATA")
+            .env_remove("HOME")
+            .env_remove("XDG_DATA_HOME")
+            .env_remove("APPDATA")
+    }
+    let mut cli = Command::new(env!("CARGO_BIN_EXE_switchboard"));
+    let cli = bare(cli.args(["--json", "sky"]), &dirs).output().expect("run cli");
+    let mut mcp = Command::new(env!("CARGO_BIN_EXE_switchboard"));
+    let mut child = bare(mcp.arg("mcp"), &dirs)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("run mcp");
+    let call = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"sky","arguments":{}}}"#;
+    writeln!(child.stdin.take().unwrap(), "{call}").unwrap();
+    let out = child.wait_with_output().unwrap();
+    let reply: serde_json::Value =
+        serde_json::from_slice(out.stdout.split(|b| *b == b'\n').next().unwrap()).unwrap();
+    let body: serde_json::Value =
+        serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    // Catches: the MCP read tool and the CLI naming the same failure with different codes.
+    assert_eq!(reply["result"]["isError"], true);
+    assert_eq!(body["code"], envelope(&cli)["code"]);
+    assert_eq!(body["code"], "setting_missing");
+}

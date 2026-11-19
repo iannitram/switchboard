@@ -58,9 +58,6 @@ pub enum Verdict {
     Refuse(String),
 }
 
-/// The guard. Merge eligibility (PASS on head, CI green) is GH-5's and is checked after
-/// `Allow`; this decides who may ask.
-///
 /// The ending of every refusal made because the process runs inside a job worktree.
 pub const JOB_WORKTREE_REFUSAL: &str = "refused inside a job worktree";
 
@@ -69,6 +66,8 @@ pub fn is_job_worktree_refusal(text: &str) -> bool {
     text.ends_with(JOB_WORKTREE_REFUSAL)
 }
 
+/// The guard. Merge eligibility (PASS on head, CI green) is GH-5's and is checked after
+/// `Allow`; this decides who may ask.
 /// Inside a job worktree everything is refused. A merge is mine from the app and the
 /// project-manager role's from the CLI or MCP. Archiving a repo (the `delete` request; nothing
 /// is ever deleted) and restoring over a live one need my confirm in the app; from the CLI or MCP they become a Waiting on you item.
