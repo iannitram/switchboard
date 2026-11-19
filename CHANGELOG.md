@@ -2,6 +2,8 @@
 
 Newest first. One line per change of stage, release or decision that the next session needs.
 
+- 2026-11-18 Claude log folders (BUD-4): `budget::claude_config_dirs` and `claude_projects_dirs` resolve where Claude Code keeps its session logs (the `CLAUDE_CONFIG_DIR` list, XDG, `~/.claude`), adapted from ccusage with credit in `NOTICE`; nothing calls them yet.
+- 2026-11-18 PM audit: code map statuses brought in line with the code (seven modules marked planned are present), BUD-4 recorded as not wired to any face, ROADMAP re-dated; documents only.
 - 2026-11-12 Roadmap lens (#392): project stars follow development-stage columns with issue counts, completion and blocked-by links; unlisted features stay Unstaged and a missing stages table says so.
 - 2026-11-12 Backup renames (#447): restore marks use `lock::write_whole`; `releases.json`, the bundle, staged publications, folder moves and the aside swap share `lock::rename_retrying` and its bounded Windows retry, with the swap order and failure cleanup unchanged.
 - 2026-11-12 Labeller paid fallback (#330): a failed local labeller tries the first paid service in the router's cheapest-first order with a key and budget (its model is the first row in id order, as the router's Small rule picks, not a verified smallest), using the front door's budget gate and answer adapters; no key or budget keeps rules only, and dry runs stay local only.
