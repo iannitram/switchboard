@@ -20,7 +20,7 @@ use switchboard_core::rules::Role;
 struct Never;
 
 impl ReadCore for Never {
-    fn call(&self, _: &str, _: &Value) -> Result<Value, String> {
+    fn call(&self, _: &str, _: &Value) -> Result<Value, switchboard_core::error::ErrorBody> {
         unreachable!("tools/list calls no tool")
     }
 }
