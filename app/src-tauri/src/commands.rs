@@ -5,7 +5,7 @@ use serde::Serialize;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use switchboard_core::budget::{self, BudgetSnapshot, PoolEdit};
+use switchboard_core::budget::{self, BudgetSnapshot, PoolEdit, PoolRow};
 use switchboard_core::clock::{Clock, SystemClock, UnixSeconds};
 use switchboard_core::fleet::{FleetBridge, FleetError, FleetErrorLog};
 use switchboard_core::frontdoor::implicit_log::log_implicit;
