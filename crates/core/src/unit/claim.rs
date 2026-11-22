@@ -392,6 +392,16 @@ impl Store {
             }
             std::thread::sleep(Duration::from_millis(20 * u64::from(attempt_no + 1)));
         }
+        // A lost push reply on the last attempt can leave our claim on the branch.
+        if let Ok(Some(held)) = self.existing(repo, issue) {
+            if held.token == claim.token {
+                return Ok((Outcome::Claimed(claim), true));
+            }
+            if held.machine == worker {
+                return Ok((Outcome::Claimed(held), false));
+            }
+            return Ok((Outcome::Taken, false));
+        }
         Err(CoreError::Io(format!(
             "claim #{issue}: the {BRANCH} branch kept moving"
         )))
@@ -399,6 +409,8 @@ impl Store {
 
     /// Clear the mirror while the lock still exists, then remove only the expected token.
     /// Every retry checks both ownership and eligibility in the freshly fetched base.
+    /// If an earlier attempt cleared the mirror and a retry finds a claim still standing
+    /// (either a replacement claim or the same claim now ineligible), restore its mirror.
     fn remove(
         &self,
         mirror: &dyn Mirror,
@@ -407,16 +419,22 @@ impl Store {
         token: &str,
         eligible: impl Fn(&Claim) -> bool,
     ) -> Result<bool, CoreError> {
+        let mut cleared_mirror = false;
         for attempt_no in 0..ATTEMPTS {
             let (attempt, base) = self.begin()?;
             let Some(held) = self.read(&attempt, &base, repo, issue)? else {
                 return Ok(false);
             };
             if held.token != token || !eligible(&held) {
+                if cleared_mirror {
+                    mirror.assign(repo, issue, &held.machine)?;
+                    mirror.label(repo, issue, IN_PROGRESS)?;
+                }
                 return Ok(false);
             }
             mirror.unassign(repo, issue, &held.machine)?;
             mirror.unlabel(repo, issue, IN_PROGRESS)?;
+            cleared_mirror = true;
             if self.publish(
                 &attempt,
                 &base,
@@ -428,6 +446,12 @@ impl Store {
                 return Ok(true);
             }
             std::thread::sleep(Duration::from_millis(20 * u64::from(attempt_no + 1)));
+        }
+        if cleared_mirror {
+            if let Ok(Some(held)) = self.existing(repo, issue) {
+                let _ = mirror.assign(repo, issue, &held.machine);
+                let _ = mirror.label(repo, issue, IN_PROGRESS);
+            }
         }
         Err(CoreError::Io(format!(
             "release #{issue}: the {BRANCH} branch kept moving"
@@ -492,6 +516,18 @@ pub fn claim(
         }
         other => Ok(other),
     }
+}
+
+/// Reconcile a claim whose push reply may have been lost: returns `Some(claim)` when the remote
+/// branch holds a claim carrying `token`, or `None` when absent or held by another token.
+pub fn reconcile(
+    store: &Store,
+    repo: &str,
+    issue: u64,
+    token: &str,
+) -> Result<Option<Claim>, CoreError> {
+    validate_repo(repo)?;
+    Ok(store.existing(repo, issue)?.filter(|c| c.token == token))
 }
 
 /// Drop this acquisition's claim: clear the mirror first, then token-check the file deletion.

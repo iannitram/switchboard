@@ -10,8 +10,8 @@ use std::sync::Mutex;
 use switchboard_core::clock::FixedClock;
 use switchboard_core::error::CoreError;
 use switchboard_core::unit::claim::{
-    claim, reap, release, Activity, Claim, ClaimError, Mirror, Outcome, Store, IN_PROGRESS,
-    NOT_NOW_EXIT, STALE_LIMIT,
+    claim, reap, reconcile, release, Activity, Claim, ClaimError, Mirror, Outcome, Store,
+    IN_PROGRESS, NOT_NOW_EXIT, STALE_LIMIT,
 };
 
 const REPO: &str = "owner/project";
@@ -710,8 +710,11 @@ fn removal_rechecks_the_token_after_a_rejected_deletion_push() {
         assert_ne!(read_claim(&store, REPO, 5)["token"], old.token);
         assert_eq!(read_claim(&store, REPO, 5)["machine"], "replacement");
         assert!(
-            fake.calls().is_empty(),
-            "the deletion retry must leave the new mirror alone"
+            fake.calls()
+                .iter()
+                .all(|c| !c.starts_with("unassign ") && !c.starts_with("unlabel ")),
+            "the deletion retry must not unassign or unlabel the new mirror: {:?}",
+            fake.calls()
         );
         fake.assert_mirrored(REPO, 5, "replacement");
         let _ = std::fs::remove_dir_all(root);
@@ -744,7 +747,10 @@ fn the_reaper_rechecks_expiry_after_a_rejected_deletion_push() {
         read_claim(&store, REPO, 5)["claimed_at"],
         1_000 + STALE_LIMIT + 1
     );
-    assert!(fake.calls().is_empty());
+    assert!(fake
+        .calls()
+        .iter()
+        .all(|c| !c.starts_with("unassign ") && !c.starts_with("unlabel ")));
     fake.assert_mirrored(REPO, 5, "w");
     let _ = std::fs::remove_dir_all(root);
 }
@@ -867,5 +873,86 @@ fn a_back_dated_claim_is_reaped_without_waiting_and_other_repos_are_left_alone()
     fake.assert_cleared(REPO, 5);
     fake.assert_mirrored(REPO, 6, "w");
     fake.assert_mirrored("owner/other", 5, "w");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn reconcile_matches_only_the_attempt_token() {
+    let (store, root) = store("reconcile");
+    let fake = Fake::default();
+    let clock = FixedClock::at(1_000);
+    assert_eq!(reconcile(&store, REPO, 5, "missing").unwrap(), None);
+    let acquired = held(claim(&store, &fake, &clock, REPO, 5, "w", BASE_SHA).unwrap());
+    assert_eq!(
+        reconcile(&store, REPO, 5, &acquired.token).unwrap(),
+        Some(acquired.clone())
+    );
+    assert_eq!(reconcile(&store, REPO, 5, "other-token").unwrap(), None);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn release_restores_in_progress_label_if_reaped_and_reclaimed_before_unlabel() {
+    let (store, root) = store("label-window");
+    let fake = Fake::default();
+    let clock = FixedClock::at(1_000);
+    let old = held(claim(&store, &fake, &clock, REPO, 5, "w", BASE_SHA).unwrap());
+    let old_token = old.token.clone();
+    let other = copy_store(&store);
+    // Simulate a reaper + new worker claiming and labeling right before `release`'s unlabel
+    // removes the shared `in-progress` label: `after_unlabel` leaves the label absent, then
+    // `release`'s retry sees the new token and restores the mirror.
+    *fake.after_unlabel.lock().unwrap() = Some(Box::new(move |fake| {
+        assert!(release(&other, fake, REPO, 5, &old_token).unwrap());
+        held(
+            claim(
+                &other,
+                fake,
+                &FixedClock::at(1_000),
+                REPO,
+                5,
+                "replacement",
+                BASE_SHA,
+            )
+            .unwrap(),
+        );
+        fake.labels.lock().unwrap().remove(&(REPO.to_string(), 5));
+    }));
+    assert!(!release(&store, &fake, REPO, 5, &old.token).unwrap());
+    assert_eq!(read_claim(&store, REPO, 5)["machine"], "replacement");
+    fake.assert_mirrored(REPO, 5, "replacement");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn reap_retry_restores_mirror_when_claim_becomes_ineligible() {
+    let (store, root) = store("reap-retry-half-mirrored");
+    let fake = Fake::default();
+    let clock = FixedClock::at(1_000);
+    let acquired = held(claim(&store, &fake, &clock, REPO, 5, "w", BASE_SHA).unwrap());
+    clock.advance(STALE_LIMIT + 1);
+    let other = copy_store(&store);
+    *fake.after_unlabel.lock().unwrap() = Some(Box::new(move |fake| {
+        // Move the branch so the first deletion push fails, and mark a PR open so the retry
+        // becomes ineligible without anyone else restoring the mirror.
+        held(
+            claim(
+                &other,
+                fake,
+                &FixedClock::at(1_000),
+                REPO,
+                6,
+                "other",
+                BASE_SHA,
+            )
+            .unwrap(),
+        );
+        fake.prs.lock().unwrap().insert((REPO.to_string(), 5));
+    }));
+    assert!(reap(&store, &fake, &fake, &clock, REPO, STALE_LIMIT)
+        .unwrap()
+        .is_empty());
+    assert_eq!(read_claim(&store, REPO, 5)["token"], acquired.token);
+    fake.assert_mirrored(REPO, 5, "w");
     let _ = std::fs::remove_dir_all(root);
 }
