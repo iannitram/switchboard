@@ -4,6 +4,7 @@
 pub mod bug_loop;
 pub mod engine;
 pub mod roadmap_run;
+pub mod score;
 pub mod spec;
 pub mod state;
 pub mod waiting;
