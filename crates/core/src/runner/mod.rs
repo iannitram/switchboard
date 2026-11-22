@@ -2,6 +2,7 @@
 //! waiting items that owner steps raise.
 
 pub mod engine;
+pub mod score;
 pub mod spec;
 pub mod state;
 pub mod waiting;
