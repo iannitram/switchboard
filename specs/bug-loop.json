@@ -420,7 +420,7 @@
  "invariants": [
   {"id": "no-fix-without-red-test", "statement": "A fix job exists only for a bug whose repro_test failed on main with the reported signature.", "checked_by": "check-red", "exists": false},
   {"id": "proof-is-fail-before", "statement": "A fix PR is opened only when the card's regression check failed on base and passes on the branch.", "checked_by": "prove-regression", "exists": true},
-  {"id": "test-not-edited-by-fix", "statement": "The fix job's files_allowed excludes the repro test.", "checked_by": "fleet run check files_allowed (repo/tools/fleet/run.py:1585-1591)", "exists": true},
+  {"id": "test-not-edited-by-fix", "statement": "The fix job's files_allowed excludes the repro test under the harness's glob rules (a pattern without '/' matches any basename at any depth; a trailing '/' matches everything under that directory; '*' stays within one segment and '**' crosses segments).", "checked_by": "fleet run check files_allowed (repo/tools/fleet/run.py:1585-1591)", "exists": true},
   {"id": "lesson-in-same-pr", "statement": "Every fix PR adds exactly one pitfalls line naming the bug id, class and test, within the 60-word cap, in the app's own repo.", "checked_by": "record-lesson", "exists": false},
   {"id": "one-bug-per-signature", "statement": "No two open bug rows share a repo and normalised error signature.", "checked_by": "dedupe", "exists": false},
   {"id": "one-owner-per-app", "statement": "Every app in a report manifest maps to exactly one owner_row.", "checked_by": "resolve-owner-repo", "exists": false},
