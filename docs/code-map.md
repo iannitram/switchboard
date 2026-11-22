@@ -201,7 +201,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 
 - BUD-1 rows (`rows_from_json`, `read`): present.
 - BUD-4 Claude pool (`claude_pool`, `session_log_paths`, `parse_utc`): present.
-- BUD-4 is not wired: `claude_pool` and `session_log_paths` are called only from `crates/core/tests/budget_claude.rs`, so no face (the Budget view, the CLI, the MCP tool) shows the Claude estimate (2026-11-18; wiring is #502, the log-folder list is #501).
+- BUD-4 Claude pool (`claude_pool`, `claude_for_rows`, `read_with_claude`, `refresh_with_claude`, `BudgetSnapshot`, `session_log_paths`, `parse_utc`): present; wired into `budget_rows`, `budget_refresh`, `Budget.tsx`, `switchboard budget`, and MCP `budget` (#502).
 - BUD-3 refresh (`refresh`, `RefreshTimer`, `budget_rows`, `budget_refresh`): present.
 - BUD-1 panel (`BudgetPanel`, `Budget`): present.
 - BUD-2 save (`save_edit`, `parse_reset`, `budget_save_edit`): present.

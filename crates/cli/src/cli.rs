@@ -22,7 +22,7 @@ use std::process::ExitCode;
 use serde_json::{json, Value};
 use switchboard_core::backup::{self, BackupOutcome};
 use switchboard_core::backup_run::{self, BackupRow};
-use switchboard_core::budget::{self, PoolEdit, PoolRow};
+use switchboard_core::budget::{self, PoolEdit};
 use switchboard_core::clock::{Clock, SystemClock, UnixSeconds};
 use switchboard_core::confirm;
 use switchboard_core::error::{CoreError, ErrorBody, ErrorCode};
@@ -1687,44 +1687,45 @@ fn data_or_fail() -> Result<PathBuf, Fail> {
     })
 }
 
-/// `switchboard budget`: one line per pool (text) or the rows as a JSON array (`--json`).
-/// `--refresh` (BUD-3, #374) re-reads every pool that has a reader first, as the app's timer
-/// does (`budget::refresh`).
+/// `switchboard budget`: one line per pool (text, with Claude's labelled estimate) or the
+/// `BudgetSnapshot` JSON (`--json`). `--refresh` (BUD-3, #374) re-reads every pool that has a
+/// reader first, as the app's timer does (`budget::refresh_with_claude`).
 fn budget(json: bool, refresh: bool) -> ExitCode {
-    let rows = if refresh {
+    let snapshot = if refresh {
         budget_refreshed_rows()
     } else {
         budget_rows()
     };
-    let rows = match rows {
-        Ok(rows) => rows,
+    let snapshot = match snapshot {
+        Ok(snapshot) => snapshot,
         Err(fail) => return exit_with(fail, json),
     };
     if json {
-        print_json("budget", serde_json::to_string_pretty(&rows))
+        print_json("budget", serde_json::to_string_pretty(&snapshot))
     } else {
-        emit(&budget_text(&rows))
+        emit(&budget_text(&snapshot))
     }
 }
 
-/// MCP-1: the pool rows `budget` prints.
-pub(crate) fn budget_rows() -> Result<Vec<PoolRow>, Fail> {
+/// MCP-1 + BUD-4: the pool rows and Claude's estimate `budget` prints.
+pub(crate) fn budget_rows() -> Result<budget::BudgetSnapshot, Fail> {
     let root = pipeline_or_fail()?;
-    budget::read(&FleetBridge::new(&root))
+    budget::read_with_claude(&FleetBridge::new(&root), &SystemClock)
         .map_err(|e| fail_core(&e, format!("switchboard budget: {e}")))
 }
 
-/// BUD-3 (#374): the pool rows after `fleet budget --refresh`.
-fn budget_refreshed_rows() -> Result<Vec<PoolRow>, Fail> {
+/// BUD-3 + BUD-4 (#374): the pool rows and Claude's estimate after `fleet budget --refresh`.
+fn budget_refreshed_rows() -> Result<budget::BudgetSnapshot, Fail> {
     let root = pipeline_or_fail()?;
-    budget::refresh(&FleetBridge::new(&root))
+    budget::refresh_with_claude(&FleetBridge::new(&root), &SystemClock)
         .map_err(|e| fail_core(&e, format!("switchboard budget: {e}")))
 }
 
 /// One line per pool, in row order, with what the budget panel shows (BUD-1, #361):
 /// `<pool>: <pct>% vs pace <pace>%, <+d.d> pts, <verdict>, <age> min old`, and `, stale` when
-/// fleet calls the reading stale.
-fn budget_text(rows: &[PoolRow]) -> String {
+/// fleet calls the reading stale. When a `claude` estimate is present (BUD-4, #502), its
+/// labelled estimate line follows the `claude` row.
+fn budget_text(snapshot: &budget::BudgetSnapshot) -> String {
     let percent = |value: Option<f64>| match value {
         Some(v) => format!("{v}%"),
         None => NOT_RECORDED.to_string(),
@@ -1734,23 +1735,28 @@ fn budget_text(rows: &[PoolRow]) -> String {
         Some(v) => format!("{v:.1} pts"),
         None => format!("pts {NOT_RECORDED}"),
     };
-    rows.iter()
-        .map(|row| {
-            let age = match row.reading_age_min {
-                Some(min) => format!("{min} min old"),
-                None => format!("age {NOT_RECORDED}"),
-            };
-            format!(
-                "{}: {} vs pace {}, {}, {}, {age}{}\n",
-                terminal_safe(&row.pool),
-                percent(row.pct),
-                percent(row.pace),
-                points(row.delta),
-                terminal_safe(&row.verdict),
-                if row.stale { ", stale" } else { "" }
-            )
-        })
-        .collect()
+    let mut out = String::new();
+    for row in &snapshot.rows {
+        let age = match row.reading_age_min {
+            Some(min) => format!("{min} min old"),
+            None => format!("age {NOT_RECORDED}"),
+        };
+        out.push_str(&format!(
+            "{}: {} vs pace {}, {}, {}, {age}{}\n",
+            terminal_safe(&row.pool),
+            percent(row.pct),
+            percent(row.pace),
+            points(row.delta),
+            terminal_safe(&row.verdict),
+            if row.stale { ", stale" } else { "" }
+        ));
+        if row.pool == "claude" {
+            if let Some(claude) = &snapshot.claude {
+                out.push_str(&format!("  {}\n", claude.estimate_label()));
+            }
+        }
+    }
+    out
 }
 
 /// Every stored snapshot in the data folder, or the failure saying why there is none.
