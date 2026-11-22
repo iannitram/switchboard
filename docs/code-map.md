@@ -21,6 +21,7 @@ modules:
 - bug-fix: crates/core/tests/bug_fix.rs (present)
 - face-parity: crates/core/src/parity.rs (present)
 - faces: crates/core/src/faces.rs (present)
+- bug-loop-live: crates/core/src/runner/bug_loop.rs (present)
 
 (The sky reads the `reuses:` block, SKY-6. The code map check reads `modules:`, unit-proof (#405). Ideas taken from projects that are not ours, such as wayfinder-maps' look, are credited in the README, not here.)
 
@@ -289,7 +290,9 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - AUTO-2 roadmap pass (`roadmap_pass`, `pm_job` in `passes.rs`; run by `after_poll`): present.
 
 ### runner
-`crates/core/src/runner/mod.rs` · runner-spec (#395) · present. Exposes the runner's spec, engine and state modules.
+`crates/core/src/runner/mod.rs` · runner-spec (#395) · present. Exposes the runner's spec, engine, state, waiting and bug_loop modules.
+
+`crates/core/src/runner/bug_loop.rs` · bug-loop-live (#411) · present. Wires `specs/bug-loop.json` through `Engine` and `OwnerSteps` (`BugEnv`, `drive_bug`, `run_end_to_end`, `BugOutcome`), running intake (`idle` -> `report-archived`) and fix/release (`open` -> `closed`, pausing at `swept` while `check-release` returns `NotNow` for apps with releases). Tests: `crates/core/tests/bug_loop_live.rs`.
 
 `crates/core/src/runner/spec.rs` · runner-spec (#395) · present. `Spec`, typed records, states, steps, actors, run descriptions, scorers and invariants; `load` reads UTF-8 JSON and `parse` decodes it through serde, then checks state references with `Spec::validate`. A missing or malformed step key and an unknown actor or state name the step and key in `CoreError`. Both draft specs under `specs/` validate. Commands, type expressions and external invariant checks are descriptions, never executed by validation.
 
