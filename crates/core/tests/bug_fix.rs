@@ -185,7 +185,14 @@ fn fix_job_files_allowed_excludes_the_repro_test() {
     let b = bug("b1", 7, "crash", 1);
     let o = owner();
     let r = repro();
-    for glob in ["tests/*.rs", "tests/**", "tests/bug_b1.rs", "**"] {
+    for glob in [
+        "tests/*.rs",
+        "tests/**",
+        "tests/bug_b1.rs",
+        "**",
+        "*.rs",
+        "tests/",
+    ] {
         let s = vec!["src/**".to_string(), glob.to_string()];
         let req = Request {
             bug: &b,
@@ -237,6 +244,10 @@ fn glob_star_stays_in_a_part_and_double_star_crosses() {
     assert!(glob_match("src/**", "src/x/a.rs"));
     assert!(glob_match("src/**/a.rs", "src/a.rs"));
     assert!(!glob_match("src/**", "tests/a.rs"));
+    assert!(glob_match("*.rs", "tests/bug_b1.rs"));
+    assert!(glob_match("tests/", "tests/bug_b1.rs"));
+    assert!(glob_match("tests/", "crates/tests/bug_b1.rs"));
+    assert!(!glob_match("src/", "tests/bug_b1.rs"));
 }
 
 #[test]

@@ -1,10 +1,10 @@
 # Code map
 
-Updated: 2026-11-18
+Updated: 2026-11-21
 
 What each module owns, the Musts it carries (`SPEC.md`), what it talks to, and its status. An issue that fills a module moves its status from **planned** to **present** in the same PR (RUBRIC). Words are the glossary's (`GLOSSARY.md`).
 
-Status today: the core and faces have the present modules listed below; no `todo!` stubs remain in `crates/core/src` (checked 2026-11-18). The runner's spec loader, step engine and owner steps' waiting items, the roadmap graph's lint, its drift, the roadmap units' plan and wiring, unit-proof's red check and code map check, the unit frontier, the unit claim, the unit job, the unit land, and the Roadmap lens's dependency-layer columns (sky-roadmap-graph, #413) are present; the other roadmap nodes remain planned. Only `workloop/` is planned.
+Status today: all 1.0 core modules, CLI/MCP faces, and React views are **present** with no `todo!` stubs remaining in `crates/core/src`, `crates/cli/src`, or `app/src-tauri/src` (checked 2026-11-21). The core command registry (`faces.rs`), face parity check (`parity.rs`), stable error codes (`error.rs`), and CI architecture lints (`tools/ci.sh`, `tools/arch_lint.py`) are present. On the `runner` feature, the spec loader, step engine, owner waiting items, roadmap graph/units/drift, unit proof/frontier/claim/job/land, bug intake/fix/sweep, and the Roadmap lens (`sky-roadmap-graph`) are present; `roadmap-run-live` (#407), `bug-loop-live` (#411), and `run-scoring` (#412) remain planned. Only `workloop/` (`local-only`, after 1.0) and those three runner nodes are planned.
 
 reuses:
 - brocrew: the chat parts, the Waiting on you item, the work report entry and the fixed-report shape (Apache-2.0; our fork is archived, read and copied from only)
@@ -21,6 +21,7 @@ modules:
 - bug-fix: crates/core/tests/bug_fix.rs (present)
 - face-parity: crates/core/src/parity.rs (present)
 - faces: crates/core/src/faces.rs (present)
+- roadmap-run-live: crates/core/src/runner/roadmap_run.rs (present)
 - run-scoring: crates/core/src/runner/score.rs (present)
 
 (The sky reads the `reuses:` block, SKY-6. The code map check reads `modules:`, unit-proof (#405). Ideas taken from projects that are not ours, such as wayfinder-maps' look, are credited in the README, not here.)
@@ -30,21 +31,22 @@ modules:
 ```
 Cargo.toml                    one Rust workspace (core, cli, app/src-tauri)
 crates/core/                  switchboard-core: every rule, read and write
-  src/{settings,fleet,fleet_errors,abilities,joblog,rules,platform,clock,error,lock,faces}.rs
-  src/github/                 snapshot, transport, poll, queue, merge
-  src/sky/                    features, layout, drift, chain, codemap, priority, labels, jobs
-  src/{waiting,reports,budget,backup,it}.rs
+  src/{settings,fleet,fleet_errors,abilities,joblog,rules,platform,clock,error,lock,faces,parity,confirm,renumber}.rs
+  src/github/                 snapshot, transport, poll, live, queue, merge, archive
+  src/sky/                    features, layout, drift, chain, codemap, priority, labels, jobs, model
+  src/{waiting,reports,budget,backup,backup_run,it}.rs
   src/bug/                    the bug row and owner table; bug intake (scan, capture, validate, owner, dedupe, record, archive); bug fix (next, job, attempts, lesson-check, signature-check, status-row); bug sweep (sweep)
-  src/frontdoor/              router, labeller, adapters, packet, sticky, thread
-  src/autopilot/              review, driver, instructions, classify, weekly
+  src/frontdoor/              router, labeller, adapters, packet, sticky, thread, answer, ask, chat, implicit_log, rating_log
+  src/autopilot/              review, driver, instructions, classify, weekly, loops, passes, run
   src/runner/                 workflow spec types, loading and validation; the step engine, its run state and the owner steps' waiting items
   src/roadmap/                the roadmap graph (ROADMAP's nodes and unspecified blocks, node spec files), its lint, its drift against the issues, and the units plan (issues and blocked-by links)
   src/unit/                   proof: the red check of a unit's test command; frontier: the unit frontier (open, unclaimed, unblocked units) and the next one to take; claim: the claim file lock, its release and the stale reaper; job: the fleet job and brief of a claimed unit, from its node spec file; land: the code map check, the pull request and the resolution of a unit
   src/workloop/               planned (after 1.0, `local-only`): backlog, run, packet, judge, progress, handoff
   tests/                      one test file per issue; fixtures/ (fleet stub, recorded answers)
-crates/cli/                   the `switchboard` binary: cli.rs (CLI-1..3), mcp.rs (MCP-1..3)
-app/                          the React face (Vite): src/App.tsx, src/views/, src/core.ts, src/brocrew/
+crates/cli/                   the `switchboard` binary: main.rs, cli.rs, cli_frontdoor.rs, mcp.rs, mcp_frontdoor.rs, autopilot.rs
+app/                          the React face (Vite): src/App.tsx, src/views/, src/core.ts, src/brocrew/, src/sky/, src/sky3d/
 app/src-tauri/                the Tauri shell: thin commands into the core
+docs/                         code-map.md, mcp-tools.md (generated by tools/arch_lint.py), work-loop.md, adr/
 tools/                        repo checks and CI gate (`ci.sh`, architecture lints, notice check; `arch_lint.py` allows `Command::new` only in files named in `SPAWN_ALLOWLIST` and in `crates/*/tests/`, whose integration tests spawn the binaries under test)
 .github/workflows/ci.yml      Linux, Mac and Windows
 ```
@@ -110,7 +112,10 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 `crates/core/src/error.rs` · #491 · present. `ErrorCode` has stable snake_case serialized names; `ErrorBody` carries the code, current message, retryability, fix and optional machine reason. Every `CoreError` and fleet failure reason maps to one body. The CLI emits `{"error": ...}` for `--json` failures; MCP tool failures put that body JSON in the text block.
 
 ### core-faces
-`crates/core/src/faces.rs` · #489 · present. The command registry: each command's effects and its MCP tool (name, roles, input schema, description); `mcp.rs` lists and gates tools from it and `write_call` routes the front-door ones by it. The Tauri and CLI faces are not in it yet (#497).
+`crates/core/src/faces.rs` · #489, #497 · present. The command registry (`REGISTRY`): each command's effects and its Tauri, CLI, MCP, and `ui_only` faces, plus MCP roles, input schemas, and descriptions. `mcp.rs` lists and gates tools from it and `write_call` routes the front-door ones by it; `crates/cli/tests/mcp_registry.rs` and `crates/core/tests/faces_registry.rs` verify the registry against `USAGE` and `tools/list`.
+
+### core-parity
+`crates/core/src/parity.rs` · #490 · present. Reads `generate_handler![...]` from `app/src-tauri/src/main.rs`, `call(...)` sites from `app/src/`, and `REGISTRY` rows (`crates/core/src/faces.rs`), verifying that every Tauri command has a CLI or MCP counterpart or an explicit `ui_only` reason. Tested by `crates/core/tests/face_parity.rs` and `crates/cli/tests/face_parity_mcp.rs`.
 
 ### core-lock
 `crates/core/src/lock.rs` · BUD-2, CORE-2 · present. One writer at a time for a file the core reads, changes and writes back, across threads and processes on every OS, no extra crate (#416): `FileLock::take(target, wait)` makes `<target>.switchboard-lock` with `create_new`, waits up to `wait`, takes over a lock older than `STALE_LOCK` (10 min, a dead run's), and removes it on drop. `run_tag` and `temp_path` give each run its own temp file names, as the backup's `run_tag` does (#363). A lock held longer than a moment is kept fresh (`refresh`, `keep_fresh`; `kept_fresh` for one held across calls, by its own thread, #385) so it is not taken for a dead run's; `held(target)` says whether a live run holds it. #431: the lock file names its holder (`token=`, `place=`, `pid=`, `start=`, `holder=` lines; `place` is the boot and pid namespace on Linux, the machine name elsewhere, and a holder from another place is never judged gone; `take_for` says what it is doing, `note` changes that while held); `refresh`, `kept_fresh` and the drop touch or remove it only while it still holds their token; a lock whose holder's process is provably gone (`autopilot::loops::alive`) is taken over at once, one with no process in it (the old one-line format) waits for `STALE_LOCK`; the timeout error names the holder and says to wait or check, and offers removal only when the holder is gone. `write_whole(target, text)` writes a temp file of its own and renames it over the target (snapshots, `autopilot.json`, backup restore marks). `rename_retrying(from, to)` shares its bounded Windows access-refusal retry (100 retries, 10 ms apart); on other platforms it is a plain rename (#447).
@@ -202,7 +207,7 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 
 - BUD-1 rows (`rows_from_json`, `read`): present.
 - BUD-4 Claude pool (`claude_pool`, `session_log_paths`, `parse_utc`): present.
-- BUD-4 is not wired: `claude_pool` and `session_log_paths` are called only from `crates/core/tests/budget_claude.rs`, so no face (the Budget view, the CLI, the MCP tool) shows the Claude estimate (2026-11-18; wiring is #502, the log-folder list is #501).
+- BUD-4 is not wired: `claude_pool` and `session_log_paths` are called only from `crates/core/tests/budget_claude.rs`, so no face (the Budget view, the CLI, the MCP tool) shows the Claude estimate (wiring is #502; `claude_projects_dirs` is present via #501).
 - BUD-3 refresh (`refresh`, `RefreshTimer`, `budget_rows`, `budget_refresh`): present.
 - BUD-1 panel (`BudgetPanel`, `Budget`): present.
 - BUD-2 save (`save_edit`, `parse_reset`, `budget_save_edit`): present.
@@ -290,7 +295,9 @@ The face is plain React and has no OS code. Paths are always built with `Path::j
 - AUTO-2 roadmap pass (`roadmap_pass`, `pm_job` in `passes.rs`; run by `after_poll`): present.
 
 ### runner
-`crates/core/src/runner/mod.rs` · runner-spec (#395) · present. Exposes the runner's spec, engine, state, waiting and score modules.
+`crates/core/src/runner/mod.rs` · runner-spec (#395) · present. Exposes the runner's spec, engine, state, waiting, roadmap_run and score modules.
+
+`crates/core/src/runner/roadmap_run.rs` · roadmap-run-live (#407) · present. Wires `specs/roadmap-run.json` through `Engine`, `OwnerSteps` and `unit::frontier::next` (`drive_unit`, `run_frontier`), driving ready units in dependency order and parking a unit after `MAX_BUILD_ATTEMPTS` (3) build failures with one `WaitingItem` in `RunnerItems`. Tests: `crates/core/tests/roadmap_run_live.rs`.
 
 `crates/core/src/runner/score.rs` · run-scoring (#412) · present. Samples finished runs at each scorer's `sample_rate`, writes `ScoreRow` ratings, batches failed ratings into one proposed spec PR via `SpecProposer`, and raises one `WaitingItem` in `RunnerItems` (`owner-merges-spec-diff`). Tests: `crates/core/tests/run_scoring.rs`.
 

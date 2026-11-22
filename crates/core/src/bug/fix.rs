@@ -180,7 +180,9 @@ pub fn repro_path(owner: &OwnerRow, bug: &Bug) -> String {
     }
 }
 
-/// `*` matches within one path part, `**` across parts.
+/// Match `path` against `pattern` using the harness's `files_allowed` glob rules:
+/// `*` stays within one path part, `**` crosses parts, a trailing `/` matches anything under
+/// that directory, and a pattern with no `/` matches a basename at any depth.
 pub fn glob_match(pattern: &str, path: &str) -> bool {
     fn go(p: &[u8], s: &[u8]) -> bool {
         match p {
@@ -202,6 +204,26 @@ pub fn glob_match(pattern: &str, path: &str) -> bool {
             }
             [c, rest @ ..] => s.first() == Some(c) && go(rest, &s[1..]),
         }
+    }
+    let pattern = pattern.trim_start_matches('/');
+    let path = path.trim_start_matches('/');
+    if let Some(dir) = pattern.strip_suffix('/') {
+        if dir.is_empty() {
+            return true;
+        }
+        let rooted = format!("{dir}/**");
+        if go(rooted.as_bytes(), path.as_bytes()) {
+            return true;
+        }
+        if !dir.contains('/') {
+            let anywhere = format!("**/{dir}/**");
+            return go(anywhere.as_bytes(), path.as_bytes());
+        }
+        return false;
+    }
+    if !pattern.contains('/') {
+        let anywhere = format!("**/{pattern}");
+        return go(anywhere.as_bytes(), path.as_bytes());
     }
     go(pattern.as_bytes(), path.as_bytes())
 }
