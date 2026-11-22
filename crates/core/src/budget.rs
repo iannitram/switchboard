@@ -530,7 +530,7 @@ impl RefreshTimer {
 
 /// BUD-4: Claude's pool: the newest recorded `get_usage` reading with its age, plus an estimate
 /// from my sessions' local usage logs since that reading, kept apart.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct ClaudePool {
     pub reading_pct: Option<f64>,
     pub reading_age_min: Option<i64>,
@@ -538,6 +538,14 @@ pub struct ClaudePool {
     pub estimate_tokens_since: u64,
     /// Assistant messages those tokens came from.
     pub estimate_messages: u64,
+}
+
+/// BUD-1 + BUD-4: the pool rows together with Claude's labelled local estimate when a `claude`
+/// pool row is present.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct BudgetSnapshot {
+    pub rows: Vec<PoolRow>,
+    pub claude: Option<ClaudePool>,
 }
 
 impl ClaudePool {
@@ -805,4 +813,57 @@ pub fn claude_projects_dirs(
         .map(|dir| dir.join("projects"))
         .filter(|projects| projects.is_dir())
         .collect()
+}
+
+/// `claude_projects_dirs` read from the process environment (`CLAUDE_CONFIG_DIR`,
+/// `XDG_CONFIG_HOME`, `HOME` / `USERPROFILE`).
+pub fn claude_projects_dirs_env() -> Vec<std::path::PathBuf> {
+    let config_dir = std::env::var("CLAUDE_CONFIG_DIR").ok();
+    let xdg = std::env::var_os("XDG_CONFIG_HOME");
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(std::path::PathBuf::from);
+    claude_projects_dirs(config_dir.as_deref(), xdg.as_deref(), home.as_deref())
+}
+
+/// BUD-4: find the `claude` row in `rows`, compute the reading timestamp from `now` and
+/// `reading_age_min`, and return `ClaudePool` from `projects_dirs`. Returns `Ok(None)` when
+/// `rows` has no `claude` pool.
+pub fn claude_for_rows(
+    rows: &[PoolRow],
+    now: UnixSeconds,
+    projects_dirs: &[std::path::PathBuf],
+) -> Result<Option<ClaudePool>, CoreError> {
+    let Some(claude_row) = rows.iter().find(|r| r.pool == "claude") else {
+        return Ok(None);
+    };
+    let since = match claude_row.reading_age_min {
+        Some(age_min) => now.saturating_sub(age_min.max(0).saturating_mul(60)),
+        None => now,
+    };
+    let mut logs = Vec::new();
+    for dir in projects_dirs {
+        logs.extend(session_log_paths(dir)?);
+    }
+    Ok(Some(claude_pool(claude_row, &logs, since)?))
+}
+
+/// BUD-1 + BUD-4: read `fleet budget --json` and pair it with Claude's local estimate.
+pub fn read_with_claude(
+    fleet: &FleetBridge,
+    clock: &dyn Clock,
+) -> Result<BudgetSnapshot, CoreError> {
+    let rows = read(fleet)?;
+    let claude = claude_for_rows(&rows, clock.now(), &claude_projects_dirs_env())?;
+    Ok(BudgetSnapshot { rows, claude })
+}
+
+/// BUD-3 + BUD-4: refresh every pool with a reader and pair it with Claude's local estimate.
+pub fn refresh_with_claude(
+    fleet: &FleetBridge,
+    clock: &dyn Clock,
+) -> Result<BudgetSnapshot, CoreError> {
+    let rows = refresh(fleet)?;
+    let claude = claude_for_rows(&rows, clock.now(), &claude_projects_dirs_env())?;
+    Ok(BudgetSnapshot { rows, claude })
 }

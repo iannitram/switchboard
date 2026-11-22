@@ -5,7 +5,7 @@ use serde::Serialize;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use switchboard_core::budget::{self, PoolEdit, PoolRow};
+use switchboard_core::budget::{self, BudgetSnapshot, PoolEdit, PoolRow};
 use switchboard_core::clock::{Clock, SystemClock, UnixSeconds};
 use switchboard_core::fleet::{FleetBridge, FleetError, FleetErrorLog};
 use switchboard_core::frontdoor::implicit_log::log_implicit;
@@ -392,22 +392,23 @@ pub fn chat_rate(
         .map_err(|e| FaceError::new("chat_rate", &e))
 }
 
-/// BUD-1: the budget rows as fleet last recorded them (no refresh).
+/// BUD-1 + BUD-4: the budget rows as fleet last recorded them (no refresh) plus Claude's
+/// labelled local estimate.
 #[tauri::command]
-pub fn budget_rows(state: tauri::State<'_, AppState>) -> Result<Vec<PoolRow>, FaceError> {
+pub fn budget_rows(state: tauri::State<'_, AppState>) -> Result<BudgetSnapshot, FaceError> {
     bridge(&state.settings_path)
-        .and_then(|fleet| budget::read(&fleet))
+        .and_then(|fleet| budget::read_with_claude(&fleet, &SystemClock))
         .map_err(|e| {
             record_fleet_error(&state, &e);
             FaceError::new("budget_rows", &e)
         })
 }
 
-/// BUD-3: refresh every pool with a reader, then return the rows.
+/// BUD-3 + BUD-4: refresh every pool with a reader, then return the rows and Claude's estimate.
 #[tauri::command]
-pub fn budget_refresh(state: tauri::State<'_, AppState>) -> Result<Vec<PoolRow>, FaceError> {
+pub fn budget_refresh(state: tauri::State<'_, AppState>) -> Result<BudgetSnapshot, FaceError> {
     bridge(&state.settings_path)
-        .and_then(|fleet| budget::refresh(&fleet))
+        .and_then(|fleet| budget::refresh_with_claude(&fleet, &SystemClock))
         .map_err(|e| {
             record_fleet_error(&state, &e);
             FaceError::new("budget_refresh", &e)
