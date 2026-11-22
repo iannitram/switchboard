@@ -101,6 +101,7 @@ fn switchboard(argv: &[&str], pipeline: Option<&std::ffi::OsStr>) -> Output {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_switchboard"));
     cmd.args(argv)
         .env("SWITCHBOARD_CONFIG", empty_config())
+        .env("CLAUDE_CONFIG_DIR", empty_config())
         .env_remove("FLEET_ROOT")
         .env_remove("FLEET_STUB_EXIT")
         .env_remove("FLEET_STUB_STDERR")
@@ -126,9 +127,12 @@ fn budget_prints_one_line_per_pool_in_pool_order() {
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
     assert_eq!(
         stdout(&out),
-        "chatgpt: 98.6% vs pace 81.4%, +17.2 pts, brake, 138 min old, stale\n\
-         claude: 2% vs pace 3%, -1.0 pts, on-pace, 65 min old\n\
-         claudeapi: 71.78% vs pace 74.04%, -2.3 pts, push, 138 min old\n"
+        concat!(
+            "chatgpt: 98.6% vs pace 81.4%, +17.2 pts, brake, 138 min old, stale\n",
+            "claude: 2% vs pace 3%, -1.0 pts, on-pace, 65 min old\n",
+            "  estimate: 0 tokens in 0 messages since the reading\n",
+            "claudeapi: 71.78% vs pace 74.04%, -2.3 pts, push, 138 min old\n",
+        )
     );
 }
 
@@ -137,7 +141,7 @@ fn budget_json_prints_the_same_rows_as_a_json_array() {
     let out = switchboard(&["budget", "--json"], Some(stub_root().as_os_str()));
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
     let printed: Value = serde_json::from_str(&stdout(&out)).expect("valid JSON");
-    let array = printed.as_array().expect("a JSON array");
+    let array = printed["rows"].as_array().expect("rows JSON array");
     let pools: Vec<&str> = array.iter().map(|r| r["pool"].as_str().unwrap()).collect();
     assert_eq!(pools, ["chatgpt", "claude", "claudeapi"]);
 
@@ -146,7 +150,14 @@ fn budget_json_prints_the_same_rows_as_a_json_array() {
     )
     .unwrap();
     let expected = serde_json::to_value(rows_from_json(&fixture).unwrap()).unwrap();
-    assert_eq!(printed, expected);
+    assert_eq!(printed["rows"], expected);
+    assert_eq!(printed["claude"]["reading_pct"], serde_json::json!(2.0));
+    assert_eq!(printed["claude"]["reading_age_min"], serde_json::json!(65));
+    assert_eq!(
+        printed["claude"]["estimate_tokens_since"],
+        serde_json::json!(0)
+    );
+    assert_eq!(printed["claude"]["estimate_messages"], serde_json::json!(0));
 }
 
 #[test]

@@ -9,6 +9,22 @@ export type PoolRow = {
   verdict: string; reading_age_min: number | null; stale: boolean; why: string;
 };
 
+// BUD-4 (#502): Claude's reading and its labelled estimate from local session logs.
+export type ClaudePool = {
+  reading_pct: number | null;
+  reading_age_min: number | null;
+  estimate_tokens_since: number;
+  estimate_messages: number;
+};
+
+export type BudgetData = PoolRow[] | { rows: PoolRow[]; claude?: ClaudePool | null };
+
+function unwrapBudget(data: BudgetData): { rows: PoolRow[]; claude: ClaudePool | null } {
+  return Array.isArray(data)
+    ? { rows: data, claude: null }
+    : { rows: data.rows, claude: data.claude ?? null };
+}
+
 // BUD-2 (#26): the JSON of core's PoolEdit (#25). A key left out is None there.
 export type PoolEdit = { pool: string; plan?: string; cap?: number; reset?: string; cost_usd?: number };
 
@@ -60,7 +76,9 @@ export function PoolEditor({ pool, onSave, onCancel }: {
   );
 }
 
-function PoolRowView({ row, onEdit, editor }: { row: PoolRow; onEdit?: () => void; editor?: ReactNode }) {
+function PoolRowView({ row, claude, onEdit, editor }: {
+  row: PoolRow; claude?: ClaudePool | null; onEdit?: () => void; editor?: ReactNode;
+}) {
   return (
     <li>
       <details aria-label={row.pool} className={row.stale ? "stale" : undefined} open={row.stale}
@@ -84,13 +102,20 @@ function PoolRowView({ row, onEdit, editor }: { row: PoolRow; onEdit?: () => voi
         </summary>
         <p data-part="why">{row.why}</p>
       </details>
+      {row.pool === "claude" && claude && (
+        <p data-part="estimate">
+          {`estimate: ${claude.estimate_tokens_since} tokens in ${claude.estimate_messages} messages since the reading`}
+        </p>
+      )}
       {onEdit && <button type="button" onClick={onEdit}>{"Edit " + row.pool}</button>}
       {editor}
     </li>
   );
 }
 
-export function BudgetPanel({ rows, onSave }: { rows: PoolRow[]; onSave?: (edit: PoolEdit) => void }) {
+export function BudgetPanel({ rows, claude, onSave }: {
+  rows: PoolRow[]; claude?: ClaudePool | null; onSave?: (edit: PoolEdit) => void;
+}) {
   // One editor open at a time: the pool whose row holds it.
   const [editing, setEditing] = useState<string | null>(null);
   if (rows.length === 0) return <Empty view="Budget" />;
@@ -98,7 +123,7 @@ export function BudgetPanel({ rows, onSave }: { rows: PoolRow[]; onSave?: (edit:
     <section aria-label="Budget">
       <ul>
         {rows.map((row) => (
-          <PoolRowView key={row.pool} row={row}
+          <PoolRowView key={row.pool} row={row} claude={row.pool === "claude" ? claude : null}
             onEdit={onSave ? () => setEditing(row.pool) : undefined}
             editor={onSave && editing === row.pool ? (
               <PoolEditor pool={row.pool}
@@ -115,20 +140,28 @@ export function BudgetPanel({ rows, onSave }: { rows: PoolRow[]; onSave?: (edit:
 // `budget_save_edit`. A core error is shown in place; with rows on the screen they stay.
 export function Budget() {
   const [rows, setRows] = useState<PoolRow[]>([]);
+  const [claude, setClaude] = useState<ClaudePool | null>(null);
   const [error, setError] = useState<CoreError | null>(null);
 
   useEffect(() => {
     let alive = true;
     // Without the Tauri runtime (plain browser, other views' tests) listen rejects; the view keeps its rows.
-    const stop = listen<PoolRow[]>("budget-rows", (e) => {
+    const stop = listen<BudgetData>("budget-rows", (e) => {
       if (!alive) return;
-      setRows(e.payload);
+      const next = unwrapBudget(e.payload);
+      setRows(next.rows);
+      setClaude(next.claude);
       setError(null);
     }).catch(() => () => {});
-    call<PoolRow[]>("budget_rows").then((r) => {
+    call<BudgetData>("budget_rows").then((r) => {
       if (!alive) return;
       if ("error" in r) setError(r.error);
-      else { setRows(r.ok); setError(null); }
+      else {
+        const next = unwrapBudget(r.ok);
+        setRows(next.rows);
+        setClaude(next.claude);
+        setError(null);
+      }
     });
     return () => {
       alive = false;
@@ -137,9 +170,14 @@ export function Budget() {
   }, []);
 
   function save(edit: PoolEdit) {
-    call<PoolRow[]>("budget_save_edit", { edit }).then((r) => {
+    call<BudgetData>("budget_save_edit", { edit }).then((r) => {
       if ("error" in r) setError(r.error);
-      else { setRows(r.ok); setError(null); }
+      else {
+        const next = unwrapBudget(r.ok);
+        setRows(next.rows);
+        if (next.claude !== null) setClaude(next.claude);
+        setError(null);
+      }
     });
   }
 
@@ -151,7 +189,7 @@ export function Budget() {
           {error.lines.map((line, i) => <p key={i}>{line}</p>)}
         </div>
       )}
-      {(error == null || rows.length > 0) && <BudgetPanel rows={rows} onSave={save} />}
+      {(error == null || rows.length > 0) && <BudgetPanel rows={rows} claude={claude} onSave={save} />}
     </>
   );
 }

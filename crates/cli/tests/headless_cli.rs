@@ -110,6 +110,7 @@ fn run_in(argv: &[&str], dirs: &Dirs, cwd: &Path, stdout: Stdio) -> Output {
         .env("SWITCHBOARD_PIPELINE", &dirs.root)
         .env("SWITCHBOARD_DATA", &dirs.data)
         .env("SWITCHBOARD_CONFIG", &dirs.config)
+        .env("CLAUDE_CONFIG_DIR", &dirs.config)
         .env("SWITCHBOARD_STATE", dirs.data.join("no-state"))
         .env("SWITCHBOARD_DEV_ROOT", dirs.data.join("no-dev-root"))
         .env_remove("FLEET_ROOT")
@@ -418,9 +419,8 @@ fn budget_refresh_prints_the_rows_read_again() {
     assert_eq!(stdout(&fresh), stdout(&plain));
     let json = run(&["--json", "budget", "--refresh"], &d);
     assert_eq!(json.status.code(), Some(0), "{}", stderr(&json));
-    assert!(serde_json::from_str::<Value>(&stdout(&json))
-        .unwrap()
-        .is_array());
+    let parsed = serde_json::from_str::<Value>(&stdout(&json)).unwrap();
+    assert!(parsed["rows"].is_array());
 }
 
 #[test]
