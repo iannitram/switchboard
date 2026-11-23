@@ -398,17 +398,4 @@ Every finding and feature idea in the 2026-11-07 adversarial review (pipeline re
 
 ## Prior art
 
-**Status: awaiting my approval (R41).** Proposed list of projects doing the same thing, with their licenses. Their code comes in only when the license allows it, with credit; otherwise only their ideas.
-
-peer: rengwu/wayfinder-maps | MIT | the roadmap drawn as a navigable sky; the look behind Constellation
-peer: brocrew/brocrew | Apache-2.0 | the work tree, "Waiting on you" and the fixed report; the chat parts lifted (Electron + Vue, ported to React)
-peer: mvschwarz/openrig | Apache-2.0 | one file that maps the team of agents and their roles across Claude Code and Codex
-peer: ocuclaw/obsidian-wayfinder | MIT | wayfinder maps from GitHub issues drawn as dependency layers, with the takeable frontier highlighted
-peer: musistudio/claude-code-router | MIT | routing a coding agent's requests across models and services by rule
-peer: lm-sys/RouteLLM | Apache-2.0 | learned routers that trade cost against quality; inactive since 2024, ideas only
-peer: BerriAI/litellm | MIT (outside enterprise/) | one gateway to 100+ model APIs with cost tracking, budgets and fallbacks
-peer: BloopAI/vibe-kanban | Apache-2.0 | a board of coding-agent work across agents, each in its own worktree
-peer: ccusage/ccusage | MIT | reading Claude Code's local usage logs, the estimate behind BUD-4
-peer: josegonzalez/python-github-backup | MIT | backing up a repo's issues, PRs, comments, labels, milestones, releases and wiki
-peer: winfunc/opcode | AGPL-3.0 | a desktop GUI for Claude Code sessions and agents; AGPL, so ideas only
-peer: smtg-ai/claude-squad | AGPL-3.0 | managing several terminal agents (Claude Code, Codex, opencode) at once; AGPL, so ideas only
+The upstream and the peer list are in [`PEERS.md`](PEERS.md) at the repo root.
