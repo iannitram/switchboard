@@ -10,3 +10,5 @@ Everything you need to work here is in this repo. The full pipeline and rules li
 6. **A failed job** gets a comment on the issue saying what happened, and the issue moves up one size (Easy -> Medium -> Hard).
 7. **Use the project's words** from `GLOSSARY.md` and the decisions in `docs/adr/`.
 8. **No private details** in code, commits or PR text: no names, e-mail addresses, home paths or machine names. Commit as the no-reply identity.
+
+**Upstream and peers:** see `PEERS.md` at the repo root. When I say "upstream", I mean the repo in its Upstream section; reuse a peer's code only as that file allows.
