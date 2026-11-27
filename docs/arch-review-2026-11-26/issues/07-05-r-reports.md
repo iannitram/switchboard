@@ -1,0 +1,33 @@
+**What:** Give Reports one read model in core that returns the answer plus warnings, used by the Tauri command, the CLI and MCP (owner ruling, 2026-11-26). The visible change: the CLI and MCP also say which chat threads were left out, as the window already does.
+
+Line numbers below are as the files read at the time of writing; earlier issues move lines in `crates/cli/src/cli.rs` and `crates/cli/src/main.rs`. Find each item by name.
+
+Today:
+- Window: the `reports` command (`app/src-tauri/src/commands.rs` 480-502) calls `reports::thread_rows_checked` (`crates/core/src/reports.rs`, line 496) and `reports::load` (line 542) and returns `ReportsAnswer` (reports plus `ThreadWarning` values; reports.rs 480-483). `app/src/views/Reports.tsx` shows each warning at the top of the view (lines 124-143).
+- CLI: `load_reports` (`crates/cli/src/cli.rs` 2069-2077) calls `reports::thread_rows` (reports.rs 488-490), which drops the thread warnings. A chat thread that could not be read is left out of `switchboard reports` and nothing says so.
+- MCP: `Core::call` (`crates/cli/src/main.rs` 99-107) calls `cli::reports_answer` (cli.rs 2400-2405) and truncates to `limit`; same silence.
+
+Build this:
+1. `crates/core/src/read/reports.rs` (declare it in `crates/core/src/read/mod.rs`):
+   - `pub struct ReportsRead { pub reports: Vec<Report>, pub threads: Vec<ThreadWarning> }` with `pub fn warnings(&self) -> Vec<Warning>` (`Warning` from {{#r-waiting}}). Each `ThreadWarning` (reports.rs 472-475) becomes a `Warning`: `file` is `chat thread <id>`, or `chat thread store` when the id is none; `reason` is its reason.
+   - `pub fn load(fleet: &FleetBridge, state: Option<&OsStr>, data: Option<&Path>, filter: Option<&Filter>) -> Result<ReportsRead, CoreError>`. It does what the Tauri command does today: `thread_rows_checked(data)` when there is a data folder (no folder: no threads, no warnings), then `reports::load`.
+   - Finding the pipeline checkout and reading `FLEET_STATE_DIR` (`reports::FLEET_STATE_DIR_ENV`) stay in each face and are passed in.
+2. CLI: `load_reports` returns `Result<ReportsRead, CoreError>` from the read model, and `reports_answer` returns the read with it. The CLI keeps `reports` (2043-2065) with its `die_stderr` failure, `pipeline_or_fail`, `reports_text` (2083-2088), `report_text` (2091-2137), `duration` (2140-2147) and the `--json` shape (the bare list of reports). It prints one stderr line per warning: `switchboard reports: <file>: <reason>; left out`, through `terminal_safe`. The in-file test module `load_reports_tests` (2598-2631, not a locked test) is edited only where it reads the result: `found.reports` in place of `found`.
+3. MCP: the first content item is unchanged (what `reports --json` prints, truncated to `limit`); warnings ride in the second content item added by {{#r-waiting}}.
+4. Window: the `reports` command calls `switchboard_core::read::reports::load` and still returns `ReportsAnswer { reports, warnings }` with the read's `threads` as the warnings, so the view's wording (`Chat thread <id> was left out: <reason>`) and its tests do not change. The locked `crates/core/tests/reports_load.rs` (`the_reports_command_is_a_thin_call_into_load`, line 469) reads the command's source: its body must still contain `filter: Option<Filter>`, `reports::load(`, `FLEET_STATE_DIR_ENV`, `FaceError::new("reports"` and `record_fleet_error(`. The call `switchboard_core::read::reports::load(` satisfies the second. `app/src/views/Reports.tsx` is not edited: it already shows its warnings where the other views now do.
+5. Code map: one entry line for `crates/core/src/read/reports.rs` under `### reports`, in the map's entry form: `` `<path>` · present · <one sentence> ``, under 400 bytes and with no `#<number>` (the structural code map tests, with the guard {{#m-guard}} turned on, fail a line that breaks this and fail a source file that has no line). Correct any line of `### reports`, `### cli` and `### shell` that this change makes untrue, within the same limits. The new file starts with a `//!` header that says what it is for.
+
+**Where:** `crates/core/src/read/reports.rs` (new), `crates/core/src/read/mod.rs`, `crates/cli/src/cli.rs`, `crates/cli/src/main.rs`, `app/src-tauri/src/commands.rs`, new test `crates/core/tests/read_reports.rs`, new tests in `crates/cli/tests/waiting_reports_cli.rs` and `crates/cli/tests/mcp_warnings.rs`, `docs/code-map.md`. Code map sections: `### reports`, `### cli`, `### mcp`, `### shell`.
+
+**Size:** Medium (about 220 changed lines in 9 files, tests included; Rust only). Over the 6-file aim because one read model has three faces and each needs a test; it is reviewed as an oversize change.
+
+**Blocked by:** {{#r-star}} (it edits `crates/core/src/read/mod.rs`, `cli.rs` and `Core::call` just before this one; no code is shared with it), {{#r-waiting}} (the warning type and the MCP warnings item). Owner ruling (2026-11-26): the seven read-model issues land one at a time in the order waiting, sky, constellation, star, reports, budget, errors.
+
+**Done when:**
+1. `crates/cli/src/cli.rs` no longer calls `reports::thread_rows`; the Tauri `reports` command, `load_reports` and `reports_answer` all go through `switchboard_core::read::reports::load`.
+2. `crates/core/tests/read_reports.rs` shows: a thread store with one damaged thread gives the other reports plus one warning whose `file` is `chat thread <id>` for that thread; no data folder gives the reports and no warnings; the filter narrows the reports.
+3. A new test in `crates/cli/tests/waiting_reports_cli.rs` shows `switchboard reports` with a damaged thread exits 0, lists the other reports, and prints `switchboard reports: chat thread <id>: <reason>; left out` on stderr. A new test in `crates/cli/tests/mcp_warnings.rs` shows the MCP `reports` reply names the thread in a second content item.
+4. These pass unedited: the five `reports_` tests in `crates/cli/tests/waiting_reports_cli.rs`; `crates/cli/tests/cli_edges.rs` (`budget_and_reports_read_pipeline_repo_from_settings`); `crates/core/tests/reports_thread_warning.rs`; `crates/core/tests/reports_load.rs`; `app/src-tauri/src/reports_threads_tests.rs`; `app/src/views/Reports.test.tsx`, `app/src/views/ReportsFilter.test.tsx` and `app/src/views/ReportsWarning.test.tsx`.
+5. `load_reports_tests` in cli.rs passes, edited only as step 2 says.
+6. `docs/code-map.md` has the entry line for `crates/core/src/read/reports.rs` in the form step 5 gives, and `crates/core/tests/code_map_structure.rs` passes.
+7. `tools/ci.sh rust`, `tools/ci.sh app` and `tools/ci.sh face` pass; their output is in the PR body.

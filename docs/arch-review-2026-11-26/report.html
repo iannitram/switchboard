@@ -1,0 +1,504 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Architecture review for switchboard</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({ startOnLoad: true, theme: "neutral", securityLevel: "loose" });
+</script>
+<style>
+  .seam { border-top: 2px dashed #64748b; }
+  .deep { background: linear-gradient(135deg, #0f172a, #1e293b); color: #f8fafc; }
+  .lbl { font-size: .68rem; text-transform: uppercase; letter-spacing: .08em; }
+  .box { border: 1px solid #94a3b8; border-radius: .375rem; padding: .3rem .5rem; background: #fff; }
+  .leak { border-color: #dc2626; color: #b91c1c; }
+  .ghost { opacity: .45; }
+  .pane { min-height: 300px; }
+</style>
+</head>
+<body class="bg-stone-50 text-slate-900 font-sans">
+<main class="max-w-5xl mx-auto px-6 py-12 space-y-12">
+
+<header class="space-y-3">
+  <h1 class="font-serif text-4xl">Architecture review: switchboard</h1>
+  <p class="text-sm text-slate-600">2026-11-26 · main at 19e0c65 · 10 area readers, each checked by a skeptic; 81 candidates folded into 14 cards. Line numbers are from that commit.</p>
+  <div class="flex flex-wrap gap-4 text-xs text-slate-700">
+    <span><span class="box">box</span> module</span>
+    <span><span class="inline-block w-8 seam align-middle"></span> seam</span>
+    <span><span class="box leak">red</span> leak or duplicate</span>
+    <span><span class="box deep">dark</span> deep module</span>
+    <span><span class="rounded bg-emerald-100 text-emerald-800 px-2 py-0.5">Strong</span> <span class="rounded bg-amber-100 text-amber-800 px-2 py-0.5">Worth exploring</span> <span class="rounded bg-slate-200 text-slate-700 px-2 py-0.5">Speculative</span></span>
+  </div>
+  <nav class="text-sm grid sm:grid-cols-2 gap-x-8 gap-y-1 pt-2">
+    <a class="underline" href="#c1">1. Code map: a map again, not a changelog</a>
+    <a class="underline" href="#c2">2. SPEC and ROADMAP: revise the appended text</a>
+    <a class="underline" href="#c3">3. One state-file module</a>
+    <a class="underline" href="#c4">4. Guarded writes and read models into core</a>
+    <a class="underline" href="#c5">5. One test-support module</a>
+    <a class="underline" href="#c6">6. Budget read and poll wake: stop re-reading</a>
+    <a class="underline" href="#c7">7. Runner: one spec driver, honest status</a>
+    <a class="underline" href="#c8">8. Front door: one OpenAI-style adapter</a>
+    <a class="underline" href="#c9">9. Clock and machine name: one each</a>
+    <a class="underline" href="#c10">10. Dead code sweep</a>
+    <a class="underline" href="#c11">11. Registry drives dispatch</a>
+    <a class="underline" href="#c12">12. Build and CI time</a>
+    <a class="underline" href="#c13">13. backup.rs: three modules in one file</a>
+    <a class="underline" href="#c14">14. Sky front end</a>
+  </nav>
+</header>
+
+<section id="candidates" class="space-y-10">
+
+<!-- 1 -->
+<article id="c1" class="rounded-xl border border-slate-200 bg-white p-6 space-y-4">
+  <h2 class="font-serif text-2xl">1. Code map: a map again, not a changelog</h2>
+  <div class="flex gap-2 text-xs"><span class="rounded bg-emerald-100 text-emerald-800 px-2 py-0.5">Strong</span><span class="rounded bg-slate-100 px-2 py-0.5">docs + tests</span></div>
+  <p class="font-mono text-sm">docs/code-map.md · crates/core/src/sky/codemap.rs · 46 test files that read the map</p>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="pane rounded-lg border border-slate-200 p-4 space-y-2">
+      <div class="lbl text-slate-500">Before · 70.9 KB, edited in 72 of the last 300 commits</div>
+      <div class="flex items-end gap-2 h-40">
+        <div class="w-1/2 bg-red-200 border border-red-400 h-[47%] flex items-center justify-center text-xs text-center">31 lines over 600 B<br>= 33 KB of fix history</div>
+        <div class="w-1/2 bg-slate-200 border border-slate-400 h-[53%] flex items-center justify-center text-xs text-center">everything else<br>38 KB</div>
+      </div>
+      <div class="box leak text-xs">unit/claim.rs entry: one 2,913-byte line listing its test cases</div>
+      <div class="box leak text-xs">32 Rust tests named the_code_map_* assert literal sentences, so a line can only grow</div>
+      <div class="box leak text-xs">line 7 says three runner nodes "remain planned"; lines 299-303 say "present"</div>
+    </div>
+    <div class="pane rounded-lg border border-slate-200 p-4 space-y-2">
+      <div class="lbl text-slate-500">After · about 35 KB</div>
+      <div class="flex items-end gap-2 h-40">
+        <div class="w-1/2 deep rounded h-[50%] flex items-center justify-center text-xs text-center">one line per file, cap ~400 B:<br>owns · Must ids · interface · talks to</div>
+        <div class="w-1/2 bg-emerald-100 border border-emerald-400 h-[18%] flex items-center justify-center text-xs text-center">modules: block = the status record</div>
+      </div>
+      <div class="box text-xs">tests call <span class="font-mono">codemap::modules</span>: file exists, is listed, status matches</div>
+      <div class="box text-xs">behaviour detail lives in the file's own doc comment; history in CHANGELOG</div>
+      <div class="box text-xs">React face mapped: today 6 of about 60 files are named</div>
+    </div>
+  </div>
+  <p><b>Problem.</b> Entries narrate the implementation and its fix history, and tests pin the wording, which forces append over revise.</p>
+  <p><b>Solution.</b> One short line per source file, the <span class="font-mono">modules:</span> block as the only status record, and structural tests in place of prose-pinning ones.</p>
+  <ul class="list-disc pl-5 text-sm"><li>Locality: status in one block</li><li>Unit job briefs shrink</li><li>Revise becomes possible</li><li>About 250 test lines go</li></ul>
+  <div class="rounded bg-amber-50 border border-amber-200 p-3 text-sm">Keep: the machine-read parts (<span class="font-mono">reuses:</span>, <span class="font-mono">modules:</span>, backticked path at line start for unit/job.rs, the <span class="font-mono">Updated:</span> date, per-module status that <span class="font-mono">check_modules</span> reads). Some pinned tests are locked tests and need an owner ruling to change.</div>
+</article>
+
+<!-- 2 -->
+<article id="c2" class="rounded-xl border border-slate-200 bg-white p-6 space-y-4">
+  <h2 class="font-serif text-2xl">2. SPEC and ROADMAP: revise the appended text</h2>
+  <div class="flex gap-2 text-xs"><span class="rounded bg-emerald-100 text-emerald-800 px-2 py-0.5">Strong</span><span class="rounded bg-slate-100 px-2 py-0.5">docs only</span></div>
+  <p class="font-mono text-sm">SPEC.md · ROADMAP.md · CHANGELOG.md · PEERS.md · README.md · specs/README.md</p>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="pane rounded-lg border border-slate-200 p-4">
+      <div class="lbl text-slate-500 mb-2">Before · one fact, several owners</div>
+      <table class="text-xs w-full"><tbody>
+        <tr class="border-b"><td class="py-1 pr-2">Open issues</td><td class="text-red-700">ROADMAP:52-62 ledger; 6 listed as open were merged the same day</td></tr>
+        <tr class="border-b"><td class="py-1 pr-2">Bug rulings #426-#433</td><td class="text-red-700">appended into Must cells (FD-3 is ~2,700 chars) and in CHANGELOG</td></tr>
+        <tr class="border-b"><td class="py-1 pr-2">Prior art, credits</td><td class="text-red-700">5 places, 3 stale since PEERS.md</td></tr>
+        <tr class="border-b"><td class="py-1 pr-2">Platform plan</td><td class="text-red-700">SPEC, ROADMAP, code map; central claim no longer true</td></tr>
+        <tr class="border-b"><td class="py-1 pr-2">Build order, after-1.0 list</td><td class="text-red-700">3 times</td></tr>
+        <tr><td class="py-1 pr-2">Review dispositions</td><td class="text-red-700">55 lines of history in SPEC</td></tr>
+      </tbody></table>
+      <div class="box leak text-xs mt-3">CHANGELOG's newest entry is 2026-11-18; the history went into ROADMAP instead</div>
+    </div>
+    <div class="pane rounded-lg border border-slate-200 p-4">
+      <div class="lbl text-slate-500 mb-2">After · one owner each</div>
+      <table class="text-xs w-full"><tbody>
+        <tr class="border-b"><td class="py-1 pr-2">Open issues</td><td>GitHub; ROADMAP keeps one sentence of stage</td></tr>
+        <tr class="border-b"><td class="py-1 pr-2">Rulings</td><td>Must rewritten as the current rule; FD-3 split into 4 Musts; history in CHANGELOG</td></tr>
+        <tr class="border-b"><td class="py-1 pr-2">Prior art, credits</td><td>PEERS.md and NOTICE</td></tr>
+        <tr class="border-b"><td class="py-1 pr-2">Platform plan</td><td>SPEC; code map keeps its seams table</td></tr>
+        <tr class="border-b"><td class="py-1 pr-2">Build order, after-1.0</td><td>ROADMAP features: block</td></tr>
+        <tr><td class="py-1 pr-2">Review dispositions</td><td>cut to what still binds; rest to CHANGELOG</td></tr>
+      </tbody></table>
+      <div class="box text-xs mt-3">GLOSSARY gains the runner's words (node, unit, spec, run) and stops banning one SPEC uses</div>
+    </div>
+  </div>
+  <p><b>Problem.</b> Prose around the machine-read blocks restates facts in two to four files and has grown by dated appends.</p>
+  <p><b>Solution.</b> Name one owning doc per fact, rewrite each grown Must as its current rule, move history to CHANGELOG.</p>
+  <ul class="list-disc pl-5 text-sm"><li>Two files stop going stale per merge</li><li>Musts readable again</li><li>CHANGELOG is the single history</li></ul>
+  <div class="rounded bg-amber-50 border border-amber-200 p-3 text-sm">Must ids are cited from code and the code map, so ids stay; a split FD-3 needs new ids, not renumbering. A ROADMAP edit starts one Project Manager pass (AUTO-2) and must re-date <span class="font-mono">Updated:</span>.</div>
+</article>
+
+<!-- 3 -->
+<article id="c3" class="rounded-xl border border-slate-200 bg-white p-6 space-y-4">
+  <h2 class="font-serif text-2xl">3. One state-file module</h2>
+  <div class="flex gap-2 text-xs"><span class="rounded bg-emerald-100 text-emerald-800 px-2 py-0.5">Strong</span><span class="rounded bg-slate-100 px-2 py-0.5">in-process</span></div>
+  <p class="font-mono text-sm">crates/core/src/lock.rs · settings.rs · confirm.rs · waiting.rs · runner/waiting.rs · runner/state.rs · backup.rs · github/snapshot.rs · autopilot/run.rs · bug/intake.rs</p>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="pane rounded-lg border border-slate-200 p-4">
+      <div class="lbl text-slate-500 mb-2">Before · 10 typed stores, each assembles the parts</div>
+      <div class="grid grid-cols-5 gap-1 text-[10px] text-center">
+        <div class="box leak">LocalItems</div><div class="box leak">RunnerItems</div><div class="box leak">HeldRecords</div><div class="box leak">Marks</div><div class="box leak">manifest</div>
+        <div class="box leak">settings</div><div class="box leak">StateStore</div><div class="box leak">Snapshot</div><div class="box leak">Autopilot</div><div class="box leak">bug ledger</div>
+      </div>
+      <div class="text-center text-xs text-slate-500 my-2">each: mkdir · lock · read-or-default · change · pretty JSON · write</div>
+      <div class="seam my-2"></div>
+      <div class="flex gap-2 text-xs"><div class="box flex-1 text-center">FileLock</div><div class="box flex-1 text-center">write_whole</div></div>
+      <div class="box leak text-xs mt-3">same 8-line read block at settings.rs:49, confirm.rs:481, backup.rs:964 and :1522, runner/state.rs:101 …</div>
+      <div class="box leak text-xs mt-1">trailing newline written by 4 stores, not by 3 others</div>
+    </div>
+    <div class="pane rounded-lg border border-slate-200 p-4">
+      <div class="lbl text-slate-500 mb-2">After · stores hold only their own rules</div>
+      <div class="grid grid-cols-5 gap-1 text-[10px] text-center">
+        <div class="box">LocalItems</div><div class="box">RunnerItems</div><div class="box">HeldRecords</div><div class="box">Marks</div><div class="box">manifest</div>
+        <div class="box">settings</div><div class="box">StateStore</div><div class="box">Snapshot</div><div class="box">Autopilot</div><div class="box">bug ledger</div>
+      </div>
+      <div class="seam my-3"></div>
+      <div class="deep rounded p-4 text-center text-sm">state file<br><span class="text-xs opacity-80">load (missing = default, error names the path) · save whole · change under lock, one "did it change" rule · line-file variant for JSONL</span></div>
+      <div class="flex gap-2 text-xs mt-2 ghost"><div class="box flex-1 text-center">FileLock</div><div class="box flex-1 text-center">write_whole</div></div>
+    </div>
+  </div>
+  <p><b>Problem.</b> lock.rs offers parts; every store re-assembles them and the rules drift between copies.</p>
+  <p><b>Solution.</b> One module beside lock.rs owns a typed JSON file at a path; stores call it.</p>
+  <ul class="list-disc pl-5 text-sm"><li>Locality: SPEC's #431 rule in one module</li><li>Leverage: 10 stores, one interface</li><li>About 250-350 lines go</li><li>Bypass list of write_whole closes</li></ul>
+</article>
+
+<!-- 4 -->
+<article id="c4" class="rounded-xl border border-slate-200 bg-white p-6 space-y-4">
+  <h2 class="font-serif text-2xl">4. Guarded writes and read models into core</h2>
+  <div class="flex gap-2 text-xs"><span class="rounded bg-emerald-100 text-emerald-800 px-2 py-0.5">Strong</span><span class="rounded bg-slate-100 px-2 py-0.5">in-process</span></div>
+  <p class="font-mono text-sm">crates/cli/src/cli.rs (2,602) · mcp.rs · main.rs · app/src-tauri/src/commands.rs · crates/core/src/confirm.rs · waiting.rs</p>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="pane rounded-lg border border-slate-200 bg-white p-4">
+      <div class="lbl text-slate-500 mb-2">Before</div>
+      <pre class="mermaid">
+flowchart TB
+  MCP[MCP face] -->|reads via cli::sky_answer, star_answer ...| CLI[CLI face: read models + trait Writes]
+  MCP --> WC[trait WriteCore: own repo resolution, own drop flow]
+  T[Tauri face] --> CORE[core]
+  CLI --> CORE
+  WC --> CORE
+  classDef leak stroke:#dc2626,stroke-width:2px;
+  class CLI,WC leak
+      </pre>
+    </div>
+    <div class="pane rounded-lg border border-slate-200 bg-white p-4">
+      <div class="lbl text-slate-500 mb-2">After</div>
+      <pre class="mermaid">
+flowchart TB
+  MCP[MCP face: render] --> CORE
+  CLI[CLI face: render] --> CORE
+  T[Tauri face: render] --> CORE
+  CORE[core: one read model per view, one guarded-write module]
+  classDef deep fill:#0f172a,color:#f8fafc;
+  class CORE deep
+      </pre>
+    </div>
+  </div>
+  <p><b>Problem.</b> The CLI face holds domain logic (Star facts, running job, Waiting on you assembly); MCP imports the CLI face; the two write traits have drifted, so one request can pass in one face and fail in another.</p>
+  <p><b>Solution.</b> Core gets one read-model function per view and one guarded-write module; faces parse and render.</p>
+  <ul class="list-disc pl-5 text-sm"><li>"Same numbers as the GUI" by structure</li><li>Locality: repo resolution once</li><li>cli.rs sheds 300-450 lines</li><li>Twin traits: 250-350 lines go</li><li>Face tests shrink to "reaches the core"</li></ul>
+  <div class="rounded bg-amber-50 border border-amber-200 p-3 text-sm">The CLI's NO_SNAPSHOT refusal on an empty Waiting list is pinned by tests and stays in the face. The autopilot dev-root default differs on purpose; leave it.</div>
+</article>
+
+<!-- 5 -->
+<article id="c5" class="rounded-xl border border-slate-200 bg-white p-6 space-y-4">
+  <h2 class="font-serif text-2xl">5. One test-support module</h2>
+  <div class="flex gap-2 text-xs"><span class="rounded bg-emerald-100 text-emerald-800 px-2 py-0.5">Strong</span><span class="rounded bg-slate-100 px-2 py-0.5">local-substitutable</span></div>
+  <p class="font-mono text-sm">crates/core/tests/*.rs (160 files) · crates/cli/tests/*.rs (27) · app/src-tauri/src/*_tests.rs</p>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="pane rounded-lg border border-slate-200 p-4 space-y-2">
+      <div class="lbl text-slate-500">Before · 51,700 test lines</div>
+      <div class="flex gap-2 items-end h-36 text-[10px] text-center">
+        <div class="flex-1 bg-red-200 border border-red-400 h-full flex items-center justify-center">~110 private scratch-folder helpers in 119 files</div>
+        <div class="flex-1 bg-red-200 border border-red-400 h-[45%] flex items-center justify-center">18 fake GitHubTransport</div>
+        <div class="flex-1 bg-red-200 border border-red-400 h-[35%] flex items-center justify-center">8 fake WriteCore</div>
+        <div class="flex-1 bg-red-200 border border-red-400 h-[55%] flex items-center justify-center">fleet.py stubs + call-log readers per file</div>
+      </div>
+      <div class="box leak text-xs">35 of 119 files never remove their folder; 3 clean up on Drop</div>
+      <div class="box leak text-xs">14 backup/restore files and the fd_*.rs files copy the same fakes</div>
+    </div>
+    <div class="pane rounded-lg border border-slate-200 p-4 space-y-2">
+      <div class="lbl text-slate-500">After</div>
+      <div class="deep rounded p-4 text-sm text-center h-36 flex flex-col justify-center">test support<br><span class="text-xs opacity-80">scratch folder that removes itself · scripted GitHubTransport with a request log · pipeline root with a named fleet stub · call-log reader · fake chat transport</span></div>
+      <div class="box text-xs">one contract test over the five front door adapters</div>
+      <div class="box text-xs">review-round files (*_probe, *_review, *_fixes) fold into the Feature's file over time</div>
+    </div>
+  </div>
+  <p><b>Problem.</b> The harness is re-implemented file by file; a fix to it lands in a few copies.</p>
+  <p><b>Solution.</b> One dev-only module both crates' tests use.</p>
+  <ul class="list-disc pl-5 text-sm"><li>About 2,000-2,500 test lines go</li><li>Locality: cleanup rule once</li><li>New tests start smaller</li></ul>
+  <div class="rounded bg-amber-50 border border-amber-200 p-3 text-sm">tools/arch_lint.py allows process spawning only under the two tests folders; a support crate needs an allowlist entry. Locked test files cannot be edited without an owner ruling.</div>
+</article>
+
+<!-- 6 -->
+<article id="c6" class="rounded-xl border border-slate-200 bg-white p-6 space-y-4">
+  <h2 class="font-serif text-2xl">6. Budget read and poll wake: stop re-reading</h2>
+  <div class="flex gap-2 text-xs"><span class="rounded bg-emerald-100 text-emerald-800 px-2 py-0.5">Strong</span><span class="rounded bg-slate-100 px-2 py-0.5">optimize</span></div>
+  <p class="font-mono text-sm">crates/core/src/budget.rs:637-869 · github/live.rs · github/poll.rs · github/snapshot.rs · autopilot/run.rs · app/src-tauri/src/commands.rs:397</p>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="pane rounded-lg border border-slate-200 p-4 space-y-3">
+      <div class="lbl text-slate-500">Before</div>
+      <div class="box leak text-sm">Every Budget read walks every Claude projects folder, reads each session log whole and JSON-parses every line before checking its time. The skeptic measured about 6.6 GB of logs on this machine, for a window that is minutes long, on a synchronous Tauri command.</div>
+      <div class="lbl text-slate-500">Each 60 s poll wake</div>
+      <div class="flex gap-1 text-[10px] text-center">
+        <div class="box leak flex-1">load 1</div><div class="box leak flex-1">load 2</div><div class="box leak flex-1">load 3</div><div class="box leak flex-1">load 4</div><div class="box leak flex-1">load 5</div><div class="box leak flex-1">load 6</div>
+      </div>
+      <div class="text-xs text-slate-600">every repo's snapshot (issue bodies, pulls, ROADMAP, code map) fully parsed up to six times; a repo is due every 600 s</div>
+    </div>
+    <div class="pane rounded-lg border border-slate-200 p-4 space-y-3">
+      <div class="lbl text-slate-500">After</div>
+      <div class="box text-sm">Skip a log whose modified time is before the window; cheap text test on the line's time before the parse; per-file totals keyed by path, length and modified time. Make the command async.</div>
+      <div class="lbl text-slate-500">Each poll wake</div>
+      <div class="flex gap-1 text-[10px] text-center"><div class="deep rounded flex-1 p-2">one loaded set, passed by reference</div></div>
+      <div class="text-xs text-slate-600">which repos are due comes from something cheaper than a full parse; single-pass CLI runs keep a loading entry</div>
+      <div class="box text-xs">also: autopilot.json rewritten twice a minute and holding whole ROADMAP texts; the Sky build re-serialises the job ledger each time</div>
+    </div>
+  </div>
+  <p><b>Problem.</b> Hot paths re-read and re-parse unchanged files.</p>
+  <p><b>Solution.</b> Load once per call path; skip what cannot matter.</p>
+  <ul class="list-disc pl-5 text-sm"><li>Budget view opens without a stall</li><li>Poll wake cost drops about 6x</li><li>No interface change for faces</li></ul>
+</article>
+
+<!-- 7 -->
+<article id="c7" class="rounded-xl border border-slate-200 bg-white p-6 space-y-4">
+  <h2 class="font-serif text-2xl">7. Runner: one spec driver, honest status</h2>
+  <div class="flex gap-2 text-xs"><span class="rounded bg-emerald-100 text-emerald-800 px-2 py-0.5">Strong</span><span class="rounded bg-slate-100 px-2 py-0.5">in-process</span></div>
+  <p class="font-mono text-sm">crates/core/src/runner/{roadmap_run,bug_loop,engine,waiting,state}.rs · waiting.rs · lib.rs · specs/*.json · specs/README.md</p>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="pane rounded-lg border border-slate-200 p-4 space-y-2">
+      <div class="lbl text-slate-500">Before</div>
+      <div class="flex gap-2 text-xs text-center">
+        <div class="box leak flex-1">drive_unit<br>RunEnv (6 fields)<br>Engine setup<br>28-line pipeline bypass</div>
+        <div class="box leak flex-1">drive_bug<br>BugEnv (same 6)<br>same setup<br>same bypass</div>
+      </div>
+      <div class="seam"></div>
+      <div class="box text-xs text-center">Engine</div>
+      <div class="box leak text-xs">two Waiting on you stores: crate::waiting and runner::waiting</div>
+      <div class="box leak text-xs">about 3,500 lines of runner, unit, bug and roadmap-drift are reached only from tests; the CLI has 2 of the 30 planned commands</div>
+      <div class="box leak text-xs">lib.rs still says "skeleton with todo! stubs" and keeps a crate-wide dead_code allow; both spec JSONs carry 101 hand-kept <span class="font-mono">exists: false</span> flags, at least 3 wrong</div>
+    </div>
+    <div class="pane rounded-lg border border-slate-200 p-4 space-y-2">
+      <div class="lbl text-slate-500">After</div>
+      <div class="deep rounded p-4 text-sm text-center">one spec driver<br><span class="text-xs opacity-80">takes any Spec, answers one outcome type; attempt limit and not-now conditions live in the spec; the non-fleet pipeline step moves into Engine</span></div>
+      <div class="box text-xs">one Waiting on you store; runner items are a kind in it</div>
+      <div class="box text-xs">ROADMAP nodes: gain the missing faces as nodes; specs/README stops saying "to build"; <span class="font-mono">exists</span> is derived or dropped</div>
+      <div class="box text-xs">crate-wide allow removed so the compiler lists what is unused</div>
+    </div>
+  </div>
+  <p><b>Problem.</b> Two copied drivers sit shallow over Engine, and three docs disagree on what of the runner exists.</p>
+  <p><b>Solution.</b> One driver, one Waiting store, and the remaining work (the faces) written down as roadmap nodes.</p>
+  <ul class="list-disc pl-5 text-sm"><li>150-200 lines of driver go</li><li>One answer to "what is left"</li><li>Spec JSONs can share their common third (about 22 KB)</li></ul>
+  <div class="rounded bg-amber-50 border border-amber-200 p-3 text-sm">The runner is a settled after-1.0 Feature, so this is "finish and name the gap", not "cut". Whether the live loop stays autopilot or becomes the spec runner is your call.</div>
+</article>
+
+<!-- 8 -->
+<article id="c8" class="rounded-xl border border-slate-200 bg-white p-6 space-y-4">
+  <h2 class="font-serif text-2xl">8. Front door: one OpenAI-style adapter</h2>
+  <div class="flex gap-2 text-xs"><span class="rounded bg-emerald-100 text-emerald-800 px-2 py-0.5">Strong</span><span class="rounded bg-slate-100 px-2 py-0.5">ports &amp; adapters</span></div>
+  <p class="font-mono text-sm">crates/core/src/frontdoor/{adapters,chat,ask,router,labeller}.rs · crates/core/tests/fd_*.rs</p>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="pane rounded-lg border border-slate-200 p-4 space-y-2">
+      <div class="lbl text-slate-500">Before · adapters at the ChatAdapter seam</div>
+      <div class="flex gap-1 text-[10px] text-center">
+        <div class="box leak flex-1">Qwen</div><div class="box leak flex-1">DeepSeek</div><div class="box leak flex-1">ChatGPT</div><div class="box flex-1">Gemini</div><div class="box flex-1">Claude API</div>
+      </div>
+      <div class="text-xs text-slate-600">the three red ones repeat message building (adapters.rs:198, 271, 350), reply parsing (208, 288, 367) and a 7-line redact (256, 335, 509)</div>
+      <div class="box leak text-xs">chat.rs keeps a plain / _with / _on / _gated ladder; four entry points and DEFAULT_COMPLEXITY have only test callers since #384</div>
+      <div class="box leak text-xs">FD-4 learned pick: marked present, SPEC says "the core applies the rule", the router never calls it</div>
+      <div class="box leak text-xs">whole-word tokeniser written five times; one ask re-reads config.json, the thread file and the abilities index</div>
+    </div>
+    <div class="pane rounded-lg border border-slate-200 p-4 space-y-2">
+      <div class="lbl text-slate-500">After</div>
+      <div class="flex gap-1 text-[10px] text-center">
+        <div class="deep rounded flex-[3] p-2">OpenAI-style adapter, configured per Pool: URL tail, key, cost rule</div><div class="box flex-1">Gemini</div><div class="box flex-1">Claude API</div>
+      </div>
+      <div class="text-xs text-slate-600">three adapters is still a real seam; redaction, error mapping and Answer construction sit behind it once</div>
+      <div class="box text-xs">ask picks one BudgetGate (snapshot for a dry run, fleet for a real ask) and routes once; the ladder goes</div>
+      <div class="box text-xs">FD-4: wire it with a "pick changes" test, or mark it "rule built, not wired" in all three docs</div>
+    </div>
+  </div>
+  <p><b>Problem.</b> One adapter is written three times, and an older set of entry points survives beside the real one.</p>
+  <p><b>Solution.</b> One configured adapter, one route path, and a ruling on FD-4.</p>
+  <ul class="list-disc pl-5 text-sm"><li>About 300-360 source lines go</li><li>Adapter tests: 500-600 lines go</li><li>Docs stop claiming an unwired rule</li></ul>
+</article>
+
+<!-- 9 -->
+<article id="c9" class="rounded-xl border border-slate-200 bg-white p-6 space-y-4">
+  <h2 class="font-serif text-2xl">9. Clock and machine name: one each</h2>
+  <div class="flex gap-2 text-xs"><span class="rounded bg-emerald-100 text-emerald-800 px-2 py-0.5">Strong</span><span class="rounded bg-slate-100 px-2 py-0.5">in-process</span></div>
+  <p class="font-mono text-sm">crates/core/src/clock.rs · budget.rs · reports.rs · sky/priority.rs · sky/drift.rs · sky/model.rs · backup.rs · abilities.rs · autopilot/passes.rs · it.rs</p>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="pane rounded-lg border border-slate-200 p-4 space-y-2">
+      <div class="lbl text-slate-500">Before</div>
+      <div class="grid grid-cols-3 gap-1 text-[10px] text-center">
+        <div class="box leak">budget: days_from_civil + parse (Z only)</div><div class="box leak">reports: same + parse (offsets, len 20+)</div><div class="box leak">priority: same + parse (len 19+)</div>
+        <div class="box leak">drift: inline day_number</div><div class="box leak">backup: civil_from_days</div><div class="box leak">sky/model: civil_from_days</div>
+      </div>
+      <div class="text-xs text-slate-600">plus two more copies in tests; the four parsers accept different inputs</div>
+      <div class="lbl text-slate-500 pt-2">This machine's fleet name</div>
+      <div class="grid grid-cols-3 gap-1 text-[10px] text-center">
+        <div class="box leak">abilities: alias table, keeps case, whole file</div><div class="box leak">passes: second alias table, lower-cases, first line</div><div class="box leak">it: no alias mapping</div>
+      </div>
+      <div class="text-xs text-slate-600">a machine file saying Z13 gives three different names</div>
+    </div>
+    <div class="pane rounded-lg border border-slate-200 p-4 space-y-2">
+      <div class="lbl text-slate-500">After</div>
+      <div class="deep rounded p-4 text-sm text-center">clock<br><span class="text-xs opacity-80">days from civil · civil from days · one RFC 3339 parse (Z or offset, optional fraction) · one format</span></div>
+      <div class="deep rounded p-4 text-sm text-center">machine name<br><span class="text-xs opacity-80">one resolver, one alias table, one case rule</span></div>
+      <div class="box text-xs">same shape applies to bounded child processes: written twice, and 8 git runners have no time limit</div>
+    </div>
+  </div>
+  <p><b>Problem.</b> Small primitives are re-written per caller and no longer agree.</p>
+  <p><b>Solution.</b> clock.rs owns date maths and parsing; one machine-name resolver.</p>
+  <ul class="list-disc pl-5 text-sm"><li>160-220 lines go</li><li>One accepted timestamp format</li><li>Routing and held jobs agree on the machine</li></ul>
+</article>
+
+<!-- 10 -->
+<article id="c10" class="rounded-xl border border-slate-200 bg-white p-6 space-y-4">
+  <h2 class="font-serif text-2xl">10. Dead code sweep</h2>
+  <div class="flex gap-2 text-xs"><span class="rounded bg-emerald-100 text-emerald-800 px-2 py-0.5">Strong</span><span class="rounded bg-slate-100 px-2 py-0.5">deletion</span></div>
+  <p class="font-mono text-sm">app/src/sky3d/{galaxy,layout,motion}.ts · app/src/sky/layers.ts · app/src-tauri/src/commands.rs:136 · crates/core/src/{settings,error}.rs · crates/cli/src/mcp.rs</p>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="pane rounded-lg border border-slate-200 p-4 space-y-2 text-xs">
+      <div class="lbl text-slate-500">Before · only tests import these</div>
+      <div class="box leak">galaxy.ts (153 lines); live particles come from milkyway.ts</div>
+      <div class="box leak">galaxyPlacement block in sky3d/layout.ts; live placement is placeSystems</div>
+      <div class="box leak">flight half of motion.ts; only easeInOutCubic is used</div>
+      <div class="box leak">dependencyLayers, downstreamImpact in sky/layers.ts</div>
+      <div class="box leak">Tauri <span class="font-mono">views</span> command: 6 names, omits Loadout, nothing calls it; views/index.ts has 7</div>
+      <div class="box leak">settings::temp_path ("kept because a test pins it"), ErrorCode::as_str</div>
+      <div class="box leak">argument re-checks after check_args in mcp.rs</div>
+    </div>
+    <div class="pane rounded-lg border border-slate-200 p-4 space-y-2 text-xs">
+      <div class="lbl text-slate-500">After</div>
+      <div class="box ghost">all of the left column deleted with the tests that cover only them</div>
+      <div class="box">easeInOutCubic moves beside flightMs in camera.ts</div>
+      <div class="box">views/index.ts is the one list of views</div>
+      <div class="text-slate-600 pt-2">About 450 front-end source lines, 150 test lines, 100 Rust lines.</div>
+      <div class="rounded bg-amber-50 border border-amber-200 p-3">Not free: <span class="font-mono">commands_tests.rs</span> is a locked file and pins the six-name views list; <span class="font-mono">brocrew/message-paths.ts</span> is pinned by a locked SHELL-2 test and listed in NOTICE, so it stays; <span class="font-mono">default_nextcloud_dir</span> is a documented placeholder seam for open Unknown U7.</div>
+    </div>
+  </div>
+  <p><b>Problem.</b> Superseded modules were kept with their tests, so tests pass against code nothing runs.</p>
+  <p><b>Solution.</b> Delete them; rule on the locked tests.</p>
+</article>
+
+<!-- 11 -->
+<article id="c11" class="rounded-xl border border-slate-200 bg-white p-6 space-y-4">
+  <h2 class="font-serif text-2xl">11. Registry drives dispatch</h2>
+  <div class="flex gap-2 text-xs"><span class="rounded bg-amber-100 text-amber-800 px-2 py-0.5">Worth exploring</span><span class="rounded bg-slate-100 px-2 py-0.5">in-process · after card 4</span></div>
+  <p class="font-mono text-sm">crates/core/src/faces.rs · crates/cli/src/{cli,mcp,main,autopilot}.rs · tools/arch_lint.py · crates/core/src/parity.rs · docs/mcp-tools.md</p>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="pane rounded-lg border border-slate-200 p-4 space-y-2">
+      <div class="lbl text-slate-500">Before · interface as wide as the implementation</div>
+      <div class="flex gap-3 items-end h-32">
+        <div class="flex-1 text-center"><div class="bg-slate-300 h-24 flex items-center justify-center text-xs">interface: 35 rows of names + schemas</div><div class="bg-slate-500 text-white h-6 text-xs">implementation: lookups</div></div>
+      </div>
+      <div class="box leak text-xs">only mcp.rs reads REGISTRY; five hand-written name matches decide what runs; USAGE is a hand-kept string that a test parses character by character</div>
+      <div class="box leak text-xs">the face-to-core rule and the MCP tool list are each checked twice: arch_lint.py and parity.rs</div>
+    </div>
+    <div class="pane rounded-lg border border-slate-200 p-4 space-y-2">
+      <div class="lbl text-slate-500">After</div>
+      <div class="flex gap-3 items-end h-32">
+        <div class="flex-1 text-center"><div class="bg-slate-300 h-6 text-xs">interface: one row per operation</div><div class="deep h-24 flex items-center justify-center text-xs">typed arguments → MCP schema and CLI flags · effects, roles · handler</div></div>
+      </div>
+      <div class="box text-xs">adding an operation touches one row; USAGE and docs/mcp-tools.md are generated from it</div>
+      <div class="box text-xs">one scanner per lint rule</div>
+    </div>
+  </div>
+  <p><b>Problem.</b> The registry is shallow: it lists operations but does not run them.</p>
+  <p><b>Solution.</b> A row becomes the whole description of an operation, handler included.</p>
+  <ul class="list-disc pl-5 text-sm"><li>400-600 lines of dispatch go</li><li>Leverage: three faces from one row</li></ul>
+  <div class="rounded bg-amber-50 border border-amber-200 p-3 text-sm">Blocked today: handlers live in the CLI crate and the Tauri ones need AppHandle. Card 4 has to land first.</div>
+</article>
+
+<!-- 12 -->
+<article id="c12" class="rounded-xl border border-slate-200 bg-white p-6 space-y-4">
+  <h2 class="font-serif text-2xl">12. Build and CI time</h2>
+  <div class="flex gap-2 text-xs"><span class="rounded bg-amber-100 text-amber-800 px-2 py-0.5">Worth exploring</span><span class="rounded bg-slate-100 px-2 py-0.5">optimize · CI part not skeptic-checked</span></div>
+  <p class="font-mono text-sm">crates/cli/Cargo.toml · crates/cli/tests/*.rs · .github/workflows/ci.yml · tools/ci.sh</p>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="pane rounded-lg border border-slate-200 p-4 space-y-2 text-xs">
+      <div class="lbl text-slate-500">Before</div>
+      <div class="box leak">the CLI crate has only a [[bin]]; 21 of 27 test files pull source in with <span class="font-mono">#[path = "../src/..."] mod</span> (31 includes), so 4,893 lines compile up to 21 times</div>
+      <div class="box leak">188 separate test binaries across the two crates</div>
+      <div class="box leak">ci.yml: four jobs, no cargo or npm cache; core compiles cold five times per push</div>
+      <div class="box leak">the notices job builds the CLI only so arch_lint.py can ask it for the tool list, once per role</div>
+    </div>
+    <div class="pane rounded-lg border border-slate-200 p-4 space-y-2 text-xs">
+      <div class="lbl text-slate-500">After</div>
+      <div class="box">the CLI gets a library target; main.rs is a thin caller; tests <span class="font-mono">use</span> it</div>
+      <div class="box">cargo cache keyed on Cargo.lock; npm cache on the face job</div>
+      <div class="box">the tool-list check runs in the existing in-process Rust test</div>
+      <div class="rounded bg-amber-50 border border-amber-200 p-3">Do not merge test files into fewer binaries: 18 roadmap node specs run <span class="font-mono">cargo test --test &lt;file&gt;</span> by name.</div>
+    </div>
+  </div>
+  <p><b>Problem.</b> The same source compiles many times locally and in CI.</p>
+  <p><b>Solution.</b> A library target for the CLI and a build cache.</p>
+</article>
+
+<!-- 13 -->
+<article id="c13" class="rounded-xl border border-slate-200 bg-white p-6 space-y-4">
+  <h2 class="font-serif text-2xl">13. backup.rs: three modules in one file</h2>
+  <div class="flex gap-2 text-xs"><span class="rounded bg-amber-100 text-amber-800 px-2 py-0.5">Worth exploring</span><span class="rounded bg-slate-100 px-2 py-0.5">in-process · mostly a move</span></div>
+  <p class="font-mono text-sm">crates/core/src/backup.rs (2,801) · backup_run.rs</p>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="pane rounded-lg border border-slate-200 p-4">
+      <div class="lbl text-slate-500 mb-2">Before · one file</div>
+      <div class="border border-slate-400 rounded overflow-hidden text-xs text-center">
+        <div class="bg-slate-200 py-6 border-b border-slate-400">taking a Repo backup · lines 21-961</div>
+        <div class="bg-slate-100 py-2 border-b border-slate-400">keep-or-replace guard · 524-587, 963-1139</div>
+        <div class="bg-red-100 py-10">restore · 1221-2792, with one 366-line function called with all four flag pairs</div>
+      </div>
+      <div class="box leak text-xs mt-2">re-implements crate helpers: run_tag, atomic write, JSON read, a date formatter</div>
+    </div>
+    <div class="pane rounded-lg border border-slate-200 p-4">
+      <div class="lbl text-slate-500 mb-2">After · folder module, same crate path</div>
+      <div class="space-y-2 text-xs text-center">
+        <div class="box py-4">backup/take</div>
+        <div class="box py-2">backup/keep</div>
+        <div class="box py-6">backup/restore, its long function split into its three real steps</div>
+      </div>
+      <div class="box text-xs mt-2">where a repo's backup lives is defined once; helpers come from cards 3 and 9</div>
+    </div>
+  </div>
+  <p><b>Problem.</b> A change to restore means reading past 1,200 lines of backup-taking code.</p>
+  <p><b>Solution.</b> Split by concept behind the same interface.</p>
+  <div class="rounded bg-amber-50 border border-amber-200 p-3 text-sm">The skeptic refuted folding the whole/made flags into one enum: the two are independent and all four pairs are used.</div>
+</article>
+
+<!-- 14 -->
+<article id="c14" class="rounded-xl border border-slate-200 bg-white p-6 space-y-4">
+  <h2 class="font-serif text-2xl">14. Sky front end</h2>
+  <div class="flex gap-2 text-xs"><span class="rounded bg-amber-100 text-amber-800 px-2 py-0.5">Worth exploring</span><span class="rounded bg-slate-100 px-2 py-0.5">in-process</span></div>
+  <p class="font-mono text-sm">app/src/sky3d/SkyScene.ts · Sky3D.tsx · app/src/sky/* · app/src/brocrew/ipc-types.ts</p>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="pane rounded-lg border border-slate-200 p-4">
+      <div class="lbl text-slate-500 mb-2">Before · SkyScene.ts, about 35 public methods</div>
+      <div class="border border-red-400 rounded text-xs text-center overflow-hidden">
+        <div class="bg-red-50 py-4 border-b border-red-200">GLSL strings · lines 96-511, a quarter of the file</div>
+        <div class="bg-red-50 py-2 border-b border-red-200">scene build</div>
+        <div class="bg-red-50 py-3 border-b border-red-200">interior build and paint · 866-1202</div>
+        <div class="bg-red-50 py-2 border-b border-red-200">camera pose state; ENTER/EXIT re-stated as literals</div>
+        <div class="bg-red-50 py-2">projection, labels, loop</div>
+      </div>
+      <div class="box leak text-xs mt-2">2D and 3D Sky each derive short repo name (4 copies), Reuse line target (2), release list (2)</div>
+    </div>
+    <div class="pane rounded-lg border border-slate-200 p-4 space-y-2 text-xs">
+      <div class="lbl text-slate-500">After</div>
+      <div class="box">shaders in their own file (pure move)</div>
+      <div class="deep rounded p-3 text-center">interior: build, paint, dispose for one Constellation</div>
+      <div class="deep rounded p-3 text-center">sky derivations: one module both Skies call</div>
+      <div class="box">per-frame label pass batches DOM reads and indexes Stars</div>
+      <div class="box">SPEC SKY-1, GLOSSARY and the code map revised to the 3D Sky as built</div>
+    </div>
+  </div>
+  <p><b>Problem.</b> SkyScene's interface is nearly as wide as its implementation; the two Skies duplicate derivations.</p>
+  <p><b>Solution.</b> Move shaders out, pull the interior behind a small interface, share derivations.</p>
+  <div class="rounded bg-amber-50 border border-amber-200 p-3 text-sm">Camera maths is already out in camera.ts and tested without WebGL; the remaining gain is smaller than first claimed.</div>
+</article>
+
+</section>
+
+<section id="top-recommendation" class="rounded-xl deep p-8 space-y-3">
+  <div class="lbl opacity-70">Top recommendation</div>
+  <h2 class="font-serif text-3xl"><a class="underline" href="#c1">Card 1: the code map</a></h2>
+  <p>It is the hottest file in the repo, and the tests that pin its wording are the mechanism that forces append over revise. Unpin them and every later doc revision, including <a class="underline" href="#c2">card 2</a>, becomes a normal edit.</p>
+  <p class="text-sm opacity-80">First code change after that: <a class="underline" href="#c3">card 3</a>, then <a class="underline" href="#c4">card 4</a>, which unblocks <a class="underline" href="#c11">card 11</a>. <a class="underline" href="#c6">Card 6</a> is independent and small.</p>
+</section>
+
+</main>
+</body>
+</html>

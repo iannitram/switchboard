@@ -1,0 +1,686 @@
+{
+  "groups": [
+    {
+      "group": "tests",
+      "result": {
+        "issues": [
+          {
+            "key": "t-core",
+            "title": "code-map: replace the core tests that pin code map wording with structural tests (core and CLI trees)",
+            "labels": [
+              "feature:core",
+              "size:medium",
+              "kind:docs"
+            ],
+            "file": "docs/arch-review-2026-11-26/issues/01-01-t-core.md",
+            "blocked_by_keys": [],
+            "corrections": "Checked against main at 19e0c65: all 32 function names and line ranges, the 25 locked headers, the 335-line total, the two `use` edits and the three `manifest` helpers are right. The structural-test counts were recomputed with a script following R1-R6 and hold (82 core spans on 62 lines, 1 planned skip at line 338, 58 entry lines, 14 modules rows, 1 reuses row, 6 CLI spans, CLI entry lines 367/376/378, field rule failing on 367 and 376). Fixed: (1) removed the `Blocked by: nothing` line as the template says and moved the independence note into What; (2) the muddled `unit_job.rs` caller list now names `built()` (line 39) and the three tests with their lines; (3) the Not-in-this-issue list wrongly named `gh_snapshot_store.rs` and `roadmap_graph.rs`, which never contain the string `docs/code-map.md`; replaced with the real places (`gh_parse_repo.rs` 84, `unit_land.rs` 55 and 74, `unit_proof.rs` 155/166/176/209, not a 155-215 range); (4) the modules header rule now matches `block_lines` in `crates/core/src/sky/codemap.rs` (line equals `modules:` after trimming trailing whitespace); (5) `manifest` helper line ranges given in full; (6) the bite proof no longer says 'scratch copy' (the tests read the real path): a working-tree change, reverted; (7) Done-when 1 uses `git diff`, not `--stat`, and Done-when 3 states today's baseline (33 files); (8) dropped the promise that a named later issue moves the CLI test to the field rule, since no ruling assigns it; (9) Where no longer says `crates/*/src`. Labels and Medium size kept; oversize is stated."
+          },
+          {
+            "key": "t-tauri",
+            "title": "code-map: replace the Tauri tests that pin code map wording with a structural test",
+            "labels": [
+              "feature:core",
+              "size:medium",
+              "kind:docs"
+            ],
+            "file": "docs/arch-review-2026-11-26/issues/01-02-t-tauri.md",
+            "blocked_by_keys": [],
+            "corrections": "Checked: both functions at 255-267 and 165-177 (each the end of its file), both locked headers, `commands.rs` mod lines 785-787, the 5 Tauri spans (lines 7, 119, 131, 277, 384), the single entry line 384, 28 deleted lines, `tools/ci.sh app` steps, and the app crate being a workspace member but not a default member. Fixed: (1) removed the `Blocked by: nothing` line per the template, independence note moved into What; (2) the Size line said 'built inside the build container', which is the AppImage build; the test run only needs Linux with the system libraries the CI `app` job installs; (3) the pinned-line column used '(...)' as if it were a quotation; it now describes the lines and gives their map line numbers (354 and 352); (4) Where now names both `### shell` (entry line) and `### it` (pinned lines); (5) 'about line 787' made exact; (6) bite proof reworded from 'scratch copy' to a reverted working-tree change."
+          },
+          {
+            "key": "t-react",
+            "title": "code-map: replace the React face tests that pin code map wording with a structural test",
+            "labels": [
+              "feature:core",
+              "size:medium",
+              "kind:docs"
+            ],
+            "file": "docs/arch-review-2026-11-26/issues/01-03-t-react.md",
+            "blocked_by_keys": [],
+            "corrections": "Checked: all nine test names, line ranges and import line numbers, the nine locked headers, `codeMap` used only in the removed tests, 59 deleted lines, `noUnusedLocals` and `include: [\"src\"]` in `app/tsconfig.json`, no `@types/node` in `app/package-lock.json`, the 15 face spans on 9 lines and entry lines 169 and 172. Fixed: (1) removed the `Blocked by: nothing` line per the template, independence note moved into What; (2) the on-disk rule had a separate special case for the bare `app/src/` span; it is now one rule (a path ending in `/` matches when a key starts with `./<rest>`, with `<rest>` empty); (3) added that the removed test is last in eight files and gave the full name of the Loadout test that stays; (4) bite proof reworded from 'scratch copy' to a reverted working-tree change; (5) the oversize sentence now follows the decisions wording."
+          }
+        ],
+        "unresolved": "1. `unit_job.rs` (t-core section 2): the ruling says the assertions that read the real map \"go\". The draft, which I kept, removes no assertion and instead swaps the `code_map()` helper for a two-line fixture, because `built()` needs some map text. After that, no test checks that the real map has an entry line for `crates/core/src/unit/job.rs` (what `code_map_lines` reads, Q19). On main every `code_map_entries` path has an entry line except `app/src/sky/RoadmapView.tsx` (`roadmap/nodes/sky-roadmap-graph.json`), so a core-only check would pass today. Owner call: accept the fixture as is, or add that check to the core structural test.\n2. CLI tree status rule: map lines 367 and 376 write the status inside a sentence, so the CLI test only checks for a whole word `present`/`planned`. No ruling says which later code map issue tightens it to the field rule; the CLI-section issue or the last guard issue must carry that, and it means editing this locked test.\n3. `kind:` label: none of the allowed kinds means \"tests\". I kept `kind:docs` on all three because the subject is `docs/code-map.md`; confirm.\n4. t-react reads the disk with `Object.keys(import.meta.glob(\"./**/*\"))` (Vite 5.4.10, vitest 2.1.4). The repo has no existing use of `import.meta.glob`, and I did not run it (read-only, no build). If it fails under vitest or `tsc`, the issue needs another way to list files without `@types/node`.\n5. None of the three issues was built or run; counts come from a script that follows rules R1-R6 over the map at 19e0c65, and the unused-import findings come from static search, not clippy.\n6. The new locked files carry \"The builder never edits this file\" while the issue has the builder create them. If the pipeline wants locked tests written before the build by another role, that step is not described in these issues."
+      }
+    },
+    {
+      "group": "map-a",
+      "result": {
+        "issues": [
+          {
+            "key": "m-core",
+            "title": "code map: revise the header, Layout and core-* sections to one line per file",
+            "labels": [
+              "feature:core",
+              "size:medium",
+              "kind:docs"
+            ],
+            "file": "docs/arch-review-2026-11-26/issues/02-01-m-core.md",
+            "blocked_by_keys": [
+              "t-core",
+              "t-react"
+            ],
+            "corrections": "Checked every line number and byte size against the map (all held). Fixed the file count: up to 19 files (map, spec file, up to 11 core headers, up to 6 comment-only landings), not 17; changed lines raised to about 250 and the Node toolchain added to Size (the proof runs `tools/ci.sh face`). Settings test range is 148-154. Added two facts the builder would trip on: line 90's `FleetStarter` lives in `autopilot/passes.rs` (not `fleet.rs`), `FleetErrorLog` and `FLEET_ERROR_LOG_CAP` are defined in `fleet.rs`. Added header line counts for fleet (4), fleet_errors (9), abilities (12), rules (2), error (2), faces (4). Corrected the wording about `error.rs` (line 111 starts with clock.rs and names error.rs; 113 is the second). Layout row said \"as lines 36-41 do\" although 39 is itself prose: now 36, 37, 40, 41. Said where `### core-lib` goes (after core-lock) and that the diagram's `+` column must stay aligned. Platforms range 69-83. Done-when: the awk/grep checks had backticks inside inline code (would not render) and no range; now fenced `sed` range commands, a separate bullet check, a JSON-still-parses check for the spec file and a checkable item for parity.rs/lib.rs. Added the note that line numbers are those at commit 19e0c65 and sections are found by heading once a sibling has landed."
+          },
+          {
+            "key": "m-github",
+            "title": "code map: revise the github-* sections to one line per file",
+            "labels": [
+              "feature:core",
+              "size:easy",
+              "kind:docs"
+            ],
+            "file": "docs/arch-review-2026-11-26/issues/02-02-m-github.md",
+            "blocked_by_keys": [
+              "t-core",
+              "t-react"
+            ],
+            "corrections": "All eight files, signatures, callers (`carried_over_by_patch_id` in autopilot/passes.rs and cli.rs; poll thread at app/src-tauri/src/main.rs; `refresh_all` Tauri command called from Sky.tsx) and header line counts verified. Section size is 2,214 bytes, not 2,215. The replacement was anchored only on line numbers 124-139, which move as soon as m-core lands (it adds `### core-lib` just above): now anchored on headings, with the line numbers stated as those at commit 19e0c65. The header-comment additions were written as slash-separated inline code with nested backticks; now fenced blocks with exact lines (each under 100 columns). Done-when commands moved into fenced blocks, a bullet check added, Node toolchain added to Size. `mod.rs` added to the signatures list. Every proposed entry line checked: longest 238 bytes, none has an issue number."
+          },
+          {
+            "key": "m-sky-core",
+            "title": "code map: revise the core sky-* sections to one line per file",
+            "labels": [
+              "feature:core",
+              "size:easy",
+              "kind:docs"
+            ],
+            "file": "docs/arch-review-2026-11-26/issues/02-03-m-sky-core.md",
+            "blocked_by_keys": [
+              "t-core"
+            ],
+            "corrections": "The draft claimed nothing needs moving. False for one fact: how a stage's done/total/complete are counted is only in the map (`pub struct SkyStage`, model.rs:79, has no doc comment; the rule is bare code at model.rs:297-324). The brief now adds three exact `///` lines above SkyStage, so the issue touches 2 files and Done-when 4 allows model.rs. Corrected model.rs line cites (53-60, 101-102, 129-130, 213-215) and added the codemap.rs header (16-18) as the home of the trailing-slash rule; sky_model.rs test is 759-769, not :764; dropped the claim that sky_codemap.rs pins this wording (it only reads the reuses block). Section is 3,155 bytes. Added `tools/ci.sh face` to the proof (the React tests import the map), heading-anchored replacement, the 19e0c65 note, fenced commands. All proposed lines verified against the source (names exist, STALE_DAYS 14 and 7, nine modules); longest 251 bytes."
+          },
+          {
+            "key": "m-sky-face",
+            "title": "code map: give every Sky face file its own line (sky-face, sky-layers)",
+            "labels": [
+              "feature:core",
+              "size:medium",
+              "kind:docs"
+            ],
+            "file": "docs/arch-review-2026-11-26/issues/02-04-m-sky-face.md",
+            "blocked_by_keys": [
+              "t-core",
+              "t-react"
+            ],
+            "corrections": "File counts verified (1 + 12 + 17 source files, 2 stylesheets, 9 without a top comment, 28 without a line). The draft said the Roadmap column rules have no home and required a new top comment in both RoadmapView.tsx and roadmap.ts. In fact the comment on `layoutRoadmap` (roadmap.ts:20-26) and the one above `RoadmapView` already state most of them, and the owner rule is to add only what is missing. Reworded What/Where/Size (about 50 lines in 1 to 4 files) and Done-when 4 (the rules are stated in comments of the two files, wherever they sit) so the builder is not made to duplicate them. Added the verified fact that nothing in the face calls `dependencyLayers` (roadmap.ts calls only `orderWithinLayers`). Section is 1,568 bytes. Dropped the draft's reason for the stylesheet lines (it speculated about how the later check counts). Commands fenced; 19e0c65 note added."
+          },
+          {
+            "key": "m-bug-waiting-reports",
+            "title": "code map: revise the bug, waiting and reports sections to one line per file",
+            "labels": [
+              "feature:core",
+              "size:medium",
+              "kind:docs"
+            ],
+            "file": "docs/arch-review-2026-11-26/issues/02-05-m-bug-waiting-reports.md",
+            "blocked_by_keys": [
+              "t-core",
+              "t-react"
+            ],
+            "corrections": "The Blocked-by note said `bug_fix.rs` expects a bullet word for word. It does not: bug_fix.rs:418-435 runs `check_modules` over the `modules:` block, which this issue leaves alone; moved that fact to the Leave-alone rule and listed the seven core tests that really pin bullets by name (waiting_load, waiting_local, waiting_snapshot, reports_build, reports_filter, reports_load, reports_moves). Added a warning that `WaitingItem` and `ReportEntry` in the bullets live under app/src/brocrew/, not in Waiting.tsx/Reports.tsx (Done-when requires named items to exist in the named file). Line 204 is itself a bullet, so 15 bullets is right; said so. Section is 4,868 bytes. All line numbers, byte sizes, header line counts and function names verified. Done-when commands now fenced `sed` ranges; 19e0c65 note added."
+          },
+          {
+            "key": "m-budget",
+            "title": "code map: revise the budget section to one line per file",
+            "labels": [
+              "feature:core",
+              "size:easy",
+              "kind:docs"
+            ],
+            "file": "docs/arch-review-2026-11-26/issues/02-06-m-budget.md",
+            "blocked_by_keys": [
+              "t-core",
+              "t-react"
+            ],
+            "corrections": "Wrong cite fixed: the `claude_config_dirs` doc comment is at budget.rs:770-774, not 759-763; added the cites for `EDIT_LOCK_WAIT` (222-224) and the ccusage credit (721-722). The proposed header sentence listed faces by hand and left out the pool edit's CLI and MCP faces; replaced by a pointer to the three `faces::REGISTRY` rows (`budget_rows`, `budget_refresh`, `pool_edit`, faces.rs:146, 159, 160), which is complete and cannot go stale. Budget.tsx also draws Claude's estimate (lines 105-107), so its line now carries BUD-4 too. Section is 1,741 bytes. The stale `lock::temp_path` claim was confirmed (budget.rs writes through `lock::write_whole`, 476-479). Added size and issue-number checks to Done-when, fenced commands, heading-anchored replacement and the 19e0c65 note. Proposed lines: longest 369 bytes."
+          },
+          {
+            "key": "m-backup",
+            "title": "code map: revise the backup section to one line per file",
+            "labels": [
+              "feature:core",
+              "size:medium",
+              "kind:docs"
+            ],
+            "file": "docs/arch-review-2026-11-26/issues/02-07-m-backup.md",
+            "blocked_by_keys": [
+              "t-core"
+            ],
+            "corrections": "Line numbers, byte sizes, header line counts (backup 4, backup_run 4, renumber 7), the 2,956-line count and every named function verified. Section is 4,034 bytes; the pinning test is backup_run.rs:409-422. Added `tools/ci.sh face` to the proof and Node to the toolchain (the React tests import the map, so a map change can fail them). The bullet check now also catches the indented continuation line 231. Named `Made` in the line-232 row. Done-when commands fenced with `sed` ranges; 19e0c65 note added."
+          }
+        ],
+        "unresolved": "1. Stylesheets: Q16 says every non-test source file gets a line but does not say whether `.css` files count. m-sky-face gives `app/src/sky/roadmap.css` and `app/src/sky3d/sky3d.css` a line each (safe either way); the last map issue's every-file check must use the same answer, and `app/src/theme.css` belongs to whichever issue has the shell section.\n2. `specs/roadmap-run.json:21`: decisions (Q19) say it is corrected but not in which issue. It is in m-core. I could not see the other groups' drafts, so check that no other issue also carries it.\n3. New headings: these issues add `### core-lib`, `### github`, `### github-archive`, `### sky`, `### sky-3d` (the rulings keep existing headings but do not rule on new ones). Whether the structural tests from t-core/t-react accept new headings depends on those issues, which I could not see.\n4. Sibling keys I could not name: the map issues for the `cli`/`mcp`, `shell` and `runner` sections are referred to in prose, not as {{#key}}, because their keys were not given to me.\n5. All seven issues edit `docs/code-map.md` and its `Updated:` line, and m-core may add comment lines to the headers of `backup.rs`, `waiting.rs`, `Waiting.tsx` and `github/archive.rs`, which m-backup, m-bug-waiting-reports and m-github also touch. They are not blocked on each other, so parallel builds will conflict; each body tells the builder to find sections by heading, but the landing order is for the orchestrator.\n6. m-core is the largest (up to 19 files, about 250 lines). It stays one Medium issue under Q29's one-issue-per-section-group rule and is marked oversize; splitting the header/Layout part from the core-* part would be the alternative if that is too big for one review.\n7. I did not read GLOSSARY.md in full; the bodies reuse the drafts' domain words (Waiting on you, Star, Must, face, code map) and I only checked the forbidden architecture words (the remaining hits for \\\"layer\\\" are the Roadmap lens's dependency layers and the `sky-layers` heading; \\\"merge API\\\" is quoted map text)."
+      }
+    },
+    {
+      "group": "map-b",
+      "result": {
+        "issues": [
+          {
+            "key": "m-frontdoor",
+            "title": "code map: one line per file for frontdoor",
+            "labels": [
+              "feature:core",
+              "size:hard",
+              "kind:docs"
+            ],
+            "file": "docs/arch-review-2026-11-26/issues/03-01-m-frontdoor.md",
+            "blocked_by_keys": [
+              "t-core"
+            ],
+            "corrections": "Section size corrected (38 lines, 8553 bytes, not 39 / 8606). Bullet-to-file mapping tightened (240, 250, 262, 272 split across files as the names are really defined). Added rule that names defined outside the 13 files (Tauri commands in commands.rs, reports.rs, joblog.rs, abilities.rs) are mentioned only and those files are not edited. Added placement rule, path-on-disk rule, and that the learned-pick sentence also goes into router.rs header. Test line-number citations dropped (file names only). Blocked-by placeholder replaced with {{#t-core}}. Template fields made plain; commands fenced; Done-when 5 made checkable; grep made -E."
+          },
+          {
+            "key": "m-autopilot",
+            "title": "code map: one line per file for autopilot",
+            "labels": [
+              "feature:core",
+              "size:medium",
+              "kind:docs"
+            ],
+            "file": "docs/arch-review-2026-11-26/issues/03-02-m-autopilot.md",
+            "blocked_by_keys": [
+              "t-core"
+            ],
+            "corrections": "Section size corrected (21 non-blank lines, 4685 bytes, not 22 / 4722). Draft wrongly treated PM_RETRY_WAIT as defined outside the directory: it is defined at crates/core/src/autopilot/passes.rs:1021, so its detail goes to the passes.rs header. Outside names given with file and line (rules.rs:144, abilities.rs:77). Removed 'check each before moving it' (mapping was checked). Blocked-by placeholder replaced with {{#t-core}}; path-on-disk rule added; plain template fields; fenced commands."
+          },
+          {
+            "key": "m-runner",
+            "title": "code map: one line per file for runner, roadmap, unit and workloop; fix the status paragraph",
+            "labels": [
+              "feature:core",
+              "size:hard",
+              "kind:docs"
+            ],
+            "file": "docs/arch-review-2026-11-26/issues/03-03-m-runner.md",
+            "blocked_by_keys": [
+              "t-core"
+            ],
+            "corrections": "Byte totals corrected (runner 4253, roadmap 2473, unit 6814, workloop 2109; draft counted line ends and headings). Garbled rule 3 rewritten: all 18 files are named in code_map_entries of roadmap/nodes specs (state.rs by runner-engine.json), nothing left for the builder to check. Done-when 4 said 'four headings' between runner and it: three lie between. 13 oversize lines spelled out as 12 file lines plus line 338. Added exception for the planned workloop path in the path-on-disk rule, and where the 'Proposed modules' list goes (end of section 6 of docs/work-loop.md). Blocked-by placeholder replaced with {{#t-core}}; noted t-core gives unit_job.rs a fixed map text. Plain template fields; fenced commands; grep made -E."
+          },
+          {
+            "key": "m-it",
+            "title": "code map: one line for it.rs",
+            "labels": [
+              "feature:core",
+              "size:easy",
+              "kind:docs"
+            ],
+            "file": "docs/arch-review-2026-11-26/issues/03-04-m-it.md",
+            "blocked_by_keys": [
+              "t-core",
+              "t-tauri",
+              "t-react"
+            ],
+            "corrections": "Draft said four tests pin this section; there are five (app/src/views/Loadout.test.tsx was missed), so the issue is also blocked by t-react. Section size corrected (11 lines after the heading, 1525 bytes, not 12 / 1544). The fixed map line was replaced with a 379-byte one that names the public functions (ruled format asks for the few public names); byte count checked. Test line-number citations dropped. Chat.tsx map line credited to m-frontdoor, not m-shell. Done-when 2 made a runnable check. Code map snippet and all 11 signatures line numbers re-checked against the repo and kept."
+          },
+          {
+            "key": "m-cli-mcp",
+            "title": "code map: one line per file for cli and mcp",
+            "labels": [
+              "feature:core",
+              "size:medium",
+              "kind:docs"
+            ],
+            "file": "docs/arch-review-2026-11-26/issues/03-05-m-cli-mcp.md",
+            "blocked_by_keys": [
+              "t-core"
+            ],
+            "corrections": "Counts corrected: cli has 9 non-blank lines / 3895 bytes (not 10 / 3915), mcp has 5 / 1956 (not 6 / 1971). Rule 3 now says the joint line 367 goes too. Trait locations given as cli.rs:89 and mcp.rs:40. Size note now says it is reviewed as an oversize change (7 files). Blocked-by placeholder replaced with {{#t-core}}, which adds crates/cli/tests/code_map_structure.rs. The 7 oversize lines are listed by number. Plain template fields; fenced commands; path-on-disk rule added."
+          },
+          {
+            "key": "m-shell",
+            "title": "code map: one line per file for the Tauri shell and the React face",
+            "labels": [
+              "feature:core",
+              "size:medium",
+              "kind:docs"
+            ],
+            "file": "docs/arch-review-2026-11-26/issues/03-06-m-shell.md",
+            "blocked_by_keys": [
+              "m-frontdoor",
+              "m-it",
+              "m-core",
+              "m-sky",
+              "m-bug-waiting-reports",
+              "m-budget",
+              "t-core",
+              "t-tauri",
+              "t-react"
+            ],
+            "corrections": "Draft said 21 files start with an import: it is 17, plus roadmap.css with no header (18 named). Draft said two files over 900 lines: three (theme.css 1413 was missed). Draft put tools/check-notices.py under 'tools/ci.sh face': it runs in 'tools/ci.sh lint'; Done-when now asks for lint. 'needs the build container' replaced by the real need of tools/ci.sh app (Linux with WebKitGTK libraries). Opening count sentence reworded (2 of 59 listed). Added fallback placement when a named section heading is gone, a check for the RoadmapView.tsx line, and a runnable check for the old directory line. Blocked-by placeholders replaced with {{#t-core}}, {{#t-tauri}}, {{#t-react}}. Plain template fields."
+          },
+          {
+            "key": "m-guard",
+            "title": "code map: turn on the size guard, the no-issue-number guard and the every-file check",
+            "labels": [
+              "feature:core",
+              "size:medium",
+              "kind:wiring"
+            ],
+            "file": "docs/arch-review-2026-11-26/issues/03-07-m-guard.md",
+            "blocked_by_keys": [
+              "m-core",
+              "m-github",
+              "m-sky",
+              "m-bug-waiting-reports",
+              "m-budget",
+              "m-backup",
+              "m-frontdoor",
+              "m-autopilot",
+              "m-runner",
+              "m-it",
+              "m-cli-mcp",
+              "m-shell"
+            ],
+            "corrections": "The four test files are now named (crates/core/tests/code_map_structure.rs, crates/cli/tests/code_map_structure.rs, app/src-tauri/src/code_map_tests.rs, app/src/code-map.test.ts) and tied to {{#t-core}}, {{#t-tauri}}, {{#t-react}}. The React face test cannot 'walk the tree on disk': it must keep import.meta.glob and not import node:fs; said so. Added that the owner ruling is what permits changing those test files, a git-diff-stat Done-when item, and a clearer item 3. Baseline numbers (64 / 37 / 43; 82/55, 6/3, 2/0, 59/2) re-measured and kept. 'needs the build container' replaced by the real need of tools/ci.sh app. Plain template fields; fenced commands; grep made -E."
+          }
+        ],
+        "unresolved": "1. m-runner: where the six workloop bullets and the \"Talks to\" paragraph go is not ruled. The drafter chose docs/work-loop.md (a \"Proposed modules\" list at the end of its section 6); Q4 only speaks of file header comments, and crates/core/src/workloop/ has no file. Kept, but it is a drafter choice.\n2. m-runner / m-guard: the map keeps one entry line for `crates/core/src/workloop/`, a path that is not on disk (status planned). The structural test from t-core must let a planned path be missing, and m-guard's every-file check must not trip on it; I could not confirm how t-core words that exemption.\n3. m-guard: the structural test files may carry a locked-test header (repo rule on locked tests). The issue says the owner ruling permits adding the guard there; if the pipeline needs a separate locked-test step, that is not ruled.\n4. m-guard label: kind:wiring kept from the draft; the change is tests only and none of the allowed kinds fits exactly (kind:pure-fn is the other candidate).\n5. m-shell overlaps the other-half section issues (m-sky, m-bug-waiting-reports, m-budget, m-core) for view files (Waiting.tsx, Reports.tsx, Budget.tsx, Settings.tsx, sky files). The issue handles it with a list-what-is-missing loop, so its real size depends on what those issues wrote; its Done-when count of 59 assumes none of them adds a second line or a directory line starting with `app/src/`.\n6. m-shell places Loadout.tsx under `### it`, after m-it has cut that section to one line; m-it's Done-when 1 holds only at the time of its own PR. Order is fixed by the block, but a reader of both may want it said.\n7. Map line 28 carries `(#405)` but is not an entry line (it does not start with a backticked path), so no issue here removes it and the guard does not catch it.\n8. m-it: the new one-line entry drops `never_on` (waits for U9) and \"the star's `feature:` label\"; I took the draft's claim that item doc comments in it.rs already say both and did not re-read each doc comment in this pass.\n9. Size estimates (about 250, 200, 130, 110, 100, 120 changed lines) are estimates; they cannot be checked against the repo before the work is done."
+      }
+    },
+    {
+      "group": "spec",
+      "result": {
+        "issues": [
+          {
+            "key": "s-musts",
+            "title": "SPEC: shorten the long Musts, take issue numbers out, mark FD-4's learned pick planned",
+            "labels": [
+              "feature:core",
+              "size:medium",
+              "kind:docs"
+            ],
+            "file": "docs/arch-review-2026-11-26/issues/04-01-s-musts.md",
+            "blocked_by_keys": [],
+            "corrections": "`sample_size` is at router.rs line 112, not 110 (`learned_pick` 127 confirmed). The code map place is section `### frontdoor` (heading line 234, statement on line 253), not an entry at line 260. CHANGELOG rulings are at lines 20-27, not 20-29. Removed the false claim that SKY-3 holds the only `#` literal: BAK-3 has `#N` and `owner/name#N`, the cli Musts have `<repo>#<n>`; Done-when now checks for no `#` followed by a digit. Resolved the draft's contradiction on what leaves a cell: every rule stays, only mechanism detail moves to the `//!` header of the implementing file (files named per Must, checked to exist with headers). Line 81 is a paragraph, not a table cell (985 chars); kept in scope as ruled. Gave exact FD-4 wording for SPEC and the map, plus the fallback if the frontdoor section is already one line per file. Dropped a misleading claim that CI checks the map through `sky/codemap.rs`. Stated plainly that header-comment files push the PR past six files (oversize). Removed the empty Blocked by line. Verified: 68 Musts, ten `#<digits>` refs, five table cells over 800."
+          },
+          {
+            "key": "s-dispositions",
+            "title": "SPEC: delete Review dispositions and fold what only it says; tell prior art and the platform plan once",
+            "labels": [
+              "feature:core",
+              "size:medium",
+              "kind:docs"
+            ],
+            "file": "docs/arch-review-2026-11-26/issues/04-02-s-dispositions.md",
+            "blocked_by_keys": [
+              "s-musts"
+            ],
+            "corrections": "Seven files are touched, so the issue now says it is reviewed as an oversize change. Code map Platforms section is lines 69-82, not 69-80. Gave exact text for every edit: the seven-line idea list (no invented descriptions for 4.4-4.8), the four folds with their target cells (GH-4, AUTO-2, FD-9, SKY-7), the `local-only` row without a count (the row says six, the ruling seven) and without the dead link, line 5 and U14's reference to the review's numbering. History rows 1.1 and 1.4 go to CHANGELOG dated the PR day, with no invented ruling date. Clause 2.10c was dropped from the strays: U12 and a Won't already say it; 2.6 and 2.10a are recorded in a CHANGELOG line. ROADMAP line 33 cites \"SPEC.md 2.10b\", which dies with the section: now cites SKY-2, SKY-3, SKY-5. The obsidian-wayfinder row moved to PEERS.md is corrected (NOTICE shows `app/src/sky/layers.ts` is ported code, the ROADMAP row said ideas only). `peer:` lines kept byte for byte. SPEC keeps the Platform plan heading because `platform.rs` cites it. Added PIPELINE.md line 6 and README line 11 with exact new text; README Credits left alone because the notice check reads it. Removed a person's name and a machine name from the issue text. Noted that SPEC line numbers after 316 shift."
+          },
+          {
+            "key": "s-roadmap-changelog",
+            "title": "ROADMAP: cut \"Current state\" to one sentence; CHANGELOG: add the lines missing since 2026-11-18",
+            "labels": [
+              "feature:core",
+              "size:easy",
+              "kind:docs"
+            ],
+            "file": "docs/arch-review-2026-11-26/issues/04-03-s-roadmap-changelog.md",
+            "blocked_by_keys": [
+              "s-dispositions"
+            ],
+            "corrections": "Title now says \"since 2026-11-18\" as ruled. CHANGELOG list cut from thirteen lines to nine: the four 2026-11-17 merges (#489, #490, #493, #497) fall before the ruled date and were removed. Each remaining line was checked against its commit; the #412 line was wrong (it samples by each scorer's `sample_rate` and writes one `ScoreRow` per sampled run and scorer). The text is now final, so the \"check each against the commit\" instruction, which left a decision to an Easy builder, is gone. Insertion point is named by text (above the \"Claude log folders (BUD-4)\" line), and the lines s-dispositions adds are accounted for. The replacement sentence no longer asserts that only stage 8 is left (not checkable from the repo); it points at the 1.0 milestone and CHANGELOG. Qwen brief now has runnable expectations and real code map text, and says no map entry covers the two documents."
+          },
+          {
+            "key": "s-glossary-runner",
+            "title": "GLOSSARY: add a Runner section defining Node, Unit, Spec and Run",
+            "labels": [
+              "feature:core",
+              "size:easy",
+              "kind:docs"
+            ],
+            "file": "docs/arch-review-2026-11-26/issues/04-04-s-glossary-runner.md",
+            "blocked_by_keys": [],
+            "corrections": "`report_unit` and `bug_unit` are arguments of `runner::bug_loop::run_end_to_end`, not functions. Node entry now matches `roadmap::graph::Node` (adds title and type; kind is optional). Run no longer says it ends at `parked` as a terminal state: it ends at a terminal state or a halt (the four `Halt` values). Unit says the same issue is a Star on the sky and that the engine's unit in the bug loop is a report or a bug. Avoid lists grounded in the code: \"workflow\" removed from Spec's Avoid because the code and SPEC call it a workflow spec. Entry text is given in full so an Easy builder decides nothing. Placement fixed (end of file, after Routing). Empty Blocked by line removed. Qwen snippet is the real code map layout text (lines 42-44). Proof part named (`tools/ci.sh lint`)."
+          }
+        ],
+        "unresolved": "1. Stray clauses. Findings 2.6 (\"the core applies the rule itself rather than capability.py's proposals, and keys chat rows on request kind, service and model only\") and 2.10a (\"the source changes only through a reviewed PR\") are stated by no Must and are not among the four ruled folds. s-dispositions keeps them in a CHANGELOG line; the owner may prefer them folded into FD-4 and AUTO-7. The 3.2 fold also carries \"the job writes one brief per issue and builders get only that\", which AUTO-2 does not say today; I folded it with the ruled brief-compiler clause.\n2. CHANGELOG gap before the ruled date. Merges of 2026-11-12 to 11-17 (#489, #490, #493, #497 and the runner nodes #395-#410, #413) have no CHANGELOG line, and the ROADMAP paragraph being deleted is their only prose record. The ruling says \"since 2026-11-18\", so they are left out.\n3. Open or closed state of #492, #503, #494, #302, #333, #376 could not be checked (no GitHub access), so the new \"Current state\" sentence points at the 1.0 milestone instead of listing what is open.\n4. \"Spec\" as a glossary term collides with SPEC.md calling itself \"this Spec\"; the entry says it is not SPEC.md, but the owner may want another word.\n5. Order against card 1. s-musts edits code map line 253 (frontdoor) and s-dispositions edits the map's Platforms section; the map-section issues rewrite the same lines and the order between the two cards is not ruled. Both issues say what to do if the section was already rewritten, but neither is blocked on the other.\n6. The sibling key for the FD-4 follow-up was taken from the file name 08-03-x-fd4-learned-pick.md as `x-fd4-learned-pick`; confirm the key before filing.\n7. Home of the platform plan. The ruling says \"told once\" without naming the home; I kept the draft's choice of docs/code-map.md (it holds the seam table), with SPEC and ROADMAP keeping a heading and a pointer.\n8. No ruling date for disposition 1.4 exists in the repo, so its CHANGELOG line is dated the PR day.\n9. PEERS.md \"Imported code\" table is empty although NOTICE lists ported code (BroCrew, obsidian-wayfinder, ccusage). Out of scope here; may want its own issue.\n10. Whether tools in the pipeline repo read PIPELINE.md line 6 or the heading under PEERS.md's `peer:` lines by exact text cannot be checked from this repo.\n11. #502 is logged as \"BUD-W\" in its commit and ROADMAP, which is not a Must id in SPEC.md; the CHANGELOG line cites BUD-4."
+      }
+    },
+    {
+      "group": "state",
+      "result": {
+        "issues": [
+          {
+            "key": "f-module",
+            "title": "state-file: add the state-file module and move LocalItems and RunnerItems onto it",
+            "labels": [
+              "feature:core",
+              "size:medium",
+              "kind:state"
+            ],
+            "file": "docs/arch-review-2026-11-26/issues/05-01-f-module.md",
+            "blocked_by_keys": [
+              "m-guard"
+            ],
+            "corrections": "All line ranges, function names, test names and the lib.rs position checked against main at 19e0c65 and found right. Fixed: the error-type claim (the draft said FileLock::take builds `<path>: <e>`; only write_whole and the open failure do, a busy lock has its own wording); added the `use crate::lock::FileLock;` import at runner/waiting.rs:16 to Where and to the store section (it becomes unused and clippy -D warnings would fail); Done-when 3 made a plain grep check (no `to_string_pretty`, `write_whole`, `FileLock` in the two files; verified those are the only uses today); stated that `<path>` in save errors is always the State file's path and that step 1 of change reports with it; noted the code map section name may be renamed by the map revision; dropped `config file` from the invented Avoid list (the settings file is one) and marked the definition as the ruling's wording; said the `null` edge touches no store in this issue."
+          },
+          {
+            "key": "f-held",
+            "title": "state-file: move HeldRecords onto the state-file module",
+            "labels": [
+              "feature:core",
+              "size:easy",
+              "kind:state"
+            ],
+            "file": "docs/arch-review-2026-11-26/issues/05-02-f-held.md",
+            "blocked_by_keys": [
+              "f-module"
+            ],
+            "corrections": "Line ranges (481-489, 499-524, 501-503, 513-516) and all five test names verified. Fixed the code map pointer: confirm.rs has no entry of its own, it is a bullet under `### core-rules` (map line 104). Done-when 3 scoped to the HeldRecords block and extended to `create_dir_all`. Brief now also forbids editing the in-file `mod tests` (it builds HeldRecords with the `wait` field and calls `load`)."
+          },
+          {
+            "key": "f-marks",
+            "title": "state-file: move Marks onto the state-file module, keeping delete-when-empty",
+            "labels": [
+              "feature:core",
+              "size:easy",
+              "kind:state"
+            ],
+            "file": "docs/arch-review-2026-11-26/issues/05-03-f-marks.md",
+            "blocked_by_keys": [
+              "f-module"
+            ],
+            "corrections": "Line ranges (1522-1530, 1537-1552, 1556-1569), MARKS_LOCK_WAIT (10 s), FileLock::take with no holder text, and all five test names verified; the closure in the brief type-checks against Mark (Clone, PartialEq) and matches today's order. Fixed: `nothing else called it` reworded (only Marks::change calls save); added that the `lock`/`FileLock` imports stay because rename_retrying and swap_lock still use them; brief now states load and the deletion of save explicitly and forbids editing the in-file tests."
+          },
+          {
+            "key": "f-manifest",
+            "title": "state-file: read and write the backup manifest through the state-file module",
+            "labels": [
+              "feature:core",
+              "size:easy",
+              "kind:state"
+            ],
+            "file": "docs/arch-review-2026-11-26/issues/05-04-f-manifest.md",
+            "blocked_by_keys": [
+              "f-module"
+            ],
+            "corrections": "Lines 884-885, 964-974, write_json's manifest at line 85 and all test names verified. Corrected the possible-bug text: the half-written file lands in the staging folder `.<name>.new-<run>`, which is renamed into place only after build returns, so no case is known where it reaches the live backup (the draft implied harm without that). Added to changes on purpose: `null` is a Parse error today, and a serialize failure gains the path. Added `io_error` to the untouched list and noted write_json's manifest keeps no trailing newline."
+          },
+          {
+            "key": "f-settings",
+            "title": "state-file: read and write the settings file through the state-file module",
+            "labels": [
+              "feature:core",
+              "size:easy",
+              "kind:state"
+            ],
+            "file": "docs/arch-review-2026-11-26/issues/05-05-f-settings.md",
+            "blocked_by_keys": [
+              "f-module"
+            ],
+            "corrections": "Line ranges (49-56, 78-86, 93-108) and test names verified; checked the locked tests still hold with the new error path (save_under_a_file, a_failed_rename... starts_with the file path). Added a missed change on purpose: the serialize error gains the path (today `Parse(\"{e}\")`). Named where the Tauri face calls load/save (app/src-tauri/src/commands.rs). Brief now tells the builder to reword the two doc comments that name lock::write_whole."
+          },
+          {
+            "key": "f-runner-state",
+            "title": "state-file: move the runner's StateStore onto the state-file module",
+            "labels": [
+              "feature:core",
+              "size:easy",
+              "kind:state"
+            ],
+            "file": "docs/arch-review-2026-11-26/issues/05-06-f-runner-state.md",
+            "blocked_by_keys": [
+              "f-module"
+            ],
+            "corrections": "Line ranges (101-111, 113-119, import at 9), the code map line (map line 311, names lock::write_whole) and test files verified. Added a missed change on purpose: the folder-creation error now starts with the file's path, not the folder's. Said the `null` file is a Parse error today. Brief made exact: `RunState::new(\"s\", \"u\", \"start\")`, test module at the end of the file (it has none today)."
+          },
+          {
+            "key": "f-snapshot",
+            "title": "state-file: move SnapshotStore onto the state-file module",
+            "labels": [
+              "feature:core",
+              "size:easy",
+              "kind:state"
+            ],
+            "file": "docs/arch-review-2026-11-26/issues/05-07-f-snapshot.md",
+            "blocked_by_keys": [
+              "f-module"
+            ],
+            "corrections": "Line ranges (98-105, 173-182), the code map line (map line 125, quoted in full) and all test names verified. Removed the hedge in the brief (`if it has no Default`): RepoSnapshot derives Default and PartialEq. Added a missed change on purpose: the serialize error gains the path (today `Parse(e.to_string())`). Kept the example repo as `owner/demo`; the locked test file's own repo names (an account name) are not quoted."
+          },
+          {
+            "key": "f-autopilot",
+            "title": "state-file: move AutopilotState onto the state-file module",
+            "labels": [
+              "feature:core",
+              "size:easy",
+              "kind:state"
+            ],
+            "file": "docs/arch-review-2026-11-26/issues/05-08-f-autopilot.md",
+            "blocked_by_keys": [
+              "f-module"
+            ],
+            "corrections": "Line ranges (50-59, 64-71), the five caller lines (passes.rs 478, 493, 553, 570; run.rs 820) and test files verified; passes.rs has no `mod tests` and no code map line of its own today. Added: the second `to_string_pretty` at passes.rs:911 is not this store and stays; the serialize error gains the path; a conditional code map item (as in the two sibling issues) for the line the map revision adds, with `tools/ci.sh lint` and size wording `1 or 2 files` to match; named the exact test in auto_after_poll_review.rs; brief rewords the save doc comment that names lock::write_whole."
+          }
+        ],
+        "unresolved": "1. GLOSSARY `_Avoid_` line for \"State file\": the owner ruling gives only the definition. The Avoid words (`data file, database`) are the drafter's; I removed `config file` because the settings file is one. The owner should confirm or replace the Avoid list. Placement at the end of `## Machines` is also the drafter's choice, not ruled.\n2. The `null` edge: stores whose missing-file answer is `None` use `T = Option<...>`, so a file holding only `null` reads as \"no file\" instead of a parse error. For StateStore this weakens its stated rule \"a run is never restarted from a guess\" (runner/state.rs:99-100), and for SnapshotStore `load_each` skips such a file instead of naming it. Switchboard never writes `null`, and the three-operation interface was ruled, so the issues state it as a change on purpose; the owner has not ruled on this edge.\n3. The ruled GLOSSARY definition says \"rewrites whole under a lock\", but five of the nine stores (Settings, StateStore, SnapshotStore, AutopilotState, manifest) take no lock by ruling Q23. I kept the ruled wording verbatim; the lock-gaps follow-up may want to reconcile it.\n4. `{{#m-guard}}` is a key from another group; I could not check that it exists (audit.json holds no keys). Likewise the follow-up issue \"whether the unlocked stores need a lock\" is referred to in prose because I do not know its key.\n5. Code map section names (`### core-lock`, `### core-rules`, `### backup`, `### core-settings`, `### runner`, `### github-snapshot`, `### autopilot`) and the pasted snippets are as on main at 19e0c65. These issues land after the map revision, which may rename sections and reword lines; each issue says so, but the snippets should be refreshed at filing if the revision has merged.\n6. f-manifest: I confirmed the staging folder is renamed into place only after `build` returns, so I found no path by which the half-written manifest reaches the live backup; I did not trace every recovery path (`clear_stale`, `settle`) line by line.\n7. Sizes are estimates; nothing was built or run (read-only review), so the listed tests staying green is reasoned from the code, not proven."
+      }
+    },
+    {
+      "group": "writes",
+      "result": {
+        "issues": [
+          {
+            "key": "w-core",
+            "title": "core-guarded: one guarded-write module in core (`crates/core/src/guarded.rs`)",
+            "labels": [
+              "feature:core",
+              "size:hard",
+              "kind:wiring"
+            ],
+            "file": "docs/arch-review-2026-11-26/issues/06-01-w-core.md",
+            "blocked_by_keys": [
+              "f-module"
+            ],
+            "corrections": "Fixed the sequence: a merge is never resolved with full_repo (pinned by cli_rules.rs merge_never_asks_whether_the_repo_is_known); only archive/restore resolve first, so the core is two calls (resolve, then ask). Added what the draft missed: drop takes an unknown owner/name as written; a filing failure is carried beside the guard text (the CLI prints it and still refuses); trait defaults for drop_requests and confirm_restore_new; DATA_FOLDER/CONFIG_FOLDER names for MissingPath so no face matches text; unknown repo is an outcome (Ok(None)), no new CoreError variant. Corrected CoreError range to error.rs 135-149; all cited lines re-checked (rules.rs guard 74-99, waiting.rs 185/313, confirm.rs 96/400/579, snapshot.rs 121/155, lib.rs 11-38, cli.rs and mcp.rs ranges). Interface written out in full so nothing settled is left to the builder; size restated (about 480 lines, 4 files, oversize by lines); code-map entry worded to fit whatever entry form the map has by then."
+          },
+          {
+            "key": "w-cli",
+            "title": "core-guarded: move the CLI's guarded writes onto `core::guarded` and delete `trait Writes`",
+            "labels": [
+              "feature:core",
+              "size:medium",
+              "kind:wiring"
+            ],
+            "file": "docs/arch-review-2026-11-26/issues/06-02-w-cli.md",
+            "blocked_by_keys": [
+              "w-core"
+            ],
+            "corrections": "Added: the `merge {repo}#{pr}: ` prefix belongs in the CliWrites adapter (the cli_rules.rs fake returns its refusal whole); real_merge keeps its String signature for MCP; CliWrites keeps its five fields because locked cli_writes.rs (lines 133, 265, 271, 277, 323) and cli_drop.rs (62) build it field by field; every pinned CLI line and prefix listed (`switchboard: {command}: `, `waiting: `, `drop: `, `confirm: `, the SWITCHBOARD_DATA and SWITCHBOARD_CONFIG wordings); terminal_safe stays in the CLI; the read uses of resolve_repo at cli.rs 2240 and 2329; cli_confirm.rs helper `run` at line 67 and both import lines (cli_rules.rs:21, cli_confirm.rs:19) also change; cli_edges.rs resolve_repo_names_both_matches (473-486, not locked) is deleted since its cases move to the core test. Size restated as about 350 lines in 5 files, said plainly as slightly oversize. Done-when items made checkable (grep, unchanged files, unchanged asserted strings)."
+          },
+          {
+            "key": "w-mcp",
+            "title": "core-guarded: move MCP's guarded writes onto `core::guarded`, fix the drift, shrink `trait WriteCore`",
+            "labels": [
+              "feature:core",
+              "size:hard",
+              "kind:wiring"
+            ],
+            "file": "docs/arch-review-2026-11-26/issues/06-03-w-mcp.md",
+            "blocked_by_keys": [
+              "w-cli"
+            ],
+            "corrections": "Narrowed the drift list: CoreWrites::request (mcp.rs 188-193) already uses guarded_item + add_new; only CoreWrites::waiting (136-155), reached by guarded_merge line 758, is hand-built. Test range corrected to 387-423 (fn at 388). Since rules::guard never answers ToWaiting for a merge, no tool call can reach that path, so the rewritten locked test calls GuardedWrites::file on CoreWrites directly; said so. Fake count verified: 8 impls in 7 files (face_parity_mcp.rs is also locked, flagged). Settled the shape: WriteCore keeps pool_edit, set_pool_cap, budget_refresh, front_door plus a new `now` (MCP's write_call has no clock), with GuardedWrites as supertrait so serve signatures stay; main.rs 257-265 unchanged. Added the MCP prefixes kept (`{tool}: `, `waiting: `, `drop_request: `), removal of the text match at mcp.rs:276, a new test file proving the snapshot drift fix, and the size restated (about 420 lines, 11 files, oversize)."
+          }
+        ],
+        "unresolved": "1. Error code for an unset app data or config folder on a guarded write: today both faces answer `refused`; following Q14 literally (code from `ErrorBody::from(&CoreError)`), `CoreError::MissingPath` gives `setting_missing`. No test pins either for these commands (cli_writes.rs:330 pins only text and exit 1). The bodies take the Q14 reading and ask the PR to list the change; the owner may prefer to keep `refused`.\n2. Unknown repo is modelled as `Ok(None)` from `guarded::resolve`, rendered by each face as `not_found`, rather than a new `CoreError` variant (a new variant could break exhaustive matches elsewhere; not measured). Q14 could be read as wanting a variant.\n3. MCP has no clock in `write_call`, and the locked cli_writes.rs freezes `CliWrites`' fields, so the time stamp is passed into `guarded::ask` and `WriteCore` gains `fn now()` with a default of 0 for test fakes. This is my design choice, not a ruling.\n4. Trait-default refusal text changes from `drop: no Waiting on you list here` / `confirm: ...` / `drop_request: ...` to an unprefixed `no Waiting on you list here` in core; no test pins these strings (grep found none).\n5. Size figures (480 / 350 / 420 changed lines) are estimates from the code read, not measured diffs. w-cli is labelled size:medium as drafted although it is slightly over the 300-line aim.\n6. Why `w-core` is blocked by `f-module` is not stated in decisions.md beyond the Q9 order (state-file module before guarded writes); kept as instructed.\n7. The code map sections `### core-rules`, `### cli`, `### mcp` exist today at lines 101, 362, 375; the map revision issues (Q29) may rename or reshape them before these land, so the bodies name the section and ask for the entry form in use at that time.\n8. GLOSSARY.md was only skimmed for its term list (Waiting on you is used throughout the repo; \"Error code\" is defined at line 65); I did not read every definition."
+      }
+    },
+    {
+      "group": "reads",
+      "result": {
+        "issues": [
+          {
+            "key": "r-waiting",
+            "title": "read-waiting: one core read model for Waiting on you, with warnings, for the window, the CLI and MCP",
+            "labels": [
+              "feature:core",
+              "size:medium",
+              "kind:wiring"
+            ],
+            "file": "docs/arch-review-2026-11-26/issues/07-01-r-waiting.md",
+            "blocked_by_keys": [
+              "w-mcp"
+            ],
+            "corrections": "Cited lines and names checked and kept. Added what the draft missed: the locked crates/core/tests/waiting_load.rs (270-273) pins `switchboard_core::waiting::load(` in commands.rs, so moving the Tauri command breaks it; the issue now says that one assertion changes under the owner ruling (see unresolved). Fixed the Warning shape: `reason` is the snapshot error whole (it already names the file) so the CLI stderr line stays byte for byte. Read function named `load`. WarningLine must render no element when empty (locked App.wired.test.tsx asserts no `status` role). Named the ReadCore impl sites (main.rs 70, autopilot.rs 455), gave exact signatures, named the new test files, file count corrected to 15, added a note that line numbers shift after the guarded-writes issues."
+          },
+          {
+            "key": "r-sky",
+            "title": "read-sky: one core read model for the Sky, with warnings, for the window, the CLI and MCP",
+            "labels": [
+              "feature:core",
+              "size:medium",
+              "kind:wiring"
+            ],
+            "file": "docs/arch-review-2026-11-26/issues/07-02-r-sky.md",
+            "blocked_by_keys": [
+              "w-mcp",
+              "r-waiting"
+            ],
+            "corrections": "Removed a false Done-when: a non-UTF-8 ledger gives no error since #349 (read_ledger is lossy), and an unreadable ledger cannot be reached through the CLI (ledger_files lists regular files only), so the CLI test was dropped and the core test passes a folder path as a ledger file. Settled what the draft left open: the read model takes the ledger file list; `model` is None when no snapshot was read (CLI/MCP refuse NO_SNAPSHOT, the Tauri command fails with `GitHub: no snapshot yet` as the locked tests pin); `sky_at` returns the answer and the unlocked sky_ledger_tests.rs is edited where it reads the second value (draft claimed it would pass unedited); the settings-read failure becomes a warning the Tauri face adds. Corrected the ledger rule text (CLI: SWITCHBOARD_STATE then FLEET_STATE_DIR; window: settings and FLEET_STATE_DIR). Added sky/model.rs to Where, a ledger stderr wording distinct from the snapshot one, `a_missing_snapshot_exits_1_with_the_message` to the pinned tests, size to about 330 lines in 12 files."
+          },
+          {
+            "key": "r-constellation",
+            "title": "read-constellation: one core read model for a Constellation, with warnings, for MCP",
+            "labels": [
+              "feature:core",
+              "size:easy",
+              "kind:wiring"
+            ],
+            "file": "docs/arch-review-2026-11-26/issues/07-03-r-constellation.md",
+            "blocked_by_keys": [
+              "w-mcp",
+              "r-waiting",
+              "r-sky"
+            ],
+            "corrections": "`ConstellationView` is in app/src/sky/ConstellationView.tsx, not in Sky.tsx. Removed the builder's choice about adding a `CoreError::NotFound` variant (CoreError has none; `guarded::resolve_repo` from {{#w-core}} returns Ok(None) for an unknown repo): the answer carries `constellation: Option` and `no_snapshot`, and the face keeps the NotFound code and wording. Named the core repo resolution exactly. Qwen brief: snippet put in a fenced block and pasted from the real map lines (the draft had shortened them without saying so); test count made four; added the in-file main.rs test and the no-snapshot case."
+          },
+          {
+            "key": "r-star",
+            "title": "read-star: one core read model for a Star's facts, with warnings, for the CLI and MCP",
+            "labels": [
+              "feature:core",
+              "size:medium",
+              "kind:wiring"
+            ],
+            "file": "docs/arch-review-2026-11-26/issues/07-04-r-star.md",
+            "blocked_by_keys": [
+              "w-mcp",
+              "r-waiting",
+              "r-sky"
+            ],
+            "corrections": "`StarPanel` is in app/src/sky/StarPanel.tsx, not in Sky.tsx. `job_text` need not become public (`sky::jobs::in_flight` already returns the text), so jobs.rs left Where and the file count is 6. Removed the optional `CoreError::NotFound` variant and the 'second to land keeps the first's' clause: unknown repo or issue is `star: None`, no snapshot is `no_snapshot: true`. 'star_ tests (lines 216-345)' was not a block: now the six `star_` tests by name prefix plus `a_missing_snapshot_exits_1_with_the_message`; added `star_marks_a_pass_on_an_older_commit_than_the_head`. Said plainly that a ledger read failure stops failing the CLI command and becomes a warning. Job type stated as `Option<Option<String>>`."
+          },
+          {
+            "key": "r-reports",
+            "title": "read-reports: one core read model for Reports, so the CLI and MCP also say which chat threads were left out",
+            "labels": [
+              "feature:core",
+              "size:medium",
+              "kind:wiring"
+            ],
+            "file": "docs/arch-review-2026-11-26/issues/07-05-r-reports.md",
+            "blocked_by_keys": [
+              "w-mcp",
+              "r-waiting"
+            ],
+            "corrections": "The draft's 'SWITCHBOARD_STATE rule' is wrong for reports: the CLI reads FLEET_STATE_DIR (`reports::FLEET_STATE_DIR_ENV`). The draft said `load_reports_tests` passes unedited while `load_reports` changes its return type; it cannot, so the issue says the unlocked in-file test is edited only to read `.reports`. Resolved a contradiction (read model returning `Warning` while the window still returns `ThreadWarning`): `ReportsRead` keeps the thread warnings and has `warnings()`. Added the locked source pin in reports_load.rs (the command body must keep `reports::load(`, `FLEET_STATE_DIR_ENV`, `record_fleet_error(`, `filter: Option<Filter>`, `FaceError::new(\"reports\"`), which the name `read::reports::load` satisfies. Named test files; 9 files."
+          },
+          {
+            "key": "r-budget",
+            "title": "read-budget: one core read model for the Budget view, with warnings, for the window, the CLI and MCP",
+            "labels": [
+              "feature:core",
+              "size:medium",
+              "kind:wiring"
+            ],
+            "file": "docs/arch-review-2026-11-26/issues/07-06-r-budget.md",
+            "blocked_by_keys": [
+              "w-mcp",
+              "r-waiting"
+            ],
+            "corrections": "Locked pins corrected: fd_rating_log.rs (438) pins `pub fn budget_rows(` in commands.rs; reports_load.rs pins the handler entries in app/src-tauri/src/main.rs (test at 445), not commands.rs. `unwrapBudget` is lines 22-26, `BudgetData` line 20. Stated that `--json` and the MCP item print the snapshot only, so no `warnings` key appears. Done-when 1 made checkable against the real call sites (the draft's 'main.rs no longer calls cli::budget_rows' fought its own step 2). Added the unpinned-in-draft tests (headless_cli `budget_refresh_`, BudgetClaude.test.tsx, mcp_read.rs), the `budget-rows` event payload (rows alone), and that the MCP write tool `budget_refresh` is out of scope."
+          },
+          {
+            "key": "r-errors",
+            "title": "read-errors: one core read model for Fleet errors and open IT tickets, with warnings, for the window, the CLI and MCP",
+            "labels": [
+              "feature:core",
+              "size:medium",
+              "kind:wiring"
+            ],
+            "file": "docs/arch-review-2026-11-26/issues/07-07-r-errors.md",
+            "blocked_by_keys": [
+              "w-mcp",
+              "r-waiting"
+            ],
+            "corrections": "Dropped the draft's new Tauri command `fleet_error_warnings`: it would need a row in crates/core/src/faces.rs (the registry tests check the handler list) and the window would then not read through the read model. The `fleet_errors` command now answers `{errors, warnings}` and `core.ts` accepts that or a bare list, which keeps the locked ErrorBanner and App.wired tests green; app/src-tauri/src/main.rs left Where. `errors_command` range given (1834-1843), stderr pin lines 106-109, `fleetErrors` at core.ts line 25. Skipped-lines warning names the file by path (`fleet_errors::path`). Added the fallback cases, the App.wired/App.held tests and a no-snapshot case."
+          }
+        ],
+        "unresolved": "1. Locked test: crates/core/tests/waiting_load.rs (270-273) requires commands.rs to contain `switchboard_core::waiting::load(`. Q27 (all three faces use the read model) cannot hold for the Tauri `waiting` command without changing that one assertion. r-waiting says it changes under the owner ruling (2026-11-26), by analogy with Q25; decisions.md does not name this test, so the owner should confirm, or someone other than the builder must make the edit.\n2. Sky and Star in the CLI and MCP: a fleet ledger that does not read fails the command today. The issues make it a warning and show the Sky or Star without the job (the window's rule). Q27 implies one rule but no ruling picks which; the drafter's choice is kept.\n3. How MCP 'carries warnings in the answer' is not ruled. Kept the drafter's design: a second text content item `{\"warnings\":[{file,reason}]}`, present only when there are warnings, so the first item stays what `--json` prints. Whether crates/cli/tests/mcp_read.rs or the locked face_parity_mcp.rs assert the content-item count for a case with a corrupt snapshot was not checked line by line.\n4. Warning shape `{file, reason}` and the window wording `Left out: <file>` (reason in the title) are not ruled; Q32 only says one quiet line naming the file. Reports keeps its own existing wording and `role=\"alert\"` block; whether Reports should move to the shared WarningLine is not ruled and was left alone.\n5. The CLI stderr wording for the new warnings (`; jobs in flight not shown`, `; job not shown`, `switchboard reports: <file>: <reason>; left out`) is new text chosen here, not ruled.\n6. The MCP write tool `budget_refresh` (mcp.rs `WriteCore::budget_refresh`, rows only via `budget::refresh`) stays outside the Budget read model; whether it should use it is not ruled.\n7. All line numbers are as at main 19e0c65. The guarded-writes issues ({{#w-core}}, {{#w-cli}}, {{#w-mcp}}) land first and move lines in cli.rs, main.rs and mcp.rs; each issue says to find items by name. The read issues rely on `switchboard_core::guarded::resolve_repo` as drafted in the w-core issue (returns Ok(None) for an unknown repo, `CoreError::Refused` for two owners); if that interface changes at filing, r-constellation and r-star need the same change.\n8. The code map is rewritten by earlier issues (Q29), so the pasted snippet in r-constellation's Qwen brief and the section names may be stale when it is built; the brief says so.\n9. Line and file estimates are estimates; six of the seven exceed the 6-file aim and say so. r-sky (about 330 lines) and r-waiting (about 400) also exceed the 300-line aim.\n10. Not verified by running anything (read-only): that `#[serde(flatten)]` on `SkyModel` and `BudgetSnapshot` keeps every existing key where the views read it, and that `the_views_show_the_good_repo_and_name_the_bad_file` covers no MCP reply shape that the second content item would change."
+      }
+    },
+    {
+      "group": "follow",
+      "result": {
+        "issues": [
+          {
+            "key": "x-line-files",
+            "title": "core: decide whether the line-file stores share one module",
+            "labels": [
+              "feature:core",
+              "size:medium",
+              "kind:state",
+              "after-1.0"
+            ],
+            "file": "docs/arch-review-2026-11-26/issues/08-01-x-line-files.md",
+            "blocked_by_keys": [
+              "f-module"
+            ],
+            "corrections": "Checked against main at 19e0c65. Fixed: the thread store's writers are frontdoor/answer.rs, rating_log.rs and implicit_log.rs (the draft named ask); line ranges corrected (budget.rs append_line 452-474, LedgerUndo 396-418, session_log_paths 684-717, claude_pool line loop 657-673; fleet_errors.rs append 107-122); stated that the pool edit ledger holds its lock across the whole save (save_edit_then, budget.rs:358) and is never read back; stated that the rating log and implicit log are not files of their own and the job log is only read, so the ruling's five logs are really four written stores plus two read-only kinds. The draft's 'append under the lock' could not serve ThreadStore append_if/upsert/change, which read and write under one hold, so the body now proposes that the module's operations take no lock (rule a), a single read rule (rule b: text lines with 1-based numbers; the fleet error record keeps its byte read) and the GLOSSARY word (rule c), all put to the owner rather than left to the builder. Size recomputed from real counts: about 190 lines in 5 files for the module plus the thread store; the other three stores become follow-on issues so the 6-file aim holds. Done-when made checkable (exact operations, error texts unchanged, named test cases, existing tests unchanged). Sibling reference written as {{#f-module}}; template fields in plain form as in the sibling issue files; tools/ci.sh rust and lint named as proof; issue #503 mentioned as not blocking. No private detail or forbidden architecture word in the body."
+          },
+          {
+            "key": "x-lock-gaps",
+            "title": "core: decide whether the five unlocked state files need the file lock",
+            "labels": [
+              "feature:core",
+              "size:medium",
+              "kind:state",
+              "after-1.0"
+            ],
+            "file": "docs/arch-review-2026-11-26/issues/08-02-x-lock-gaps.md",
+            "blocked_by_keys": [
+              "f-module",
+              "f-manifest",
+              "f-settings",
+              "f-runner-state",
+              "f-snapshot",
+              "f-autopilot"
+            ],
+            "corrections": "Checked against main at 19e0c65. Fixed: write_json is backup.rs:72-104 (draft said 85-103); swap_lock is defined at backup.rs:1126, taken at :798, its 30 s wait at :1122; the draft's 'all five write through write_whole except the manifest' reworded to what the code does (four through lock::write_whole, the manifest in a staging folder swapped in whole, plus the plain std::fs::write at :884-885); added the settings_save command (commands.rs:187, save_settings :170) and the CLI's read-only uses; added the 9 StateStore save sites and that nothing outside tests calls StateStore::new; added the four SnapshotStore save sites with their read lines (poll.rs:295-309, :370; cli.rs:773-779, :790-792), refresh_all :345, after_write :375, POLL_SECONDS at poll.rs:10, load_each, and autopilot/run.rs with the github-poll code map section, all missing from the draft; added that AutopilotState saves run only under the passes lock (run.rs:270, :296). Added the point the draft missed: SnapshotStore::save must hold the lock too or the lost update remains. Settled in the body rather than left to the builder: the 10 s wait (as the two existing constants) and what a lock timeout does (that repo's error, as a failed save today). SPEC.md:81 is not revised here unless the ruling comment says so, since decisions.md gives that paragraph to the SPEC issue. Done-when made checkable (one named new test, existing tests unchanged, code map sentence under 400 bytes with no #number). Size recomputed: about 160 lines in 5 files. Sibling references written as {{#key}}. No private detail or forbidden architecture word in the body."
+          },
+          {
+            "key": "x-fd4-learned-pick",
+            "title": "FD-4: wire the learned pick into routing, or rule it out",
+            "labels": [
+              "feature:core",
+              "size:medium",
+              "kind:wiring",
+              "needs-ian"
+            ],
+            "file": "docs/arch-review-2026-11-26/issues/08-03-x-fd4-learned-pick.md",
+            "blocked_by_keys": [],
+            "corrections": "Checked against main at 19e0c65. Fixed: the draft treated chat.rs:470 and chat.rs:607 as live routing sites, but chat::route_message (chat.rs:457) is called only by tests and takes no data folder, and chat::route_in_thread (chat.rs:590) has no caller; every face (window commands.rs:834, CLI cli_frontdoor.rs:241, MCP mcp_frontdoor.rs:137) reaches ask::ask_on (ask.rs:61), whose router closure at ask.rs:69-71 is the one place to wire. The draft's count of route( test calls ('12 lines across 4 files') was wrong: router::route is called 10 times in 3 test files (fd_route.rs 4, fd_chat_route.rs 3, fd_labeller_small.rs 3; none in fd_answer.rs); the 11 pick_for_kind( lines in fd_pick_for_kind.rs were right. Confirmed and kept: router.rs line ranges (pick_for_kind 64-99, sample_size 112-114, learned_pick 127-180, route 322-348, call sites 259 and 339), the quoted FD-4 Must at SPEC.md:158, fd_learned_pick.rs 17 tests in 241 lines, the other test call lines. Added facts the draft lacked: where the rows come from (reports::thread_rows, joblog::ledger_files/read_ledger/read_all, reports::state_dir and its git worktree list when FLEET_STATE_DIR is unset), the per-ask cost, that a Sticky chat asks the router only when new or moved, and every text that says FD-4 works today (code map :253, :235, :99; SPEC FD-3, FD-9, U11; four doc comments). Rules the builder would otherwise have had to decide are put to the owner as (a) braked Pool, (b) model must still match the abilities index, (c) Claude subscription is a handoff, (d) unreadable ledger does not fail the ask. Done-when split into checkable branches: wired (two new functions with exact signatures, pick_for_kind/route/Seams unchanged, named test cases in a new fd_learned_route.rs, SPEC row and map say present in the same PR) and cut (exact deletions and a grep that must find nothing). Size from real counts: about 260 lines in 5 files if wired; about 380 lines in 11 files, mostly deletions, if cut, stated as reviewed oversize. Labels per the ruling: needs-ian, no after-1.0. Draft wording 'service' for a Pool replaced by Pool. No private detail in the body."
+          }
+        ],
+        "unresolved": "1. FD-4 issue: the keys of the sibling SPEC issue and the code-map frontdoor issue that mark FD-4 `planned` were not available to me, so the body names them in words, not as {{#key}}; add the references at filing if wanted. If those issues land first, the code map line numbers quoted (docs/code-map.md:253, :235, :99) and section names will have moved; every body says to find by name.\n2. x-line-files and x-lock-gaps both wait on an owner ruling, but decisions.md gives `needs-ian` only to the FD-4 issue. I kept the labels as ruled (after-1.0, no needs-ian); the owner may want needs-ian on those two as well.\n3. Rules I added as proposals for the owner are not ruled and are marked 'Proposed' in the bodies: line files (a) the store takes the lock, (b) one read rule, (c) when GLOSSARY gains 'Line file'; lock gaps: the 10 s wait, save under the same lock, StateStore locked only when the runner gets a face, and whether this issue's PR may revise the snapshot clause of SPEC.md:81 (decisions.md gives that paragraph to the SPEC issue); FD-4 rules (a) to (d).\n4. FD-4 if cut: decisions.md says Musts keep their ids with no renumber; I wrote that the FD-4 row leaves SPEC and its id is not reused. Whether a cut Must should instead stay as a struck row is not ruled.\n5. Not run (repo is read-only for me, no build): whether loading rows in ask_on changes the route in any existing test (the body tells the builder to stop and report if one cannot pass unchanged), and all changed-line estimates are from reading the code, not from a trial change.\n6. kind labels (kind:state for the two store issues, kind:wiring for FD-4) are my reading; decisions.md does not assign kinds to the follow-ups."
+      }
+    }
+  ]
+}
